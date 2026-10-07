@@ -11,6 +11,8 @@ export default function Applying({ mode, pairName, navigate }: { mode: 'apply' |
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [speed, setSpeed] = useState(0); // bytes per second, smoothed
+  const [busy, setBusy] = useState(false);
+  const [commandError, setCommandError] = useState<string | null>(null);
   const last = useRef<{ at: number; bytes: number } | null>(null);
 
   useEffect(() => {
@@ -50,6 +52,19 @@ export default function Applying({ mode, pairName, navigate }: { mode: 'apply' |
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const command = async (run: () => Promise<unknown>, onOk?: () => void) => {
+    setBusy(true);
+    setCommandError(null);
+    try {
+      await run();
+      onOk?.();
+    } catch (e) {
+      setCommandError(errorText(tx, lang, e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const pct = p && p.bytes_total > 0 ? (p.bytes_done / p.bytes_total) * 100 : p && p.changes_total > 0 ? (p.changes_done / p.changes_total) * 100 : 0;
   const eta = p && speed > 0 ? (p.bytes_total - p.bytes_done) / speed : NaN;
 
@@ -68,7 +83,7 @@ export default function Applying({ mode, pairName, navigate }: { mode: 'apply' |
         </>
       )}
       {paused && <p className="warn">{t('apply.paused')}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      {(error ?? commandError) && <p className="error" role="alert">{error ?? commandError}</p>}
       <div className="bar">
         <span />
         {error ? (
@@ -76,11 +91,11 @@ export default function Applying({ mode, pairName, navigate }: { mode: 'apply' |
         ) : (
           <div className="row">
             {paused ? (
-              <button onClick={() => { void api.resume(); setPaused(false); }}>{t('apply.resume')}</button>
+              <button disabled={busy} onClick={() => void command(() => api.resume(), () => setPaused(false))}>{t('apply.resume')}</button>
             ) : (
-              <button onClick={() => { void api.pause(); setPaused(true); }}>{t('apply.pause')}</button>
+              <button disabled={busy} onClick={() => void command(() => api.pause(), () => setPaused(true))}>{t('apply.pause')}</button>
             )}
-            <button onClick={() => void api.cancel()}>{t('apply.cancel')}</button>
+            <button disabled={busy} onClick={() => void command(() => api.cancel())}>{t('apply.cancel')}</button>
           </div>
         )}
       </div>

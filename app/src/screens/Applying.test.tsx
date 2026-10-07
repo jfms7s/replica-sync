@@ -16,6 +16,7 @@ describe('Applying', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     for (const k of Object.keys(handlers)) delete handlers[k];
+    vi.mocked(onEvent).mockImplementation((async (name: string, cb: (p: unknown) => void) => { handlers[name] = cb; return () => {}; }) as never);
   });
 
   it('starts after listening, shows progress, pauses, then shows the result', async () => {
@@ -54,5 +55,23 @@ describe('Applying', () => {
     expect(resolvers.length).toBe(1);
     expect(api.apply).not.toHaveBeenCalled();
     expect(api.retryFailed).not.toHaveBeenCalled();
+  });
+
+  it('pause_failure_keeps_the_button_and_shows_the_error', async () => {
+    vi.mocked(api.pause).mockRejectedValueOnce({ code: 'drive.notConnected', params: { label: 'USB' } });
+    render(<I18nProvider lang="en"><Applying mode="apply" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.apply).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('USB is not connected.');
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+  });
+
+  it('cancel_failure_is_shown', async () => {
+    vi.mocked(api.cancel).mockRejectedValueOnce({ code: 'drive.notConnected', params: { label: 'USB' } });
+    render(<I18nProvider lang="en"><Applying mode="apply" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.apply).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('USB is not connected.');
   });
 });
