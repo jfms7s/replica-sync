@@ -1,4 +1,8 @@
 //! Linux drive identity: /proc/self/mountinfo + /dev/disk/by-uuid.
+//!
+//! A mount whose root within its filesystem is not `/` (a btrfs subvolume or a
+//! bind mount) gets the id `uuid:<uuid>:<root>`, so it is told apart from the
+//! whole filesystem.
 
 use super::{VolumeInfo, Volumes};
 use std::fs;
@@ -113,8 +117,13 @@ impl LinuxVolumes {
                 .file_name()
                 .map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
         };
+        let id = if m.root == "/" {
+            format!("uuid:{uuid}")
+        } else {
+            format!("uuid:{uuid}:{}", m.root)
+        };
         Ok(Some(VolumeInfo {
-            id: format!("uuid:{uuid}"),
+            id,
             mount_root: m.mount_point.clone(),
             label,
         }))
@@ -132,11 +141,6 @@ impl Volumes for LinuxVolumes {
             .max_by_key(|(i, m)| (m.mount_point.components().count(), *i))
             .map(|(_, m)| m)
             .ok_or_else(|| io::Error::other("no mount found for this folder"))?;
-        if best.root != "/" {
-            return Err(io::Error::other(
-                "folders inside bind mounts are not supported",
-            ));
-        }
         self.info(best)?.ok_or_else(|| {
             io::Error::other(format!(
                 "cannot identify the drive mounted at {}",
@@ -147,11 +151,7 @@ impl Volumes for LinuxVolumes {
 
     fn find(&self, id: &str) -> io::Result<Option<VolumeInfo>> {
         // Any absolute device path: real systems use /dev/..., the test fixture a temp folder.
-        for m in self
-            .mounts()?
-            .iter()
-            .filter(|m| m.root == "/" && m.source.starts_with('/'))
-        {
+        for m in self.mounts()?.iter().filter(|m| m.source.starts_with('/')) {
             if let Some(info) = self.info(m)?
                 && info.id == id
             {
@@ -239,18 +239,35 @@ mod tests {
     }
 
     #[test]
-    fn bind_mounts_are_refused() {
+    fn subvolume_or_bind_mounts_get_a_rooted_id() {
         let f = fake("");
+        let dev = f._dir.path().join("dev");
         let bind = format!(
-            "{}\n91 22 8:17 /sub {} rw - exfat /dev/sdb1 rw\n",
+            "{}\n91 22 8:17 /sub {} rw - exfat {dev}/sdb1 rw\n",
             fs::read_to_string(&f.vols.mountinfo).unwrap().trim_end(),
             f.disk
                 .join("Photos")
                 .display()
                 .to_string()
-                .replace(' ', "\\040")
+                .replace(' ', "\\040"),
+            dev = dev.display()
         );
         fs::write(&f.vols.mountinfo, bind).unwrap();
-        assert!(f.vols.volume_of(&f.disk.join("Photos")).is_err());
+        let photos = f.disk.join("Photos");
+        let v = f.vols.volume_of(&photos).unwrap();
+        assert_eq!(v.id, "uuid:1111-AAAA:/sub");
+        assert_eq!(v.mount_root, photos);
+        assert_eq!(
+            f.vols
+                .find("uuid:1111-AAAA:/sub")
+                .unwrap()
+                .unwrap()
+                .mount_root,
+            photos
+        );
+        assert_eq!(
+            f.vols.find("uuid:1111-AAAA").unwrap().unwrap().mount_root,
+            f.disk
+        );
     }
 }

@@ -44,8 +44,13 @@ pub fn case_mode(dir: &Path) -> io::Result<CaseMode> {
     }
     let probe = dir.join(CASE_PROBE_NAME);
     fs::write(&probe, b"")?;
-    let insensitive = fs::symlink_metadata(dir.join(CASE_PROBE_NAME.to_uppercase())).is_ok();
+    let upper = fs::symlink_metadata(dir.join(CASE_PROBE_NAME.to_uppercase()));
     fs::remove_file(&probe)?;
+    let insensitive = match upper {
+        Ok(_) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e),
+    };
     Ok(if insensitive {
         CaseMode::Insensitive
     } else {
