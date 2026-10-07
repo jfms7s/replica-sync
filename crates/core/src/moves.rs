@@ -142,9 +142,20 @@ fn collapse_folder_moves(
             .is_ok_and(|i| replica.entries[i].kind == Kind::Dir)
     };
 
+    let problem_keys: Vec<String> = replica.problems.iter().map(|p| k(&p.rel)).collect();
+    // An unreadable entry at or under X must not be carried along by a rename.
+    let has_problem = |x: &RelPath| {
+        let kx = k(x);
+        problem_keys.iter().any(|p| {
+            *p == kx
+                || p.strip_prefix(kx.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        })
+    };
+
     let mut done: Vec<(RelPath, RelPath, u32, u64)> = Vec::new();
     for (_, x, y) in candidates {
-        if x.is_within(&y) || y.is_within(&x) || !is_rep_dir(&x) {
+        if x.is_within(&y) || y.is_within(&x) || !is_rep_dir(&x) || has_problem(&x) {
             continue;
         }
         if src_keys.contains(&k(&x)) || rep_keys.contains(&k(&y)) {
@@ -624,5 +635,44 @@ mod tests {
             vec![dir("A"), file("A/a.jpg", 10, T0)],
         );
         assert!(dir_moves(&out).is_empty());
+    }
+    #[test]
+    fn unreadable_replica_subfolder_rejects_collapse() {
+        let s = snap(vec![
+            dir("New"),
+            file("New/a.jpg", 10, T0),
+            dir("New/locked"),
+            file("New/locked/b.jpg", 20, T0),
+        ]);
+        let mut r = snap(vec![
+            dir("Old"),
+            file("Old/a.jpg", 10, T0),
+            dir("Old/locked"),
+        ]);
+        r.problems.push(crate::model::Problem {
+            rel: rel("Old/locked"),
+            reason: "Permission denied".into(),
+        });
+        let out = detect_moves(
+            diff(&s, &r, CaseMode::Sensitive),
+            &s,
+            &r,
+            CaseMode::Sensitive,
+        );
+        assert!(dir_moves(&out).is_empty(), "{out:?}");
+        // a problem on a file (no entry at all) under the folder rejects it too
+        let mut r = snap(vec![dir("Old"), file("Old/a.jpg", 10, T0)]);
+        r.problems.push(crate::model::Problem {
+            rel: rel("Old/x.bin"),
+            reason: "Permission denied".into(),
+        });
+        let s = snap(vec![dir("New"), file("New/a.jpg", 10, T0)]);
+        let out = detect_moves(
+            diff(&s, &r, CaseMode::Sensitive),
+            &s,
+            &r,
+            CaseMode::Sensitive,
+        );
+        assert!(dir_moves(&out).is_empty(), "{out:?}");
     }
 }
