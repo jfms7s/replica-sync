@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/cli", "crates/app-state"]
+exclude = ["app/src-tauri"]
 
 [workspace.package]
 version = "0.2.0"
