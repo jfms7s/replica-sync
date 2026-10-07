@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type AppError, type PairView, type PreviewSummary, type RunView } from './api';
+import { api, type PairView, type PreviewSummary, type RunView } from './api';
 import { I18nProvider, type Lang } from './i18n';
 import Applying from './screens/Applying';
 import Broken from './screens/Broken';
@@ -26,14 +26,15 @@ export type Navigate = (s: Screen) => void;
 export default function App() {
   const [lang, setLang] = useState<Lang>('en');
   const [screen, setScreen] = useState<Screen>({ name: 'pairs' });
-  const [broken, setBroken] = useState<AppError | null>(null);
+  // Wrapped so any rejection, even `null`, counts as broken.
+  const [broken, setBroken] = useState<{ error: unknown } | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     api.getSettings().then((s) => setLang(s.resolvedLanguage)).catch(() => {});
     api
       .startupStatus()
-      .catch((e: AppError) => setBroken(e))
+      .catch((e: unknown) => setBroken({ error: e }))
       .finally(() => setReady(true));
   }, []);
 
@@ -44,7 +45,7 @@ export default function App() {
   if (!ready) return null;
   return (
     <I18nProvider lang={lang}>
-      {broken ? <Broken error={broken} /> : <Current screen={screen} navigate={setScreen} onLanguage={setLang} />}
+      {broken ? <Broken error={broken.error} /> : <Current screen={screen} navigate={setScreen} onLanguage={setLang} />}
       <CloseGuard />
     </I18nProvider>
   );
