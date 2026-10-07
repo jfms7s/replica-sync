@@ -105,7 +105,11 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
             && s.kind != r.kind
             && s.kind != Kind::Link
         {
-            blocks.add(k.clone(), s.rel.clone(), "a file on one side and a folder on the other");
+            blocks.add(
+                k.clone(),
+                s.rel.clone(),
+                "a file on one side and a folder on the other",
+            );
         }
     }
 
