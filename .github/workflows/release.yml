@@ -1,0 +1,53 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu 22.04 keeps the AppImage/.deb compatible with older glibc.
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+      - run: npm ci
+        working-directory: app
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: "replica-sync ${{ github.ref_name }}"
+          releaseBody: "Installers for Windows (.msi, setup .exe) and Linux (.AppImage, .deb). The Windows installers are unsigned: in SmartScreen choose More info → Run anyway. See the README."
+          releaseDraft: true
+          prerelease: false
+      # The test CLI, for the manual exFAT drive-id check (`replica-sync-cli volume E:\`).
+      - name: Attach the CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo build --release -p replica-sync-cli
+          gh release upload "${{ github.ref_name }}" target/release/replica-sync-cli.exe --clobber
