@@ -1,8 +1,8 @@
 //! Turn Delete+Create pairs into renames, and whole moved folders into one rename.
 
 use crate::diff::CaseMode;
-use crate::model::{Change, MTIME_TOLERANCE_NS, MoveKind, Snapshot};
-use std::collections::HashMap;
+use crate::model::{Change, Kind, MTIME_TOLERANCE_NS, MoveKind, RelPath, Snapshot};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn detect_moves(
     changes: Vec<Change>,
@@ -88,11 +88,126 @@ fn pair_file_moves(changes: Vec<Change>) -> Vec<Change> {
 
 fn collapse_folder_moves(
     changes: Vec<Change>,
-    _source: &Snapshot,
-    _replica: &Snapshot,
-    _case: CaseMode,
+    source: &Snapshot,
+    replica: &Snapshot,
+    case: CaseMode,
 ) -> Vec<Change> {
-    changes // Task 6
+    let k = |r: &RelPath| match case {
+        CaseMode::Sensitive => r.as_str().to_owned(),
+        CaseMode::Insensitive => r.fold(),
+    };
+    let mut move_to: HashMap<String, String> = HashMap::new();
+    let mut candidates: BTreeSet<(usize, RelPath, RelPath)> = BTreeSet::new();
+    for c in &changes {
+        let Change::Move {
+            from,
+            to,
+            kind: MoveKind::File { .. },
+        } = c
+        else {
+            continue;
+        };
+        if k(from) == k(to) {
+            continue; // capital-letters-only rename
+        }
+        move_to.insert(k(from), k(to));
+        let (mut x, mut y) = (from.parent(), to.parent());
+        while let (Some(px), Some(py)) = (x, y) {
+            if px.is_root() || py.is_root() {
+                break;
+            }
+            candidates.insert((px.depth(), px.clone(), py.clone()));
+            if px.name() != py.name() {
+                break;
+            }
+            (x, y) = (px.parent(), py.parent());
+        }
+    }
+    if candidates.is_empty() {
+        return changes;
+    }
+
+    let src_keys: HashSet<String> = source.entries.iter().map(|e| k(&e.rel)).collect();
+    let src_dirs: HashSet<String> = source
+        .entries
+        .iter()
+        .filter(|e| e.kind == Kind::Dir)
+        .map(|e| k(&e.rel))
+        .collect();
+    let rep_keys: HashSet<String> = replica.entries.iter().map(|e| k(&e.rel)).collect();
+    let is_rep_dir = |x: &RelPath| {
+        replica
+            .entries
+            .binary_search_by(|e| e.rel.cmp(x))
+            .is_ok_and(|i| replica.entries[i].kind == Kind::Dir)
+    };
+
+    let mut done: Vec<(RelPath, RelPath, u32, u64)> = Vec::new();
+    for (_, x, y) in candidates {
+        if x.is_within(&y) || y.is_within(&x) || !is_rep_dir(&x) {
+            continue;
+        }
+        if src_keys.contains(&k(&x)) || rep_keys.contains(&k(&y)) {
+            continue;
+        }
+        if done
+            .iter()
+            .any(|(dx, dy, ..)| x.is_within(dx) || y.is_within(dy))
+        {
+            continue;
+        }
+        let prefix = format!("{x}/");
+        let start = replica
+            .entries
+            .partition_point(|e| e.rel.as_str() < prefix.as_str());
+        let under = replica.entries[start..]
+            .iter()
+            .take_while(|e| e.rel.as_str().starts_with(&prefix));
+        let (mut ok, mut files, mut bytes) = (true, 0u32, 0u64);
+        for e in under {
+            let target = k(&y.join(e.rel.strip_dir(&x).expect("entry is under x")));
+            ok = match e.kind {
+                Kind::File if move_to.get(&k(&e.rel)) == Some(&target) => {
+                    files += 1;
+                    bytes += e.size;
+                    true
+                }
+                Kind::Dir => src_dirs.contains(&target),
+                _ => false,
+            };
+            if !ok {
+                break;
+            }
+        }
+        if ok && files > 0 {
+            done.push((x, y, files, bytes));
+        }
+    }
+    if done.is_empty() {
+        return changes;
+    }
+
+    let in_x = |p: &RelPath| done.iter().any(|(x, ..)| p.is_within(x));
+    let in_y = |p: &RelPath| done.iter().any(|(_, y, ..)| p.is_within(y));
+    let mut out: Vec<Change> = changes
+        .into_iter()
+        .filter(|c| match c {
+            Change::Move {
+                from,
+                kind: MoveKind::File { .. },
+                ..
+            } => !in_x(from),
+            Change::RmDir { path } => !in_x(path),
+            Change::MkDir { path } => !in_y(path),
+            _ => true,
+        })
+        .collect();
+    out.extend(done.into_iter().map(|(x, y, files, bytes)| Change::Move {
+        from: x,
+        to: y,
+        kind: MoveKind::Dir { files, bytes },
+    }));
+    out
 }
 
 #[cfg(test)]
@@ -224,5 +339,137 @@ mod tests {
                 },
             ]
         );
+    }
+
+    use crate::diff::diff;
+    use crate::model::Entry;
+    use crate::testutil::{dir, file};
+
+    fn pipeline(src: Vec<Entry>, rep: Vec<Entry>) -> Vec<Change> {
+        let (s, r) = (snap(src), snap(rep));
+        let mut out = detect_moves(
+            diff(&s, &r, CaseMode::Sensitive),
+            &s,
+            &r,
+            CaseMode::Sensitive,
+        );
+        out.sort_by(|a, b| a.path().cmp(b.path()));
+        out
+    }
+
+    #[test]
+    fn whole_folder_move_collapses_to_one_rename() {
+        let out = pipeline(
+            vec![
+                dir("Old"),
+                file("Old/keep.txt", 1, T0),
+                dir("2025"),
+                dir("2025/Trip"),
+                dir("2025/Trip/raw"),
+                file("2025/Trip/a.jpg", 10, T0),
+                file("2025/Trip/b.jpg", 20, T0),
+                file("2025/Trip/raw/c.nef", 30, T0),
+            ],
+            vec![
+                dir("Old"),
+                file("Old/keep.txt", 1, T0),
+                dir("Old/Trip"),
+                dir("Old/Trip/raw"),
+                file("Old/Trip/a.jpg", 10, T0),
+                file("Old/Trip/b.jpg", 20, T0),
+                file("Old/Trip/raw/c.nef", 30, T0),
+            ],
+        );
+        assert_eq!(
+            out,
+            vec![Change::Move {
+                from: rel("Old/Trip"),
+                to: rel("2025/Trip"),
+                kind: MoveKind::Dir {
+                    files: 3,
+                    bytes: 60
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn collapses_at_the_highest_folder_that_fully_moved() {
+        let out = pipeline(
+            vec![dir("New"), dir("New/Trip"), file("New/Trip/a.jpg", 10, T0)],
+            vec![dir("Old"), dir("Old/Trip"), file("Old/Trip/a.jpg", 10, T0)],
+        );
+        assert_eq!(
+            out,
+            vec![Change::Move {
+                from: rel("Old"),
+                to: rel("New"),
+                kind: MoveKind::Dir {
+                    files: 1,
+                    bytes: 10
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn partly_moved_folder_stays_file_moves() {
+        let out = pipeline(
+            vec![dir("B"), file("B/a.jpg", 10, T0)],
+            vec![dir("A"), file("A/a.jpg", 10, T0), file("A/left.txt", 5, T0)],
+        );
+        assert!(out.iter().any(|c| matches!(
+            c,
+            Change::Move {
+                kind: MoveKind::File { .. },
+                ..
+            }
+        )));
+        assert!(out.iter().all(|c| !matches!(
+            c,
+            Change::Move {
+                kind: MoveKind::Dir { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn target_folder_already_on_replica_is_not_collapsed() {
+        let out = pipeline(
+            vec![
+                dir("B"),
+                file("B/a.jpg", 10, T0),
+                file("B/other.txt", 1, T0),
+            ],
+            vec![
+                dir("A"),
+                file("A/a.jpg", 10, T0),
+                dir("B"),
+                file("B/other.txt", 1, T0),
+            ],
+        );
+        assert!(out.iter().all(|c| !matches!(
+            c,
+            Change::Move {
+                kind: MoveKind::Dir { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn moving_into_own_subfolder_is_not_collapsed() {
+        let out = pipeline(
+            vec![dir("a"), dir("a/b"), file("a/b/x", 1, T0)],
+            vec![dir("a"), file("a/x", 1, T0)],
+        );
+        assert!(out.iter().all(|c| !matches!(
+            c,
+            Change::Move {
+                kind: MoveKind::Dir { .. },
+                ..
+            }
+        )));
     }
 }
