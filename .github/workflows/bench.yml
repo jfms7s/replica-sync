@@ -20,6 +20,7 @@ jobs:
         shell: bash
         run: |
           BIN=./target/release/replica-sync-cli
+          if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           $BIN gen-tree "$RUNNER_TEMP/src" --files 1000000 --large 0
           $BIN gen-tree "$RUNNER_TEMP/rep" --files 1000000 --large 0
           echo "### ${{ matrix.os }}" >> "$GITHUB_STEP_SUMMARY"
