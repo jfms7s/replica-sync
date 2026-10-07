@@ -24,6 +24,9 @@ pub struct LastSync {
     pub at: String,
     pub applied: usize,
     pub failed: usize,
+    /// The run stopped before doing every approved change.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +579,7 @@ mod tests {
             at: "2026-10-01T10:00:00Z".into(),
             applied: 3,
             failed: 0,
+            stopped: false,
         });
         fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
         v.mount("C", &t.path().join("diskC"));
@@ -588,6 +592,14 @@ mod tests {
         .unwrap();
         assert_eq!(p.replica.volume_id, "C");
         assert!(p.is_first_sync());
+    }
+
+    #[test]
+    fn last_sync_from_before_stopped_existed_reads_as_not_stopped() {
+        let old: LastSync =
+            serde_json::from_str(r#"{"at":"2026-10-01T10:00:00Z","applied":1,"failed":0}"#)
+                .unwrap();
+        assert!(!old.stopped);
     }
 
     #[test]

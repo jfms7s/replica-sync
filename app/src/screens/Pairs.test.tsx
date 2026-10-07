@@ -50,4 +50,12 @@ describe('Pairs', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Sincronizar' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos' });
   });
+
+  it('marks a last sync that stopped early as incomplete', async () => {
+    const v = view();
+    v.pair.last_sync = { at: '2026-10-07T10:00:00Z', applied: 3, failed: 0, stopped: true };
+    vi.mocked(api.listPairs).mockResolvedValue([v]);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    expect(await screen.findByText(/3 applied, 0 failed · incomplete$/)).toBeInTheDocument();
+  });
 });

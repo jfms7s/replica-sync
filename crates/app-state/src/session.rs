@@ -71,6 +71,8 @@ pub struct RunView {
     pub pair_id: String,
     pub trash_days: u32,
     pub report: RunReport,
+    /// Approved changes the run never reached (it stopped first).
+    pub not_done: usize,
     pub log_path: Option<PathBuf>,
     pub old_trash_runs: Vec<String>,
     /// Problems after the run that did not stop it (log or store not written).
@@ -567,6 +569,7 @@ impl Session {
                 at: chrono::Local::now().to_rfc3339(),
                 applied: report.applied(),
                 failed: report.failed(),
+                stopped: report.stopped.is_some(),
             });
         }
         if let Err(e) = self.store.save() {
@@ -589,9 +592,11 @@ impl Session {
         {
             c.last_report = Some(report.clone());
         }
+        let not_done = job.approved.len().saturating_sub(report.results.len());
         Ok(RunView {
             pair_id,
             trash_days,
+            not_done,
             report,
             log_path,
             old_trash_runs,
@@ -995,6 +1000,41 @@ mod tests {
         );
         let r = job.run();
         w.s.finish_scan(job, r, &w.v).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_run_reports_what_was_not_done() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        write(&w.src(), "b.txt", b"b");
+        w.scan();
+        let job = w.s.begin_apply(&w.v).unwrap();
+        w.s.cancel_apply();
+        let report = job.run(&mut |_| {});
+        let run = w.s.finish_apply(job, report).unwrap();
+        assert!(run.report.stopped.is_some());
+        assert_eq!(run.not_done, 2);
+        let last = w.s.pair_views(&w.v)[0].pair.last_sync.clone().unwrap();
+        assert!(last.stopped);
+        let v = serde_json::to_value(&run).unwrap();
+        assert_eq!(v["notDone"], 2);
+    }
+
+    #[test]
+    fn a_finished_run_has_nothing_left_undone() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        let run = w.apply();
+        assert_eq!(run.not_done, 0);
+        assert!(
+            !w.s.pair_views(&w.v)[0]
+                .pair
+                .last_sync
+                .as_ref()
+                .unwrap()
+                .stopped
+        );
     }
 
     #[test]

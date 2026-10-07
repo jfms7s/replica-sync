@@ -69,6 +69,7 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
                 <p className="muted">
                   {pair.last_sync
                     ? t('pairs.lastSync', { date: formatDate(lang, pair.last_sync.at), applied: pair.last_sync.applied, failed: pair.last_sync.failed })
+                      + (pair.last_sync.stopped ? t('pairs.incomplete') : '')
                     : t('pairs.neverSynced')}
                 </p>
               </article>

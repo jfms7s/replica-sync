@@ -9,11 +9,11 @@ import { api } from '../api';
 import Result from './Result';
 
 const run: RunView = {
-  pairId: 'p1', trashDays: 30, logPath: '/logs/x.log', warnings: [],
+  pairId: 'p1', trashDays: 30, logPath: '/logs/x.log', warnings: [], notDone: 0,
   oldTrashRuns: ['2026-08-01_090000'],
   report: {
     trash_run: null,
-    stopped: { code: 'replicaDisconnected' },
+    stopped: null,
     results: [
       { id: 0, path: 'a.txt', outcome: { kind: 'applied' } },
       { id: 1, path: 'b.txt', outcome: { kind: 'failed', reason: { code: 'inUse' } } },
@@ -28,9 +28,19 @@ describe('Result', () => {
     render(<I18nProvider lang="pt-PT"><Result run={run} pairName="Photos" navigate={navigate} /></I18nProvider>);
     expect(screen.getByText('1 feitas · 1 ignoradas · 1 falharam')).toBeInTheDocument();
     expect(screen.getByText(/está a ser usado por outro programa/)).toBeInTheDocument();
-    expect(screen.getByText('Parou: o disco da cópia foi desligado')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Tentar de novo as que falharam' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'applying', mode: 'retry', pairName: 'Photos' });
+  });
+
+  it('a stopped run says what was not done and offers Sync again instead of Retry failed', async () => {
+    const navigate = vi.fn();
+    const stopped: RunView = { ...run, notDone: 4, report: { ...run.report, stopped: { code: 'replicaDisconnected' } } };
+    render(<I18nProvider lang="pt-PT"><Result run={stopped} pairName="Photos" navigate={navigate} /></I18nProvider>);
+    expect(screen.getByText('Parou: o disco da cópia foi desligado')).toBeInTheDocument();
+    expect(screen.getByText('4 alterações não foram feitas. Sincronize de novo para terminar a cópia.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tentar de novo as que falharam' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Sincronizar de novo' }));
+    expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos' });
   });
 
   it('empties old trash runs only after confirming', async () => {

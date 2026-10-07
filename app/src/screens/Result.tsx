@@ -31,6 +31,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
       <h1>{t('result.title')} · {pairName}</h1>
       <p>{t('result.summary', { applied: count('applied'), skipped: count('skipped'), failed: count('failed') })}</p>
       {report.stopped && <p className="warn">{t('result.stopped', { reason: stopText(tx, report.stopped) })}</p>}
+      {report.stopped && run.notDone > 0 && <p className="warn">{t('result.notDone', { count: run.notDone })}</p>}
       {run.warnings.map((w, i) => <p key={i} className="warn">{t('result.warning', { text: errorText(tx, lang, w) })}</p>)}
       {failed.length > 0 && (
         <section className="panel">
@@ -50,7 +51,10 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
           {run.logPath && <button onClick={() => void api.openPath(run.logPath!)}>{t('result.openLog')}</button>}
         </div>
         <div className="row">
-          {failed.length > 0 && (
+          {report.stopped ? (
+            // A stopped run left approved changes undone; retrying only the failures would hide them.
+            <button onClick={() => navigate({ name: 'scanning', pairId: run.pairId, pairName })}>{t('result.syncAgain')}</button>
+          ) : failed.length > 0 && (
             <button onClick={() => navigate({ name: 'applying', mode: 'retry', pairName })}>{t('result.retry')}</button>
           )}
           <button className="primary" onClick={() => navigate({ name: 'pairs' })}>{t('common.done')}</button>
