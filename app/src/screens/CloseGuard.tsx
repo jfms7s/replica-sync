@@ -9,6 +9,8 @@ export default function CloseGuard() {
   const { t, tx, lang } = useT();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Set once Rust accepted the stop: the app exits when the current file is done.
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const stop = async () => {
@@ -16,6 +18,7 @@ export default function CloseGuard() {
     setError(null);
     try {
       await api.stopAndClose();
+      setStopping(true);
     } catch (e) {
       setError(errorText(tx, lang, e));
     } finally {
@@ -41,11 +44,12 @@ export default function CloseGuard() {
     <Modal
       title={t('close.title')}
       actions={<>
-        <button disabled={busy} onClick={() => { setError(null); setOpen(false); }}>{t('close.keep')}</button>
-        <button className="primary" disabled={busy} onClick={() => void stop()}>{t('close.stop')}</button>
+        <button disabled={busy || stopping} onClick={() => { setError(null); setOpen(false); }}>{t('close.keep')}</button>
+        <button className="primary" disabled={busy || stopping} onClick={() => void stop()}>{t('close.stop')}</button>
       </>}
     >
       {t('close.body')}
+      {stopping && <p role="status">{t('close.stopping')}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </Modal>
   );

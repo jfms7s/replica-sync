@@ -33,4 +33,15 @@ describe('CloseGuard', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('USB is not connected.');
     expect(screen.getByRole('button', { name: 'Stop and close' })).toBeEnabled();
   });
+
+  it('after Stop it keeps both buttons disabled and says it is stopping', async () => {
+    vi.mocked(api.stopAndClose).mockResolvedValueOnce(undefined);
+    render(<I18nProvider lang="en"><CloseGuard /></I18nProvider>);
+    await vi.waitFor(() => expect(handlers['close-requested']).toBeDefined());
+    act(() => handlers['close-requested'](null));
+    await userEvent.click(screen.getByRole('button', { name: 'Stop and close' }));
+    expect(await screen.findByText('Stopping after the current file…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop and close' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Keep syncing' })).toBeDisabled();
+  });
 });
