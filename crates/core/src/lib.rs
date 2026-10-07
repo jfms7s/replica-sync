@@ -5,6 +5,7 @@ pub mod diff;
 pub mod execute;
 pub mod model;
 pub mod moves;
+pub mod pairs;
 pub mod plan;
 pub mod rules;
 pub mod safety;
