@@ -88,7 +88,9 @@ impl StopReason {
 }
 
 // When adding a variant, add a sample here too: the UI's translation check
-// is driven by this list.
+// is driven by this list. The tests' `*_sample_index` matches have no
+// wildcard, so a new variant does not compile until it is given an index
+// there, and `samples_cover_every_variant` then fails until it is listed here.
 fn all_skip() -> Vec<SkipReason> {
     vec![
         SkipReason::Link,
@@ -145,6 +147,62 @@ pub fn reason_codes() -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model::SideKind;
+
+    // One arm per variant and no wildcard: a new variant fails to compile here.
+    // Each variant's index is its position in the sample list.
+    fn skip_sample_index(r: &SkipReason) -> usize {
+        match r {
+            SkipReason::Link => 0,
+            SkipReason::FileVsFolder => 1,
+            SkipReason::CaseCollision => 2,
+            SkipReason::NotRegularFile => 3,
+            SkipReason::Unreadable { .. } => 4,
+            SkipReason::DeletedSinceScan => 5,
+            SkipReason::ChangedSincePreview => 6,
+            SkipReason::BackOnSource => 7,
+            SkipReason::AlreadyGone => 8,
+            SkipReason::NoLongerInReplica => 9,
+            SkipReason::FolderNotEmpty => 10,
+        }
+    }
+    const SKIP_VARIANTS: usize = 11;
+
+    fn fail_sample_index(r: &FailReason) -> usize {
+        match r {
+            FailReason::InUse => 0,
+            FailReason::PermissionDenied => 1,
+            FailReason::ChangedDuringCopy => 2,
+            FailReason::TargetExists => 3,
+            FailReason::OutsideReplica => 4,
+            FailReason::Interrupted => 5,
+            FailReason::Io { .. } => 6,
+        }
+    }
+    const FAIL_VARIANTS: usize = 7;
+
+    fn stop_sample_index(r: &StopReason) -> usize {
+        match r {
+            StopReason::Cancelled => 0,
+            StopReason::ReplicaDisconnected => 1,
+            StopReason::SourceDisconnected => 2,
+            StopReason::ReplicaFull => 3,
+        }
+    }
+    const STOP_VARIANTS: usize = 4;
+
+    /// The sample at position i is the variant with index i, for every index
+    /// up to the variant count: no variant is missing or listed twice.
+    fn assert_covers<T: std::fmt::Debug>(samples: &[T], index: fn(&T) -> usize, variants: usize) {
+        let got: Vec<usize> = samples.iter().map(index).collect();
+        assert_eq!(got, (0..variants).collect::<Vec<_>>(), "{samples:?}");
+    }
+
+    #[test]
+    fn samples_cover_every_variant() {
+        assert_covers(&all_skip(), skip_sample_index, SKIP_VARIANTS);
+        assert_covers(&all_fail(), fail_sample_index, FAIL_VARIANTS);
+        assert_covers(&all_stop(), stop_sample_index, STOP_VARIANTS);
+    }
 
     #[test]
     fn serde_tag_equals_code() {
