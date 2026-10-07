@@ -46,4 +46,19 @@ describe('Trash', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty' }).at(-1)!);
     expect(api.emptyRun).toHaveBeenCalledWith('p1', runId);
   });
+
+  it('goes back to the pairs list by default', async () => {
+    const navigate = vi.fn();
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={navigate} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(navigate).toHaveBeenCalledWith({ name: 'pairs' });
+  });
+
+  it('goes back to the screen it was opened from', async () => {
+    const navigate = vi.fn();
+    const back = { name: 'settings' } as const;
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" back={back} navigate={navigate} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(navigate).toHaveBeenCalledWith(back);
+  });
 });

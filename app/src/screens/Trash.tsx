@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Navigate } from '../App';
+import type { Navigate, Screen } from '../App';
 import { api, type TrashRunContents, type TrashRunInfo } from '../api';
 import Modal from '../components/Modal';
 import { formatBytes, formatRunId } from '../format';
 import { useT } from '../i18n';
 import { errorText, isAppError } from '../reasons';
 
-export default function Trash({ pairId, pairName, navigate }: { pairId: string; pairName: string; navigate: Navigate }) {
+/** `back` is where Back goes (the Preview when opened from it); the pairs list by default. */
+export default function Trash({ pairId, pairName, back, navigate }: {
+  pairId: string; pairName: string; back?: Screen; navigate: Navigate;
+}) {
   const { t, tx, lang } = useT();
   const [runs, setRuns] = useState<TrashRunInfo[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -133,7 +136,7 @@ export default function Trash({ pairId, pairName, navigate }: { pairId: string; 
         ))
       )}
       <div className="bar">
-        <button onClick={() => navigate({ name: 'pairs' })}>{t('common.back')}</button>
+        <button onClick={() => navigate(back ?? { name: 'pairs' })}>{t('common.back')}</button>
       </div>
       {conflict && (
         <Modal
