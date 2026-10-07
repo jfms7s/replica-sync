@@ -3,6 +3,7 @@
 
 pub mod diff;
 pub mod model;
+pub mod moves;
 pub mod rules;
 pub mod scan;
 
