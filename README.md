@@ -9,7 +9,7 @@ Status: desktop app (v0.2.0) for Windows and Linux, in English and Portuguese.
 Download the installer for your system from the [latest release](https://github.com/jfms7s/replica-sync/releases):
 
 - **Windows:** `replica-sync_0.2.0_x64_en-US.msi` or `replica-sync_0.2.0_x64-setup.exe`. The installers are not code-signed yet, so Windows SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**.
-- **Linux:** `replica-sync_0.2.0_amd64.AppImage` (make it executable and run it) or the `.deb`.
+- **Linux:** `replica-sync_0.2.0_amd64.AppImage` (make it executable and run it) or the `.deb`. If the window doesn't open, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` (already the app's default) or `GDK_BACKEND=x11`.
 
 ## Use
 
@@ -21,6 +21,7 @@ Download the installer for your system from the [latest release](https://github.
 
 ```bash
 cargo test --workspace                 # engine + app state
+cargo run -p replica-sync-cli -- plan <source> <replica>
 cd app && npm ci && npm test           # UI
 npm run tauri dev                      # run the app (needs the Tauri system packages)
 ```
