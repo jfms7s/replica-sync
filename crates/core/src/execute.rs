@@ -1,6 +1,5 @@
 //! Apply the approved changes of a plan to the replica, one at a time.
 
-#[allow(unused_imports)]
 use crate::model::{Change, MoveKind, RelPath, modified_ns};
 use crate::plan::{ChangeId, Plan, Planned};
 use crate::rules::TEMP_SUFFIX;
@@ -268,9 +267,9 @@ fn apply_one(
         Change::MkDir { path } => {
             fs::create_dir_all(target(ctx, path)?).map_err(|e| io_stop(&e, ctx.replica.path()))
         }
-        Change::Move { .. } | Change::Delete { .. } | Change::RmDir { .. } => {
-            Err(Stop::Fail("not implemented".into()))
-        }
+        Change::Move { from, to, kind } => move_entry(ctx, from, to, kind),
+        Change::Delete { path, .. } => delete_file(ctx, path, trash),
+        Change::RmDir { path } => remove_dir(ctx, path),
         Change::Skipped { .. } => Ok(()),
     }
 }
@@ -367,6 +366,77 @@ fn replace_with_temp(
         Err(e) => return Err(io_stop(&e, root)),
     }
     fs::rename(tmp, dest).map_err(|e| io_stop(&e, root))
+}
+
+fn move_entry(
+    ctx: &ExecContext,
+    from: &RelPath,
+    to: &RelPath,
+    kind: &MoveKind,
+) -> Result<(), Stop> {
+    let root = ctx.replica.path();
+    let on_io = |e: io::Error| io_stop(&e, root);
+    let still_planned = match (kind, fs::metadata(to.to_path(ctx.source_root))) {
+        (MoveKind::File { size, mtime_ns }, Ok(m)) => {
+            m.is_file() && m.len() == *size && modified_ns(&m) == *mtime_ns
+        }
+        (MoveKind::Dir { .. }, Ok(m)) => m.is_dir(),
+        (_, Err(_)) => false,
+    };
+    if !still_planned {
+        return Err(Stop::Skip("changed since preview".into()));
+    }
+    let from_path = target(ctx, from)?;
+    let to_path = target(ctx, to)?;
+    if fs::symlink_metadata(&from_path).is_err() {
+        return Err(Stop::Skip("no longer in the replica".into()));
+    }
+    let case_only = from.fold() == to.fold();
+    if !case_only && fs::symlink_metadata(&to_path).is_ok() {
+        return Err(Stop::Fail(
+            "something already exists at the new location".into(),
+        ));
+    }
+    fs::create_dir_all(to_path.parent().expect("never the root")).map_err(on_io)?;
+    if case_only {
+        let tmp = temp_path(&from_path);
+        fs::rename(&from_path, &tmp).map_err(on_io)?;
+        fs::rename(&tmp, &to_path).map_err(|e| {
+            let _ = fs::rename(&tmp, &from_path);
+            io_stop(&e, root)
+        })
+    } else {
+        fs::rename(&from_path, &to_path).map_err(on_io)
+    }
+}
+
+fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Result<(), Stop> {
+    let root = ctx.replica.path();
+    if fs::symlink_metadata(rel.to_path(ctx.source_root)).is_ok() {
+        return Err(Stop::Skip("back on the source since the preview".into()));
+    }
+    let dest = target(ctx, rel)?;
+    let md = match fs::symlink_metadata(&dest) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(Stop::Skip("already gone".into()));
+        }
+        Err(e) => return Err(io_stop(&e, root)),
+    };
+    trash
+        .move_in(rel, md.len(), modified_ns(&md), TrashReason::Deleted)
+        .map_err(|e| io_stop(&e, root))
+}
+
+fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
+    match fs::remove_dir(target(ctx, rel)?) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Stop::Skip("already gone".into())),
+        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
+            Err(Stop::Skip("folder not empty".into()))
+        }
+        Err(e) => Err(io_stop(&e, ctx.replica.path())),
+    }
 }
 
 #[cfg(test)]
@@ -580,5 +650,206 @@ mod tests {
         assert_eq!(report.applied(), 1);
         assert_eq!(fs::read(&victim).unwrap(), b"outside");
         assert_eq!(fs::read(f.rep.join("a.txt")).unwrap(), b"inside");
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::tests::{fixture, no_temp_files, run_all, run_with};
+    use super::*;
+    use crate::testutil::{T0, ns, plan_for, read_tree, rel, write_file};
+    use std::fs;
+
+    #[test]
+    fn file_and_folder_moves_rename_without_copying() {
+        let f = fixture();
+        write_file(&f.src, "new/a.jpg", b"aaaa", T0);
+        write_file(&f.rep, "old/a.jpg", b"aaaa", T0);
+        write_file(&f.src, "Keep/b.txt", b"b", T0);
+        write_file(&f.rep, "Keep/sub-old/b.txt", b"b", T0);
+        let report = run_all(&f);
+        assert_eq!(report.failed(), 0, "{:?}", report.results);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
+        assert!(report.trash_run.is_none(), "moves never trash anything");
+    }
+
+    #[test]
+    fn capital_letters_only_move_renames_in_two_steps() {
+        let f = fixture();
+        write_file(&f.src, "photo.jpg", b"x", T0);
+        write_file(&f.rep, "Photo.JPG", b"x", T0);
+        let plan = crate::plan::build_plan(
+            vec![Change::Move {
+                from: rel("Photo.JPG"),
+                to: rel("photo.jpg"),
+                kind: MoveKind::File {
+                    size: 1,
+                    mtime_ns: ns(T0),
+                },
+            }],
+            crate::diff::CaseMode::Insensitive,
+        )
+        .unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(report.applied(), 1, "{:?}", report.results);
+        assert_eq!(
+            read_tree(&f.rep).keys().collect::<Vec<_>>(),
+            vec!["photo.jpg"]
+        );
+    }
+
+    #[test]
+    fn delete_goes_to_trash_unless_back_on_source() {
+        let f = fixture();
+        write_file(&f.rep, "gone.txt", b"1", T0);
+        write_file(&f.rep, "back.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        write_file(&f.src, "back.txt", b"1", T0);
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        let outcome = |p: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == p)
+                .unwrap()
+                .outcome
+                .clone()
+        };
+        assert_eq!(outcome("gone.txt"), Outcome::Applied);
+        assert_eq!(
+            outcome("back.txt"),
+            Outcome::Skipped("back on the source since the preview".into())
+        );
+        let c = crate::trash::run_contents(&f.rep, report.trash_run.as_deref().unwrap()).unwrap();
+        assert_eq!(c.items[0].path, rel("gone.txt"));
+        assert!(f.rep.join("back.txt").exists());
+    }
+
+    #[test]
+    fn rmdir_with_unticked_delete_is_skipped_not_failed() {
+        let f = fixture();
+        write_file(&f.rep, "old/a.txt", b"1", T0);
+        write_file(&f.rep, "old/b.txt", b"1", T0);
+        write_file(&f.src, "z.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let approved: HashSet<ChangeId> = plan
+            .changes
+            .iter()
+            .filter(|p| p.change.path().as_str() != "old/b.txt")
+            .map(|p| p.id)
+            .collect();
+        let report = run_with(&f, &plan, &approved, &Control::default(), &mut |_| {});
+        let rmdir = report
+            .results
+            .iter()
+            .find(|r| r.path.as_str() == "old")
+            .unwrap();
+        assert_eq!(rmdir.outcome, Outcome::Skipped("folder not empty".into()));
+        assert_eq!(report.failed(), 0);
+        assert!(f.rep.join("z.txt").exists());
+        assert!(f.rep.join("old/b.txt").exists());
+    }
+
+    #[test]
+    fn cancel_between_files_stops_and_keeps_finished_work() {
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"1", T0);
+        write_file(&f.src, "b.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &control,
+            &mut |p: &Progress| {
+                if p.changes_done == 1 {
+                    control.cancel();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::Cancelled));
+        assert_eq!(report.results.len(), 1);
+        assert!(f.rep.join("a.txt").exists() && !f.rep.join("b.txt").exists());
+    }
+
+    #[test]
+    fn cancel_mid_copy_leaves_no_temp_file() {
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"12345", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &control,
+            &mut |p: &Progress| {
+                if p.bytes_done > 0 {
+                    control.cancel();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::Cancelled));
+        assert!(read_tree(&f.rep).is_empty());
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn pause_blocks_until_resume() {
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        control.pause();
+        let report = thread::scope(|s| {
+            s.spawn(|| {
+                thread::sleep(Duration::from_millis(150));
+                assert!(control.is_paused());
+                control.resume();
+            });
+            run_with(&f, &plan, &plan.actionable_ids(), &control, &mut |_| {})
+        });
+        assert_eq!(report.applied(), 1);
+    }
+
+    #[test]
+    fn replica_disappearing_stops_the_run() {
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"1", T0);
+        write_file(&f.src, "b.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let unplugged = f.rep.with_file_name("rep-unplugged");
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if p.changes_done == 1 && f.rep.exists() {
+                    fs::rename(&f.rep, &unplugged).unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            report.stopped,
+            Some(StopReason::Fatal(
+                "the backup drive was disconnected".into()
+            ))
+        );
+        assert_eq!(report.results.len(), 1);
+        assert!(no_temp_files(&unplugged));
     }
 }
