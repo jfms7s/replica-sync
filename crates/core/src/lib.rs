@@ -6,6 +6,7 @@ pub mod model;
 pub mod moves;
 pub mod plan;
 pub mod rules;
+pub mod safety;
 pub mod scan;
 
 #[cfg(test)]
