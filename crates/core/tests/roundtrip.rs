@@ -192,3 +192,16 @@ fn locked_source_file_fails_with_in_use() {
         Outcome::Failed(FailReason::InUse)
     );
 }
+
+#[test]
+fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "keep.txt", b"k", T0);
+    write_file(&r, "keep.txt", b"k", T0);
+    write_file(&r, "Trip/a.jpg", b"a", T0);
+    write_file(&r, "Trip/b.jpg.replica-sync.tmp", b"partial", T0);
+    let (_, report) = sync_all(&s, &r);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert!(!r.join("Trip").exists());
+    assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
+}

@@ -191,21 +191,55 @@ pub fn resolve(pair: &Pair, volumes: &dyn Volumes) -> Result<Resolved, ResolveEr
     })
 }
 
+fn verify_side(
+    side: &Side,
+    kind: SideKind,
+    root: &Path,
+    volumes: &dyn Volumes,
+) -> Result<(), ResolveError> {
+    match volumes.volume_of(root) {
+        Ok(v) if v.id == side.volume_id => Ok(()),
+        Ok(_) => Err(ResolveError::WrongVolume(root.to_path_buf())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ResolveError::NotConnected {
+            side: kind,
+            label: side.label.clone(),
+        }),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Re-checked right before Apply: a different disk on the same letter is refused.
 pub fn verify_replica(
     pair: &Pair,
     resolved: &Resolved,
     volumes: &dyn Volumes,
 ) -> Result<(), ResolveError> {
-    match volumes.volume_of(&resolved.replica_root) {
-        Ok(v) if v.id == pair.replica.volume_id => Ok(()),
-        Ok(_) => Err(ResolveError::WrongVolume(resolved.replica_root.clone())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ResolveError::NotConnected {
-            side: SideKind::Replica,
-            label: pair.replica.label.clone(),
-        }),
-        Err(e) => Err(e.into()),
-    }
+    verify_side(
+        &pair.replica,
+        SideKind::Replica,
+        &resolved.replica_root,
+        volumes,
+    )
+}
+
+/// Re-checked right before Apply. On Linux an unmounted source is still an empty
+/// folder on the root filesystem; its drive id then differs, so this refuses it.
+pub fn verify_source(
+    pair: &Pair,
+    resolved: &Resolved,
+    volumes: &dyn Volumes,
+) -> Result<(), ResolveError> {
+    verify_side(
+        &pair.source,
+        SideKind::Source,
+        &resolved.source_root,
+        volumes,
+    )
+}
+
+/// The replica folder alone, for screens (Trash) that don't need the source.
+pub fn resolve_replica(pair: &Pair, volumes: &dyn Volumes) -> Result<PathBuf, ResolveError> {
+    resolve_side(&pair.replica, SideKind::Replica, volumes)
 }
 
 pub fn relink(
@@ -360,6 +394,43 @@ mod tests {
             trash_days: DEFAULT_TRASH_DAYS,
             allow_same_volume: false,
         }
+    }
+
+    #[test]
+    fn verify_source_refuses_a_different_disk() {
+        let (t, v) = setup();
+        let p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let r = resolve(&p, &v).unwrap();
+        verify_source(&p, &r, &v).unwrap();
+        v.mount("Z", &t.path().join("diskA")); // another disk now answers for that path
+        v.0.borrow_mut().retain(|x| x.id != "A");
+        assert!(matches!(
+            verify_source(&p, &r, &v),
+            Err(ResolveError::WrongVolume(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_replica_works_while_the_source_is_unplugged() {
+        let (t, v) = setup();
+        let p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        v.0.borrow_mut().retain(|x| x.id != "A");
+        let root = resolve_replica(&p, &v).unwrap();
+        assert!(root.ends_with("Photos"));
     }
 
     #[test]
