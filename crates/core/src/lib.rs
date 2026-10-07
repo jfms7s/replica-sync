@@ -7,6 +7,7 @@ pub mod model;
 pub mod moves;
 pub mod pairs;
 pub mod plan;
+pub mod reason;
 pub mod rules;
 pub mod runlog;
 pub mod safety;

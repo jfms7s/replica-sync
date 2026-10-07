@@ -2,6 +2,8 @@ mod common;
 
 use common::*;
 use replica_sync_core::model::{Change, MoveKind, RelPath};
+#[cfg(windows)]
+use replica_sync_core::reason::FailReason;
 use replica_sync_core::trash::{self, OnConflict};
 use std::fs;
 
@@ -14,7 +16,7 @@ fn full_sync_mirrors_and_second_scan_is_empty() {
     write_file(&r, "Temp/old.txt", b"bye", T0);
     let (_, report) = sync_all(&s, &r);
     assert_eq!(
-        (report.failed(), report.stopped.clone()),
+        (report.failed(), report.stopped),
         (0, None),
         "{:?}",
         report.results
@@ -187,6 +189,6 @@ fn locked_source_file_fails_with_in_use() {
     let (_, report) = sync_all(&s, &r);
     assert_eq!(
         report.results[0].outcome,
-        Outcome::Failed("in use by another program".into())
+        Outcome::Failed(FailReason::InUse)
     );
 }

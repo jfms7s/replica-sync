@@ -2,6 +2,8 @@
 
 use crate::model::{Change, MoveKind, RelPath, modified_ns};
 use crate::plan::{ChangeId, Plan, Planned};
+pub use crate::reason::StopReason;
+use crate::reason::{FailReason, SkipReason};
 use crate::rules::{CASE_RENAME_SUFFIX, TEMP_SUFFIX};
 use crate::safety::{ReplicaRoot, SafetyError};
 use crate::trash::{TrashReason, TrashWriter};
@@ -16,8 +18,6 @@ use std::thread;
 use std::time::Duration;
 
 const CHUNK: usize = 8 * 1024 * 1024;
-const DISCONNECTED: &str = "the backup drive was disconnected";
-const SOURCE_DISCONNECTED: &str = "the source drive was disconnected";
 #[cfg(windows)]
 const DISK_FULL_CODES: &[i32] = &[39, 112]; // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 #[cfg(not(windows))]
@@ -83,8 +83,8 @@ pub struct Progress {
 #[serde(tag = "kind", content = "reason", rename_all = "camelCase")]
 pub enum Outcome {
     Applied,
-    Skipped(String),
-    Failed(String),
+    Skipped(SkipReason),
+    Failed(FailReason),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -92,12 +92,6 @@ pub struct ChangeResult {
     pub id: ChangeId,
     pub path: RelPath,
     pub outcome: Outcome,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub enum StopReason {
-    Cancelled,
-    Fatal(String),
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -142,28 +136,30 @@ pub struct ExecContext<'a> {
 
 /// Why one change did not apply.
 enum Stop {
-    Skip(String),
-    Fail(String),
-    Fatal(String),
+    Skip(SkipReason),
+    Fail(FailReason),
+    Fatal(StopReason),
     Cancelled,
 }
 
 fn io_stop(e: &io::Error, replica_root: &Path) -> Stop {
     if !replica_root.is_dir() {
-        return Stop::Fatal(DISCONNECTED.into());
+        return Stop::Fatal(StopReason::ReplicaDisconnected);
     }
     let code = e.raw_os_error();
     if e.kind() == io::ErrorKind::StorageFull || code.is_some_and(|c| DISK_FULL_CODES.contains(&c))
     {
-        return Stop::Fatal("the backup drive is full".into());
+        return Stop::Fatal(StopReason::ReplicaFull);
     }
     if code.is_some_and(|c| IN_USE_CODES.contains(&c)) {
-        return Stop::Fail("in use by another program".into());
+        return Stop::Fail(FailReason::InUse);
     }
     if e.kind() == io::ErrorKind::PermissionDenied {
-        return Stop::Fail("permission denied".into());
+        return Stop::Fail(FailReason::PermissionDenied);
     }
-    Stop::Fail(e.to_string())
+    Stop::Fail(FailReason::Io {
+        detail: e.to_string(),
+    })
 }
 
 /// A replica root that vanished mid-change is fatal, whatever the change found.
@@ -171,16 +167,15 @@ fn replica_gone_or(stop: Stop, root: &Path) -> Stop {
     if root.is_dir() {
         stop
     } else {
-        Stop::Fatal(DISCONNECTED.into())
+        Stop::Fatal(StopReason::ReplicaDisconnected)
     }
 }
 
 fn safety_stop(e: SafetyError, replica_root: &Path) -> Stop {
     match e {
-        SafetyError::Escapes(p) => replica_gone_or(
-            Stop::Fail(format!("{} is outside the replica folder", p.display())),
-            replica_root,
-        ),
+        SafetyError::Escapes(_) => {
+            replica_gone_or(Stop::Fail(FailReason::OutsideReplica), replica_root)
+        }
         SafetyError::Io(e) => io_stop(&e, replica_root),
     }
 }
@@ -233,11 +228,11 @@ pub fn execute(
             break;
         }
         if !ctx.replica.path().is_dir() {
-            report.stopped = Some(StopReason::Fatal(DISCONNECTED.into()));
+            report.stopped = Some(StopReason::ReplicaDisconnected);
             break;
         }
         if !ctx.source_root.is_dir() {
-            report.stopped = Some(StopReason::Fatal(SOURCE_DISCONNECTED.into()));
+            report.stopped = Some(StopReason::SourceDisconnected);
             break;
         }
         progress.current = Some(p.change.path().clone());
@@ -254,9 +249,9 @@ pub fn execute(
                 report.results.push(ChangeResult {
                     id: p.id,
                     path: p.change.path().clone(),
-                    outcome: Outcome::Failed(r.clone()),
+                    outcome: Outcome::Failed(FailReason::Interrupted),
                 });
-                report.stopped = Some(StopReason::Fatal(r));
+                report.stopped = Some(r);
                 break;
             }
         };
@@ -315,12 +310,12 @@ fn copy_file(
     let before = match fs::metadata(&src_path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(Stop::Skip("deleted since scan".into()));
+            return Err(Stop::Skip(SkipReason::DeletedSinceScan));
         }
         Err(e) => return Err(io_stop(&e, root)),
     };
     if before.len() != size || modified_ns(&before) != mtime_ns {
-        return Err(Stop::Skip("changed since preview".into()));
+        return Err(Stop::Skip(SkipReason::ChangedSincePreview));
     }
     let dest = target(ctx, rel)?;
     fs::create_dir_all(dest.parent().expect("never the root")).map_err(|e| io_stop(&e, root))?;
@@ -373,7 +368,7 @@ fn write_temp(
     drop(out);
     let after = fs::metadata(src_path).map_err(on_io)?;
     if after.len() != before.len() || modified_ns(&after) != modified_ns(before) {
-        return Err(Stop::Fail("file changed during copy".into()));
+        return Err(Stop::Fail(FailReason::ChangedDuringCopy));
     }
     Ok(())
 }
@@ -411,29 +406,25 @@ fn move_entry(
         (_, Err(_)) => false,
     };
     if !still_planned {
-        return Err(Stop::Skip("changed since preview".into()));
+        return Err(Stop::Skip(SkipReason::ChangedSincePreview));
     }
     let from_path = target(ctx, from)?;
     let to_path = target(ctx, to)?;
     if fs::symlink_metadata(&from_path).is_err() {
         return Err(replica_gone_or(
-            Stop::Skip("no longer in the replica".into()),
+            Stop::Skip(SkipReason::NoLongerInReplica),
             root,
         ));
     }
     let case_only = from.fold() == to.fold();
     if !case_only && fs::symlink_metadata(&to_path).is_ok() {
-        return Err(Stop::Fail(
-            "something already exists at the new location".into(),
-        ));
+        return Err(Stop::Fail(FailReason::TargetExists));
     }
     fs::create_dir_all(to_path.parent().expect("never the root")).map_err(on_io)?;
     if case_only {
         let tmp = case_rename_path(&from_path);
         if fs::symlink_metadata(&tmp).is_ok() {
-            return Err(Stop::Fail(
-                "something already exists at the new location".into(),
-            ));
+            return Err(Stop::Fail(FailReason::TargetExists));
         }
         fs::rename(&from_path, &tmp).map_err(on_io)?;
         fs::rename(&tmp, &to_path).map_err(|e| {
@@ -448,15 +439,19 @@ fn move_entry(
 fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Result<(), Stop> {
     let root = ctx.replica.path();
     match fs::symlink_metadata(rel.to_path(ctx.source_root)) {
-        Ok(_) => return Err(Stop::Skip("back on the source since the preview".into())),
+        Ok(_) => return Err(Stop::Skip(SkipReason::BackOnSource)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Stop::Fail(e.to_string())),
+        Err(e) => {
+            return Err(Stop::Fail(FailReason::Io {
+                detail: e.to_string(),
+            }));
+        }
     }
     let dest = target(ctx, rel)?;
     let md = match fs::symlink_metadata(&dest) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(replica_gone_or(Stop::Skip("already gone".into()), root));
+            return Err(replica_gone_or(Stop::Skip(SkipReason::AlreadyGone), root));
         }
         Err(e) => return Err(io_stop(&e, root)),
     };
@@ -469,11 +464,11 @@ fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
     match fs::remove_dir(target(ctx, rel)?) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(replica_gone_or(
-            Stop::Skip("already gone".into()),
+            Stop::Skip(SkipReason::AlreadyGone),
             ctx.replica.path(),
         )),
         Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
-            Err(Stop::Skip("folder not empty".into()))
+            Err(Stop::Skip(SkipReason::FolderNotEmpty))
         }
         Err(e) => Err(io_stop(&e, ctx.replica.path())),
     }
@@ -585,8 +580,8 @@ mod tests {
             &mut |_| {},
         );
         let reasons: Vec<_> = report.results.iter().map(|r| r.outcome.clone()).collect();
-        assert!(reasons.contains(&Outcome::Skipped("deleted since scan".into())));
-        assert!(reasons.contains(&Outcome::Skipped("changed since preview".into())));
+        assert!(reasons.contains(&Outcome::Skipped(SkipReason::DeletedSinceScan)));
+        assert!(reasons.contains(&Outcome::Skipped(SkipReason::ChangedSincePreview)));
         assert!(read_tree(&f.rep).is_empty());
     }
 
@@ -625,7 +620,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             grow_result.outcome,
-            Outcome::Failed("file changed during copy".into())
+            Outcome::Failed(FailReason::ChangedDuringCopy)
         );
         assert!(!f.rep.join("grow.log").exists());
         assert!(no_temp_files(&f.rep));
@@ -664,9 +659,10 @@ mod tests {
             &Control::default(),
             &mut |_| {},
         );
-        assert!(
-            matches!(&report.results[0].outcome, Outcome::Failed(r) if r.contains("outside the replica"))
-        );
+        assert!(matches!(
+            &report.results[0].outcome,
+            Outcome::Failed(FailReason::OutsideReplica)
+        ));
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
@@ -770,7 +766,7 @@ mod apply_tests {
         assert_eq!(outcome("gone.txt"), Outcome::Applied);
         assert_eq!(
             outcome("back.txt"),
-            Outcome::Skipped("back on the source since the preview".into())
+            Outcome::Skipped(SkipReason::BackOnSource)
         );
         let c = crate::trash::run_contents(&f.rep, report.trash_run.as_deref().unwrap()).unwrap();
         assert_eq!(c.items[0].path, rel("gone.txt"));
@@ -796,7 +792,7 @@ mod apply_tests {
             .iter()
             .find(|r| r.path.as_str() == "old")
             .unwrap();
-        assert_eq!(rmdir.outcome, Outcome::Skipped("folder not empty".into()));
+        assert_eq!(rmdir.outcome, Outcome::Skipped(SkipReason::FolderNotEmpty));
         assert_eq!(report.failed(), 0);
         assert!(f.rep.join("z.txt").exists());
         assert!(f.rep.join("old/b.txt").exists());
@@ -883,12 +879,7 @@ mod apply_tests {
                 }
             },
         );
-        assert_eq!(
-            report.stopped,
-            Some(StopReason::Fatal(
-                "the backup drive was disconnected".into()
-            ))
-        );
+        assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
         assert_eq!(report.results.len(), 1);
         assert!(no_temp_files(&unplugged));
     }
@@ -911,12 +902,7 @@ mod apply_tests {
                 }
             },
         );
-        assert_eq!(
-            report.stopped,
-            Some(StopReason::Fatal(
-                "the source drive was disconnected".into()
-            ))
-        );
+        assert_eq!(report.stopped, Some(StopReason::SourceDisconnected));
         assert!(f.rep.join("gone.txt").exists());
     }
 
@@ -924,9 +910,9 @@ mod apply_tests {
     fn replica_vanishing_inside_a_change_is_fatal() {
         let f = fixture();
         let missing = f.rep.join("nope");
-        let fatal = |s: Stop| matches!(s, Stop::Fatal(r) if r == DISCONNECTED);
+        let fatal = |s: Stop| matches!(s, Stop::Fatal(StopReason::ReplicaDisconnected));
         assert!(fatal(replica_gone_or(
-            Stop::Skip("already gone".into()),
+            Stop::Skip(SkipReason::AlreadyGone),
             &missing
         )));
         assert!(fatal(safety_stop(
@@ -934,8 +920,8 @@ mod apply_tests {
             &missing
         )));
         assert!(matches!(
-            replica_gone_or(Stop::Skip("already gone".into()), &f.rep),
-            Stop::Skip(r) if r == "already gone"
+            replica_gone_or(Stop::Skip(SkipReason::AlreadyGone), &f.rep),
+            Stop::Skip(SkipReason::AlreadyGone)
         ));
         assert!(matches!(
             safety_stop(SafetyError::Escapes(f.rep.clone()), &f.rep),
@@ -1069,7 +1055,7 @@ mod apply_tests {
         );
         assert_eq!(
             report.results[0].outcome,
-            Outcome::Failed("something already exists at the new location".into())
+            Outcome::Failed(FailReason::TargetExists)
         );
         assert_eq!(fs::read(&taken).unwrap(), b"user data");
         assert_eq!(fs::read(f.rep.join("Photo.JPG")).unwrap(), b"x");

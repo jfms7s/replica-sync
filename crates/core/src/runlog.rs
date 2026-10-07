@@ -1,8 +1,9 @@
 //! Plain-text plan and run logs, kept for 90 days.
 
 use crate::execute::{Outcome, RunReport, StopReason};
-use crate::model::{Change, MoveKind};
+use crate::model::{Change, MoveKind, SideKind};
 use crate::plan::{ChangeId, Plan, selected_totals};
+use crate::reason::{FailReason, SkipReason};
 use crate::session::Prepared;
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -24,6 +25,52 @@ pub fn human_bytes(n: u64) -> String {
         i += 1;
     }
     format!("{v:.1} {}", UNITS[i])
+}
+
+pub fn skip_text(r: &SkipReason) -> String {
+    match r {
+        SkipReason::Link => "link (not followed)".into(),
+        SkipReason::FileVsFolder => "a file on one side and a folder on the other".into(),
+        SkipReason::CaseCollision => {
+            "two names differ only by capital letters; the backup drive can't hold both".into()
+        }
+        SkipReason::NotRegularFile => "not a regular file".into(),
+        SkipReason::Unreadable {
+            side: SideKind::Source,
+            detail,
+        } => format!("could not read on the source: {detail}"),
+        SkipReason::Unreadable {
+            side: SideKind::Replica,
+            detail,
+        } => format!("could not read on the replica: {detail}"),
+        SkipReason::DeletedSinceScan => "deleted since scan".into(),
+        SkipReason::ChangedSincePreview => "changed since preview".into(),
+        SkipReason::BackOnSource => "back on the source since the preview".into(),
+        SkipReason::AlreadyGone => "already gone".into(),
+        SkipReason::NoLongerInReplica => "no longer in the replica".into(),
+        SkipReason::FolderNotEmpty => "folder not empty".into(),
+    }
+}
+
+pub fn fail_text(r: &FailReason) -> String {
+    match r {
+        FailReason::InUse => "in use by another program".into(),
+        FailReason::PermissionDenied => "permission denied".into(),
+        FailReason::ChangedDuringCopy => "file changed during copy".into(),
+        FailReason::TargetExists => "something already exists at the new location".into(),
+        FailReason::OutsideReplica => "outside the replica folder".into(),
+        FailReason::Interrupted => "interrupted: the run stopped".into(),
+        FailReason::Io { detail } => detail.clone(),
+    }
+}
+
+pub fn stop_text(r: &StopReason) -> String {
+    match r {
+        StopReason::Cancelled => "cancelled by the user".into(),
+        StopReason::ReplicaDisconnected => "the backup drive was disconnected".into(),
+        StopReason::SourceDisconnected => "the source drive was disconnected".into(),
+        StopReason::ReplicaFull => "the backup drive is full".into(),
+    }
 }
 
 pub fn describe(c: &Change) -> String {
@@ -54,7 +101,7 @@ pub fn describe(c: &Change) -> String {
         Change::Move { from, to, .. } => format!("move     {from} -> {to}"),
         Change::MkDir { path } => format!("mkdir    {path}"),
         Change::RmDir { path } => format!("rmdir    {path}"),
-        Change::Skipped { path, reason } => format!("skipped  {path}: {reason}"),
+        Change::Skipped { path, reason } => format!("skipped  {path}: {}", skip_text(reason)),
     }
 }
 
@@ -106,8 +153,8 @@ pub fn render_run(
     for r in &report.results {
         let line = match &r.outcome {
             Outcome::Applied => format!("applied  {}", r.path),
-            Outcome::Skipped(why) => format!("skipped  {}: {why}", r.path),
-            Outcome::Failed(why) => format!("FAILED   {}: {why}", r.path),
+            Outcome::Skipped(why) => format!("skipped  {}: {}", r.path, skip_text(why)),
+            Outcome::Failed(why) => format!("FAILED   {}: {}", r.path, fail_text(why)),
         };
         let _ = writeln!(out, "{line}");
     }
@@ -118,12 +165,8 @@ pub fn render_run(
         report.skipped(),
         report.failed()
     );
-    match &report.stopped {
-        Some(StopReason::Cancelled) => out.push_str("stopped: cancelled by the user\n"),
-        Some(StopReason::Fatal(why)) => {
-            let _ = writeln!(out, "stopped: {why}");
-        }
-        None => {}
+    if let Some(why) = &report.stopped {
+        let _ = writeln!(out, "stopped: {}", stop_text(why));
     }
     if let Some(run) = &report.trash_run {
         let _ = writeln!(out, "trash run: {run}");
@@ -213,7 +256,7 @@ mod tests {
                 },
                 Change::Skipped {
                     path: rel("lnk"),
-                    reason: "link (not followed)".into(),
+                    reason: SkipReason::Link,
                 },
             ],
             CaseMode::Sensitive,
@@ -246,5 +289,22 @@ mod tests {
         );
         assert!(p.exists() && !old.exists());
         assert_eq!(fs::read_to_string(p).unwrap(), "hello");
+    }
+
+    #[test]
+    fn log_texts_keep_the_v010_english() {
+        assert_eq!(skip_text(&SkipReason::FolderNotEmpty), "folder not empty");
+        assert_eq!(
+            skip_text(&SkipReason::Unreadable {
+                side: SideKind::Source,
+                detail: "x".into()
+            }),
+            "could not read on the source: x"
+        );
+        assert_eq!(fail_text(&FailReason::InUse), "in use by another program");
+        assert_eq!(
+            stop_text(&StopReason::ReplicaDisconnected),
+            "the backup drive was disconnected"
+        );
     }
 }

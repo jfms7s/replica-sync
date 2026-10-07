@@ -651,7 +651,8 @@ mod tests {
         ]);
         r.problems.push(crate::model::Problem {
             rel: rel("Old/locked"),
-            reason: "Permission denied".into(),
+            kind: crate::model::ProblemKind::Unreadable,
+            detail: "Permission denied".into(),
         });
         let out = detect_moves(
             diff(&s, &r, CaseMode::Sensitive),
@@ -664,7 +665,8 @@ mod tests {
         let mut r = snap(vec![dir("Old"), file("Old/a.jpg", 10, T0)]);
         r.problems.push(crate::model::Problem {
             rel: rel("Old/x.bin"),
-            reason: "Permission denied".into(),
+            kind: crate::model::ProblemKind::Unreadable,
+            detail: "Permission denied".into(),
         });
         let s = snap(vec![dir("New"), file("New/a.jpg", 10, T0)]);
         let out = detect_moves(
