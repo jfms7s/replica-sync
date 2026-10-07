@@ -1,0 +1,2 @@
+# Generated and translation files keep LF on every OS (codes.json is compared byte-for-byte).
+app/src/i18n/*.json text eol=lf
