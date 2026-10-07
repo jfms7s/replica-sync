@@ -8,6 +8,7 @@ pub mod plan;
 pub mod rules;
 pub mod safety;
 pub mod scan;
+pub mod trash;
 
 #[cfg(test)]
 mod testutil;
