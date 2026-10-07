@@ -5,7 +5,7 @@
 use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::settings::Settings;
-use crate::tree::{NodeView, PlanTree};
+use crate::tree::{ChildrenPage, PlanTree};
 use replica_sync_core::diff::CaseMode;
 use replica_sync_core::execute::{Control, ExecContext, Progress, RunReport, execute};
 use replica_sync_core::model::{RelPath, SideKind};
@@ -24,6 +24,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Rows one folder may send to the Preview; a folder with more says how many
+/// are not shown (its checkbox still includes or excludes them all).
+pub const CHILDREN_LIMIT: usize = 2000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -424,9 +428,11 @@ impl Session {
         })
     }
 
-    pub fn children(&self, folder: &RelPath) -> Result<Vec<NodeView>, AppError> {
+    /// A folder's children for the Preview, at most [`CHILDREN_LIMIT`] of them.
+    pub fn children(&self, folder: &RelPath) -> Result<ChildrenPage, AppError> {
         let c = self.current()?;
-        Ok(c.tree.children(&c.prepared.plan, folder, &c.selection))
+        Ok(c.tree
+            .children(&c.prepared.plan, folder, &c.selection, CHILDREN_LIMIT))
     }
 
     pub fn toggle(&mut self, path: &RelPath) -> Result<PreviewSummary, AppError> {
@@ -717,7 +723,7 @@ mod tests {
             (s.totals.creates, s.actionable_count, s.selected_count),
             (2, 2, 2)
         );
-        let root = w.s.children(&RelPath::root()).unwrap();
+        let root = w.s.children(&RelPath::root()).unwrap().nodes;
         assert_eq!(
             root.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
             vec!["a.txt", "b"]

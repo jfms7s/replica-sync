@@ -7,6 +7,9 @@ import { useT } from '../i18n';
 import { errorText } from '../reasons';
 import Tree from './Tree';
 
+/** "Show them" opens at most this many folders, so a huge delete can't freeze the window. */
+const SHOW_FOLDERS_LIMIT = 50;
+
 export default function Preview({ summary: initial, navigate }: { summary: PreviewSummary; navigate: Navigate }) {
   const { t, tx, lang } = useT();
   const [s, setS] = useState(initial);
@@ -62,7 +65,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
           {s.totals.deletes > 0 && (
             <p className="warn">
               {t('preview.deleteBanner', { count: formatCount(lang, s.totals.deletes) })}{' '}
-              <button className="link" onClick={() => setExpandRequest([...s.deleteFolders])}>{t('preview.showThem')}</button>
+              <button className="link" onClick={() => setExpandRequest(s.deleteFolders.slice(0, SHOW_FOLDERS_LIMIT))}>{t('preview.showThem')}</button>
             </p>
           )}
           {s.shortfall !== null && (

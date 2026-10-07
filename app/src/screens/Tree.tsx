@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { api, type NodeView, type PreviewSummary } from '../api';
-import { formatBytes } from '../format';
+import { api, type ChildrenPage, type NodeView, type PreviewSummary } from '../api';
+import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
 import { changeDetail } from './changeText';
 
 interface Row { node: NodeView; depth: number }
+/** What is drawn: a node, or the note under a folder that has more children than Rust sends. */
+type Line = { row: Row; index: number } | { more: number; path: string; depth: number };
 
 /** The Preview's folder tree: loads one folder at a time from Rust. */
 export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
@@ -14,7 +16,7 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   refreshToken?: number;
 }) {
   const { t, tx, lang } = useT();
-  const [children, setChildren] = useState<Map<string, NodeView[]>>(new Map());
+  const [children, setChildren] = useState<Map<string, ChildrenPage>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -86,11 +88,16 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   };
 
   const rows: Row[] = [];
+  const lines: Line[] = [];
   const walk = (path: string, depth: number) => {
-    for (const node of children.get(path) ?? []) {
-      rows.push({ node, depth });
+    const page = children.get(path);
+    for (const node of page?.nodes ?? []) {
+      const row = { node, depth };
+      lines.push({ row, index: rows.length });
+      rows.push(row);
       if (node.isFolder && expanded.has(node.path)) walk(node.path, depth + 1);
     }
+    if (page && page.total > page.nodes.length) lines.push({ more: page.total - page.nodes.length, path, depth });
   };
   walk('', 1);
 
@@ -126,7 +133,17 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   return (
     <div className="tree panel" role="tree" aria-label={t('tree.label')}>
       {error && <p className="error" role="alert">{error}</p>}
-      {rows.map(({ node, depth }, i) => (
+      {lines.map((line) => {
+        if ('more' in line) {
+          return (
+            <div key={`${line.path}\0more`} role="treeitem" aria-level={line.depth} aria-disabled tabIndex={-1}
+              className="muted" style={{ paddingLeft: line.depth * 16 }}>
+              {t('tree.more', { count: formatCount(lang, line.more) })}
+            </div>
+          );
+        }
+        const { row: { node, depth }, index: i } = line;
+        return (
         <div
           key={node.path}
           ref={(el) => { itemRefs.current[i] = el; }}
@@ -166,7 +183,8 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
           {node.isFolder && counts(node)}
           {node.bytesToCopy > 0 && <span className="muted">{formatBytes(lang, node.bytesToCopy)}</span>}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
