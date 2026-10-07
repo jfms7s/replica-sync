@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "replica-sync",
+  "version": "0.2.0",
+  "identifier": "io.github.jfms7s.replica-sync",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      { "label": "main", "title": "replica-sync", "width": 1000, "height": 720, "minWidth": 720, "minHeight": 480 }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "appimage", "deb"],
+    "category": "Utility",
+    "shortDescription": "One-way folder mirror with an approve-before-apply preview",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+  }
+}
