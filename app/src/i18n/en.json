@@ -19,6 +19,7 @@
   "pairs.settings": "Settings",
   "pairs.notConnected": "⚠ {label} not connected",
   "pairs.lastSync": "Last sync {date}: {applied} applied, {failed} failed",
+  "pairs.incomplete": " · incomplete",
   "pairs.neverSynced": "Never synced",
 
   "editor.newTitle": "New pair",
@@ -93,8 +94,10 @@
   "result.summary": "{applied} applied · {skipped} skipped · {failed} failed",
   "result.failures": "Failed",
   "result.retry": "Retry failed",
+  "result.syncAgain": "Sync again",
   "result.openLog": "Open log",
   "result.stopped": "Stopped: {reason}",
+  "result.notDone": "{count} changes were not done. Sync again to finish the backup.",
   "result.oldTrash": "{count} trash runs are older than {days} days.",
   "result.emptyOld": "Empty them",
   "result.emptyOldConfirm": "Permanently delete {count} old trash runs? This can't be undone.",

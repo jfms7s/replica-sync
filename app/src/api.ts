@@ -10,7 +10,7 @@ export type SideKind = 'Source' | 'Replica';
 export interface AppError { code: string; params: Record<string, string> }
 
 export interface Side { volume_id: string; rel_path: string; label: string }
-export interface LastSync { at: string; applied: number; failed: number }
+export interface LastSync { at: string; applied: number; failed: number; stopped: boolean }
 export interface Pair {
   id: string; name: string; source: Side; replica: Side; user_rules: string[];
   trash_days: number; last_sync: LastSync | null; last_scan_files: number | null;
@@ -71,7 +71,7 @@ export type Outcome = { kind: 'applied' } | { kind: 'skipped'; reason: SkipReaso
 export interface ChangeResult { id: number; path: RelPath; outcome: Outcome }
 export interface RunReport { results: ChangeResult[]; stopped: StopReason | null; trash_run: string | null }
 export interface RunView {
-  pairId: string; trashDays: number; report: RunReport; logPath: string | null; oldTrashRuns: string[]; warnings: AppError[];
+  pairId: string; trashDays: number; report: RunReport; notDone: number; logPath: string | null; oldTrashRuns: string[]; warnings: AppError[];
 }
 export interface JobDone<T> { ok: T | null; error: AppError | null }
 

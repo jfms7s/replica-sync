@@ -19,6 +19,7 @@
   "pairs.settings": "Definições",
   "pairs.notConnected": "⚠ {label} não está ligado",
   "pairs.lastSync": "Última sincronização {date}: {applied} feitas, {failed} falharam",
+  "pairs.incomplete": " · incompleta",
   "pairs.neverSynced": "Nunca sincronizado",
 
   "editor.newTitle": "Novo par",
@@ -93,8 +94,10 @@
   "result.summary": "{applied} feitas · {skipped} ignoradas · {failed} falharam",
   "result.failures": "Falharam",
   "result.retry": "Tentar de novo as que falharam",
+  "result.syncAgain": "Sincronizar de novo",
   "result.openLog": "Abrir registo",
   "result.stopped": "Parou: {reason}",
+  "result.notDone": "{count} alterações não foram feitas. Sincronize de novo para terminar a cópia.",
   "result.oldTrash": "Há {count} lixos com mais de {days} dias.",
   "result.emptyOld": "Esvaziá-los",
   "result.emptyOldConfirm": "Apagar definitivamente {count} lixos antigos? Não é possível desfazer.",
