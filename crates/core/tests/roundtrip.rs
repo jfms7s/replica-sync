@@ -94,12 +94,32 @@ fn long_paths_sync() {
         .map(|i| format!("folder-with-a-long-name-{i:02}"))
         .collect::<Vec<_>>()
         .join("/");
-    let rel = format!("{deep}/file.txt");
-    assert!(s.join(&rel).as_os_str().len() > 300);
-    write_file(&s, &rel, b"deep", T0);
+    let (one, two) = (format!("{deep}/file.txt"), format!("{deep}/other.txt"));
+    assert!(s.join(&one).as_os_str().len() > 300);
+    write_file(&s, &one, b"deep", T0);
+    write_file(&s, &two, b"also deep", T0);
+    // The second Create lands in a folder that already exists with a long path.
     let (_, report) = sync_all(&s, &r);
     assert_eq!(report.failed(), 0, "{:?}", report.results);
-    assert_eq!(fs::read(r.join(&rel)).unwrap(), b"deep");
+    assert_eq!(fs::read(r.join(&one)).unwrap(), b"deep");
+    assert_eq!(fs::read(r.join(&two)).unwrap(), b"also deep");
+    // An Update replaces a file whose existing parent has a long path.
+    write_file(&s, &two, b"deeper still", T0 + 60);
+    let (p, report) = sync_all(&s, &r);
+    assert!(
+        p.plan
+            .changes
+            .iter()
+            .any(|c| matches!(c.change, Change::Update { .. }))
+    );
+    assert_eq!(
+        (report.applied(), report.failed()),
+        (1, 0),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(fs::read(r.join(&two)).unwrap(), b"deeper still");
+    assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
 }
 
 #[cfg(unix)]

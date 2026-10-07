@@ -15,6 +15,9 @@ pub enum SafetyError {
 #[derive(Clone, Debug)]
 pub struct ReplicaRoot {
     root: PathBuf,
+    /// `std::fs::canonicalize`d: always `\\?\` verbatim on Windows, so it compares
+    /// with the probes in `target` whatever their length (`dunce` keeps the
+    /// verbatim prefix only for paths over 260 characters).
     canonical: PathBuf,
 }
 
@@ -22,7 +25,7 @@ impl ReplicaRoot {
     pub fn new(root: &Path) -> io::Result<ReplicaRoot> {
         Ok(ReplicaRoot {
             root: root.to_path_buf(),
-            canonical: dunce::canonicalize(root)?,
+            canonical: std::fs::canonicalize(root)?,
         })
     }
 
@@ -36,7 +39,7 @@ impl ReplicaRoot {
         let target = rel.to_path(&self.root);
         let mut probe = target.parent();
         while let Some(dir) = probe {
-            match dunce::canonicalize(dir) {
+            match std::fs::canonicalize(dir) {
                 Ok(real) if real.starts_with(&self.canonical) => return Ok(target),
                 Ok(_) => return Err(SafetyError::Escapes(target)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {

@@ -53,8 +53,10 @@ pub enum PrepareError {
     Plan(#[from] PlanError),
 }
 
+/// `std::fs::canonicalize`, not `dunce`: always verbatim on Windows, so two
+/// results compare correctly whatever their length.
 fn canonical(root: &Path) -> Result<std::path::PathBuf, ScanError> {
-    dunce::canonicalize(root).map_err(|source| ScanError::Root {
+    fs::canonicalize(root).map_err(|source| ScanError::Root {
         path: root.to_path_buf(),
         source,
     })
