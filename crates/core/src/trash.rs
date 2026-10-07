@@ -160,25 +160,79 @@ fn run_dir(replica_root: &Path, run_id: &str) -> io::Result<PathBuf> {
     Ok(replica_root.join(TRASH_DIR).join(run_id))
 }
 
-/// Every file under `dir` as (relative path, size). Missing `dir` → empty.
-fn list_files(dir: &Path) -> io::Result<Vec<(RelPath, u64)>> {
-    fn walk(dir: &Path, rel: &RelPath, out: &mut Vec<(RelPath, u64)>) -> io::Result<()> {
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            let child = rel.join(&e.file_name().to_string_lossy());
-            let md = fs::symlink_metadata(e.path())?;
-            if md.is_dir() {
-                walk(&e.path(), &child, out)?;
-            } else {
-                out.push((child, md.len()));
-            }
+/// Adds every file under `dir` to `out`. Anything that vanishes mid-walk (a
+/// folder or entry removed by another program) is skipped, never the whole walk.
+fn walk_files(dir: &Path, rel: &RelPath, out: &mut Vec<(RelPath, u64)>) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for e in entries {
+        let e = e?;
+        let child = rel.join(&e.file_name().to_string_lossy());
+        let md = match fs::symlink_metadata(e.path()) {
+            Ok(m) => m,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if md.is_dir() {
+            walk_files(&e.path(), &child, out)?;
+        } else {
+            out.push((child, md.len()));
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+/// Every file under `dir` as (relative path, size). Empty only when `dir` itself is missing.
+fn list_files(dir: &Path) -> io::Result<Vec<(RelPath, u64)>> {
+    match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+        Ok(_) => {}
     }
     let mut out = Vec::new();
-    match walk(dir, &RelPath::root(), &mut out) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        other => other.map(|()| out),
+    walk_files(dir, &RelPath::root(), &mut out)?;
+    Ok(out)
+}
+
+/// Removes `dir` and every folder under it that holds no files, deepest first.
+/// Never removes a file; a folder that is not empty is left alone.
+fn remove_empty_dirs(dir: &Path) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for e in entries {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            remove_empty_dirs(&e.path())?;
+        }
+    }
+    match fs::remove_dir(dir) {
+        Err(e) if e.kind() != io::ErrorKind::DirectoryNotEmpty => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Best-effort tidy-up after a restore: drops the folders the restore emptied,
+/// then the manifest and the run folder once nothing else is left in the run.
+/// Any error leaves the rest in place.
+fn tidy_run(run: &Path) {
+    if remove_empty_dirs(&run.join(FILES_DIR)).is_err() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(run) else {
+        return;
+    };
+    let only_manifest = entries
+        .map(|e| e.map(|e| e.file_name() == MANIFEST))
+        .collect::<io::Result<Vec<bool>>>()
+        .is_ok_and(|names| names.iter().all(|&m| m));
+    if only_manifest && fs::remove_file(run.join(MANIFEST)).is_ok() {
+        let _ = fs::remove_dir(run);
     }
 }
 
@@ -326,10 +380,7 @@ pub fn restore(
         manifest.sync_data()?;
     }
     drop(manifest);
-    let after = run_contents(replica_root, run_id)?;
-    if after.items.is_empty() && after.unrecorded.is_empty() {
-        fs::remove_dir_all(&run)?;
-    }
+    tidy_run(&run);
     Ok(paths.len())
 }
 
@@ -563,5 +614,51 @@ mod tests {
         ));
         assert!(d.path().join("x.txt/inner").exists());
         assert_eq!(run_contents(d.path(), STAMP).unwrap().items.len(), 1);
+    }
+    #[test]
+    fn an_entry_that_vanished_mid_walk_is_skipped_not_the_whole_run() {
+        let d = tempfile::tempdir().unwrap();
+        let mut out = vec![(rel("kept.txt"), 3)];
+        walk_files(&d.path().join("gone"), &rel("gone"), &mut out).unwrap();
+        assert_eq!(out, vec![(rel("kept.txt"), 3)]);
+        assert!(list_files(&d.path().join("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restoring_one_of_two_keeps_the_other_and_the_run() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a/x.txt", b"abc", T0);
+        write_file(d.path(), "b/y.txt", b"def", T0);
+        let mut w = trash_one(d.path(), "a/x.txt", TrashReason::Deleted);
+        w.move_in(&rel("b/y.txt"), 3, ns(T0), TrashReason::Deleted)
+            .unwrap();
+        restore(d.path(), STAMP, &[rel("a/x.txt")], OnConflict::Refuse).unwrap();
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        assert_eq!(
+            fs::read(run.join(FILES_DIR).join("b").join("y.txt")).unwrap(),
+            b"def"
+        );
+        assert!(run.join(MANIFEST).exists());
+        assert!(
+            !run.join(FILES_DIR).join("a").exists(),
+            "emptied folder tidied"
+        );
+        let c = run_contents(d.path(), STAMP).unwrap();
+        assert_eq!(
+            c.items.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(),
+            vec!["b/y.txt"]
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_run_holding_anything_besides_the_manifest() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        fs::write(run.join("notes.txt"), b"keep me").unwrap();
+        restore(d.path(), STAMP, &[rel("x.txt")], OnConflict::Refuse).unwrap();
+        assert_eq!(fs::read(run.join("notes.txt")).unwrap(), b"keep me");
+        assert!(run.join(MANIFEST).exists());
     }
 }
