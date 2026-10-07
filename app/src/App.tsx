@@ -19,7 +19,7 @@ export type Screen =
   | { name: 'preview'; summary: PreviewSummary }
   | { name: 'applying'; mode: 'apply' | 'retry'; pairName: string }
   | { name: 'result'; run: RunView; pairName: string }
-  | { name: 'trash'; pairId: string; pairName: string }
+  | { name: 'trash'; pairId: string; pairName: string; back?: Screen }
   | { name: 'settings' };
 export type Navigate = (s: Screen) => void;
 
@@ -67,6 +67,6 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
     case 'result':
       return <Result run={screen.run} pairName={screen.pairName} navigate={navigate} />;
     case 'trash':
-      return <Trash pairId={screen.pairId} pairName={screen.pairName} navigate={navigate} />;
+      return <Trash pairId={screen.pairId} pairName={screen.pairName} back={screen.back} navigate={navigate} />;
   }
 }

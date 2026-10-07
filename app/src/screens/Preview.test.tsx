@@ -5,7 +5,7 @@ import { I18nProvider } from '../i18n';
 import type { PreviewSummary } from '../api';
 
 vi.mock('../api', () => ({
-  api: { treeChildren: vi.fn().mockResolvedValue([]), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
+  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue([]), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
   pickSaveFile: vi.fn(),
 }));
 import { api } from '../api';
@@ -20,7 +20,10 @@ const base: PreviewSummary = {
 };
 
 describe('Preview', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.previewSummary).mockRejectedValue({ code: 'apply.noPlan', params: {} });
+  });
 
   it('blocks on the wrong-folder dialog until confirmed', async () => {
     vi.mocked(api.confirmWrongFolder).mockResolvedValue({ ...base, guard: { affected: 3, replica_files: 4 }, guardConfirmed: true });
@@ -59,5 +62,30 @@ describe('Preview', () => {
     expect(api.selectAll).toHaveBeenCalledWith(true);
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(2));
     expect(api.treeChildren).toHaveBeenLastCalledWith('');
+  });
+
+  it('refreshes the summary on mount so space freed in the trash shows', async () => {
+    vi.mocked(api.previewSummary).mockResolvedValue({ ...base, shortfall: null });
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, shortfall: 1048576 }} navigate={vi.fn()} /></I18nProvider>);
+    expect(api.previewSummary).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(screen.queryByText(/more needed/)).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Apply selected' })).toBeEnabled();
+  });
+
+  it('keeps the given summary when the refresh fails', async () => {
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, shortfall: 1048576 }} navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.previewSummary).toHaveBeenCalled());
+    expect(screen.getByText(/1.0 MB more needed/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('open trash comes back to this preview', async () => {
+    const navigate = vi.fn();
+    const short = { ...base, shortfall: 1048576 };
+    render(<I18nProvider lang="en"><Preview summary={short} navigate={navigate} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Open trash' }));
+    expect(navigate).toHaveBeenCalledWith({
+      name: 'trash', pairId: 'p1', pairName: 'Photos', back: { name: 'preview', summary: short },
+    });
   });
 });

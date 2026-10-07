@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Navigate } from '../App';
 import { api, pickSaveFile, type PreviewSummary } from '../api';
 import Modal from '../components/Modal';
@@ -13,10 +13,25 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
   const [expandRequest, setExpandRequest] = useState<string[] | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
+  const changed = useRef(false);
+  const update = (next: PreviewSummary) => {
+    changed.current = true;
+    setS(next);
+  };
+
+  // Coming back (e.g. from the trash) the given summary may be stale: free
+  // space can have changed. Use Rust's current one; keep the given one on error.
+  useEffect(() => {
+    let alive = true;
+    api.previewSummary()
+      .then((fresh) => { if (alive && !changed.current) setS(fresh); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   const guardOpen = s.guard !== null && !s.guardConfirmed;
   const canApply = !guardOpen && s.shortfall === null && s.selectedCount > 0;
-  const run = (f: () => Promise<PreviewSummary>) => f().then((next) => { setS(next); setRefreshToken((n) => n + 1); }).catch((e) => setMessage(errorText(tx, lang, e)));
+  const run = (f: () => Promise<PreviewSummary>) => f().then((next) => { update(next); setRefreshToken((n) => n + 1); }).catch((e) => setMessage(errorText(tx, lang, e)));
 
   const savePreview = async () => {
     const file = await pickSaveFile(`${s.pairName}-preview.txt`);
@@ -53,12 +68,13 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
           {s.shortfall !== null && (
             <p className="warn">
               {t('preview.shortfall', { bytes: formatBytes(lang, s.shortfall) })}{' '}
-              <button className="link" onClick={() => navigate({ name: 'trash', pairId: s.pairId, pairName: s.pairName })}>
+              <button className="link"
+                onClick={() => navigate({ name: 'trash', pairId: s.pairId, pairName: s.pairName, back: { name: 'preview', summary: s } })}>
                 {t('preview.openTrash')}
               </button>
             </p>
           )}
-          <Tree onSummary={setS} expandRequest={expandRequest} refreshToken={refreshToken} />
+          <Tree onSummary={update} expandRequest={expandRequest} refreshToken={refreshToken} />
         </>
       )}
       {message && <p role="status">{message}</p>}
