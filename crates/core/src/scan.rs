@@ -49,6 +49,7 @@ struct Collected {
     entries: Mutex<Vec<Entry>>,
     problems: Mutex<Vec<Problem>>,
     leftovers: Mutex<Vec<RelPath>>,
+    unlisted: Mutex<Vec<RelPath>>,
 }
 
 pub fn scan(
@@ -75,6 +76,7 @@ pub fn scan(
         entries,
         problems: out.problems.into_inner().unwrap(),
         leftovers: out.leftovers.into_inner().unwrap(),
+        unlisted: out.unlisted.into_inner().unwrap(),
     })
 }
 
@@ -100,7 +102,8 @@ fn walk<'s>(
             return;
         }
     };
-    let (mut entries, mut problems, mut leftovers) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut entries, mut problems) = (Vec::new(), Vec::new());
+    let (mut leftovers, mut unlisted) = (Vec::new(), Vec::new());
     for item in read {
         let entry = match item {
             Ok(e) => e,
@@ -123,6 +126,7 @@ fn walk<'s>(
             continue;
         }
         if rel.name().ends_with(TEMP_SUFFIX) {
+            unlisted.push(rel.clone());
             leftovers.push(rel);
             continue;
         }
@@ -137,6 +141,7 @@ fn walk<'s>(
             }
         };
         if rules.is_skipped(&rel, file_type.is_dir()) {
+            unlisted.push(rel);
             continue;
         }
         if file_type.is_symlink() {
@@ -180,6 +185,7 @@ fn walk<'s>(
     out.entries.lock().unwrap().extend(entries);
     out.problems.lock().unwrap().extend(problems);
     out.leftovers.lock().unwrap().extend(leftovers);
+    out.unlisted.lock().unwrap().extend(unlisted);
 }
 
 #[cfg(test)]
@@ -227,6 +233,9 @@ mod tests {
         let s = scan(d.path(), &rules, &ScanCounters::default()).unwrap();
         let names: Vec<_> = s.entries.iter().map(|e| e.rel.as_str()).collect();
         assert_eq!(names, vec!["keep.txt"]);
+        let mut unlisted: Vec<_> = s.unlisted.iter().map(|r| r.as_str()).collect();
+        unlisted.sort();
+        assert_eq!(unlisted, vec!["Temp", "Thumbs.db"]);
     }
 
     #[test]
@@ -238,6 +247,7 @@ mod tests {
             s.leftovers.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
             vec!["a/x.jpg.replica-sync.tmp"]
         );
+        assert_eq!(s.unlisted, s.leftovers);
         assert!(
             s.entries
                 .iter()
