@@ -63,7 +63,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       <span>{label}</span>
       <div className="row">
         <span className="muted">{value ?? current ?? t('editor.notChosen')}</span>
-        <button onClick={async () => { const f = await pickFolder(); if (f) set(f); }}>
+        <button onClick={async () => { const f = await pickFolder(label); if (f) set(f); }}>
           {existing ? t('editor.change') : t('common.browse')}
         </button>
       </div>

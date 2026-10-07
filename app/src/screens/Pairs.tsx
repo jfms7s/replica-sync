@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Navigate } from '../App';
-import { api, pickFolder, type PairView } from '../api';
+import { api, pickFolder, type PairView, type SideKind } from '../api';
 import { formatDate } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
@@ -15,9 +15,11 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
   }, [tx, lang]);
   useEffect(load, [load]);
 
-  const relink = async (v: PairView) => {
-    const side = v.sourceConnected ? 'Replica' : 'Source';
-    const folder = await pickFolder();
+  const relink = async (v: PairView, side: SideKind) => {
+    const title = side === 'Source'
+      ? t('pairs.relinkSource', { label: v.pair.source.label })
+      : t('pairs.relinkReplica', { label: v.pair.replica.label });
+    const folder = await pickFolder(title);
     if (!folder) return;
     try {
       await api.relink(v.pair.id, side, folder);
@@ -58,7 +60,14 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
                     <button disabled={!v.replicaConnected} onClick={() => navigate({ name: 'trash', pairId: pair.id, pairName: pair.name })}>
                       {t('pairs.trash')}
                     </button>
-                    {!ok && <button onClick={() => void relink(v)}>{t('pairs.relink')}</button>}
+                    {!v.sourceConnected && !v.replicaConnected ? (
+                      <>
+                        <button onClick={() => void relink(v, 'Source')}>{t('pairs.relinkSourceButton')}</button>
+                        <button onClick={() => void relink(v, 'Replica')}>{t('pairs.relinkReplicaButton')}</button>
+                      </>
+                    ) : !ok && (
+                      <button onClick={() => void relink(v, v.sourceConnected ? 'Replica' : 'Source')}>{t('pairs.relink')}</button>
+                    )}
                   </div>
                 </div>
                 <p className="muted">
