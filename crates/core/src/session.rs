@@ -72,6 +72,18 @@ fn stats(s: &Snapshot, elapsed: Duration) -> ScanStats {
     }
 }
 
+/// Refuses a source and replica that are the same folder or one inside the
+/// other. `prepare` runs it first; callers that write into the replica before
+/// preparing (the case probe) must run it before that write.
+pub fn check_roots(source_root: &Path, replica_root: &Path) -> Result<(), PrepareError> {
+    let src_canon = canonical(source_root).map_err(PrepareError::Source)?;
+    let rep_canon = canonical(replica_root).map_err(PrepareError::Replica)?;
+    if src_canon.starts_with(&rep_canon) || rep_canon.starts_with(&src_canon) {
+        return Err(PrepareError::Nested);
+    }
+    Ok(())
+}
+
 pub fn prepare(
     source_root: &Path,
     replica_root: &Path,
@@ -80,11 +92,7 @@ pub fn prepare(
     counters: &SessionCounters,
 ) -> Result<Prepared, PrepareError> {
     let started = Instant::now();
-    let src_canon = canonical(source_root).map_err(PrepareError::Source)?;
-    let rep_canon = canonical(replica_root).map_err(PrepareError::Replica)?;
-    if src_canon.starts_with(&rep_canon) || rep_canon.starts_with(&src_canon) {
-        return Err(PrepareError::Nested);
-    }
+    check_roots(source_root, replica_root)?;
     let timed = |root: &Path, c: &ScanCounters| {
         let t = Instant::now();
         scan(root, rules, c).map(|s| (s, t.elapsed()))
@@ -178,5 +186,25 @@ mod tests {
         }
         assert!(outer.join("a.txt").exists() && inner.join("b.txt").exists());
         assert!(!outer.join(".sync-trash").exists());
+    }
+    #[test]
+    fn check_roots_refuses_same_or_nested_and_allows_siblings() {
+        let d = tempfile::tempdir().unwrap();
+        let (outer, inner, other) = (
+            d.path().join("outer"),
+            d.path().join("outer/inner"),
+            d.path().join("other"),
+        );
+        for p in [&inner, &other] {
+            fs::create_dir_all(p).unwrap();
+        }
+        for (s, r) in [(&outer, &inner), (&inner, &outer), (&outer, &outer)] {
+            assert!(matches!(check_roots(s, r), Err(PrepareError::Nested)));
+        }
+        check_roots(&outer, &other).unwrap();
+        assert!(matches!(
+            check_roots(&outer, &d.path().join("missing")),
+            Err(PrepareError::Replica(ScanError::Root { .. }))
+        ));
     }
 }
