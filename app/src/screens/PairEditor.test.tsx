@@ -39,4 +39,25 @@ describe('PairEditor', () => {
     );
     expect(navigate).toHaveBeenCalledWith({ name: 'pairs' });
   });
+
+  it('never sends a trash age of 0 or an empty one', async () => {
+    vi.mocked(pickFolder).mockResolvedValueOnce('/a').mockResolvedValueOnce('/b');
+    render(<I18nProvider lang="en"><PairEditor pair={null} navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.type(screen.getByLabelText('Name'), 'Photos');
+    const browse = screen.getAllByRole('button', { name: 'Browse…' });
+    await userEvent.click(browse[0]);
+    await userEvent.click(browse[1]);
+    const days = await screen.findByDisplayValue('21');
+    await userEvent.clear(days);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.type(days, '0');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.savePair).not.toHaveBeenCalled();
+    await userEvent.clear(days);
+    await userEvent.type(days, '7');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.savePair).toHaveBeenCalledWith(expect.objectContaining({ trashDays: 7 }));
+  });
 });

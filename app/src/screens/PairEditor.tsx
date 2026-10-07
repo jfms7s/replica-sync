@@ -12,7 +12,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
   const [source, setSource] = useState<string | null>(null);
   const [replica, setReplica] = useState<string | null>(null);
   const [rules, setRules] = useState((existing?.user_rules ?? []).join('\n'));
-  const [trashDays, setTrashDays] = useState(existing?.trash_days ?? 30);
+  const [trashDays, setTrashDays] = useState(String(existing?.trash_days ?? 30));
   const [sameVolumeOk, setSameVolumeOk] = useState(false);
   const [askSameVolume, setAskSameVolume] = useState(false);
   const [builtins, setBuiltins] = useState<string[]>([]);
@@ -21,10 +21,15 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
 
   useEffect(() => {
     api.builtinRules().then(setBuiltins).catch(() => {});
-    if (!existing) api.getSettings().then((s) => setTrashDays(s.settings.defaultTrashDays)).catch(() => {});
+    if (!existing) api.getSettings().then((s) => setTrashDays(String(s.settings.defaultTrashDays))).catch(() => {});
   }, [existing]);
 
+  // Empty, fractional or below 1 is never sent (0 would offer to empty the run just made).
+  const days = Number(trashDays);
+  const daysValid = trashDays.trim() !== '' && Number.isInteger(days) && days >= 1;
+
   const save = async () => {
+    if (!daysValid) return;
     setError(null);
     try {
       await api.savePair({
@@ -33,7 +38,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
         source,
         replica,
         userRules: rules.split('\n').map((r) => r.trim()).filter(Boolean),
-        trashDays,
+        trashDays: days,
         allowSameVolume: sameVolumeOk,
       });
       navigate({ name: 'pairs' });
@@ -84,7 +89,8 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       <p className="muted">{t('editor.builtins')}: {builtins.join(', ')}</p>
       <label>
         {t('editor.trashDays')}
-        <input type="number" min={1} value={trashDays} onChange={(e) => setTrashDays(Number(e.target.value))} />
+        <input type="number" min={1} step={1} value={trashDays} aria-invalid={!daysValid}
+          onChange={(e) => setTrashDays(e.target.value)} />
       </label>
       {askSameVolume && (
         <label className="row" style={{ flexDirection: 'row' }}>
@@ -97,7 +103,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
         <div>{existing && <button onClick={() => setConfirmDelete(true)}>{t('editor.delete')}</button>}</div>
         <div className="row">
           <button onClick={() => navigate({ name: 'pairs' })}>{t('common.cancel')}</button>
-          <button className="primary" onClick={() => void save()}>{t('common.save')}</button>
+          <button className="primary" disabled={!daysValid} onClick={() => void save()}>{t('common.save')}</button>
         </div>
       </div>
       {confirmDelete && existing && (

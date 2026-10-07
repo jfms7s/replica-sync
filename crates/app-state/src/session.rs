@@ -181,6 +181,9 @@ impl Session {
     }
 
     pub fn set_settings(&mut self, settings: Settings) -> Result<(), AppError> {
+        if settings.default_trash_days == 0 {
+            return Err(AppError::new("pair.badTrashDays"));
+        }
         settings.save(&self.paths.settings_file())?;
         self.settings = settings;
         Ok(())
@@ -224,6 +227,10 @@ impl Session {
         self.ensure_idle()?;
         if input.name.trim().is_empty() {
             return Err(AppError::new("pair.nameRequired"));
+        }
+        // An age of 0 would offer to empty the trash run the next apply makes.
+        if input.trash_days == 0 {
+            return Err(AppError::new("pair.badTrashDays"));
         }
         SkipRules::new(&input.user_rules)?;
         let pair = match &input.id {
@@ -565,12 +572,16 @@ impl Session {
         if let Err(e) = self.store.save() {
             warnings.push(e.into());
         }
-        let old_trash_runs = trash::runs_older_than(
+        // Never offer to empty the run this apply just made.
+        let old_trash_runs: Vec<String> = trash::runs_older_than(
             &replica_root,
             trash_days,
             chrono::Local::now().naive_local(),
         )
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| report.trash_run.as_ref() != Some(id))
+        .collect();
         if let Some(c) = self
             .current
             .as_mut()
@@ -829,6 +840,72 @@ mod tests {
             ..bad
         };
         assert_eq!(w.s.save_pair(bad, &w.v).err().unwrap().code, "pair.badRule");
+    }
+
+    #[test]
+    fn a_trash_age_of_zero_is_refused() {
+        let mut w = world();
+        let input = PairInput {
+            id: Some(w.id.clone()),
+            name: "Photos".into(),
+            source: None,
+            replica: None,
+            user_rules: vec![],
+            trash_days: 0,
+            allow_same_volume: false,
+        };
+        assert_eq!(
+            w.s.save_pair(input.clone(), &w.v).err().unwrap().code,
+            "pair.badTrashDays"
+        );
+        let new = PairInput {
+            id: None,
+            source: Some(w.src()),
+            replica: Some(w.rep()),
+            ..input
+        };
+        assert_eq!(
+            w.s.save_pair(new, &w.v).err().unwrap().code,
+            "pair.badTrashDays"
+        );
+        assert_eq!(w.s.pair_views(&w.v)[0].pair.trash_days, 30);
+        let bad = Settings {
+            default_trash_days: 0,
+            ..Settings::default()
+        };
+        assert_eq!(
+            w.s.set_settings(bad).err().unwrap().code,
+            "pair.badTrashDays"
+        );
+        assert_eq!(w.s.settings().default_trash_days, 30);
+        assert!(!w.s.paths().settings_file().exists());
+    }
+
+    #[test]
+    fn old_trash_runs_never_include_the_run_just_made() {
+        let mut w = world();
+        let input = PairInput {
+            id: Some(w.id.clone()),
+            name: "Photos".into(),
+            source: None,
+            replica: None,
+            user_rules: vec![],
+            trash_days: 1,
+            allow_same_volume: false,
+        };
+        w.s.save_pair(input, &w.v).unwrap();
+        fs::create_dir_all(w.rep().join(".sync-trash/2019-01-01_000000")).unwrap();
+        write(&w.rep(), "gone.txt", b"g");
+        write(&w.src(), "keep.txt", b"k");
+        w.scan();
+        w.s.confirm_guard().unwrap();
+        let mut job = w.s.begin_apply(&w.v).unwrap();
+        // A stamp older than the trash age, as a clock change or a long run could give.
+        job.stamp = "2020-01-01_000000".into();
+        let report = job.run(&mut |_| {});
+        assert_eq!(report.trash_run.as_deref(), Some("2020-01-01_000000"));
+        let run = w.s.finish_apply(job, report).unwrap();
+        assert_eq!(run.old_trash_runs, vec!["2019-01-01_000000".to_string()]);
     }
 
     #[test]

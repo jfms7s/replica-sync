@@ -158,6 +158,7 @@
   "error.pair.notFound": "Este par já não existe.",
   "error.pair.foldersRequired": "Escolha as duas pastas.",
   "error.pair.nameRequired": "Dê um nome ao par.",
+  "error.pair.badTrashDays": "A idade do lixo tem de ser pelo menos 1 dia.",
   "error.drive.notConnected": "{label} não está ligado.",
   "error.drive.folderMissing": "A pasta {path} já não existe.",
   "error.drive.wrongVolume": "O disco em {path} não é o que foi guardado para este par.",

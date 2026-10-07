@@ -158,6 +158,7 @@
   "error.pair.notFound": "This pair no longer exists.",
   "error.pair.foldersRequired": "Choose both folders.",
   "error.pair.nameRequired": "Give the pair a name.",
+  "error.pair.badTrashDays": "The trash age must be at least 1 day.",
   "error.drive.notConnected": "{label} is not connected.",
   "error.drive.folderMissing": "The folder {path} no longer exists.",
   "error.drive.wrongVolume": "The drive at {path} is not the one saved for this pair.",
