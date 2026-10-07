@@ -2,6 +2,7 @@
 //! replica match the source, and apply the approved ones safely.
 
 pub mod diff;
+pub mod execute;
 pub mod model;
 pub mod moves;
 pub mod plan;
