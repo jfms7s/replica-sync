@@ -2,7 +2,7 @@
 
 use crate::model::{Change, MoveKind, RelPath, modified_ns};
 use crate::plan::{ChangeId, Plan, Planned};
-use crate::rules::TEMP_SUFFIX;
+use crate::rules::{CASE_RENAME_SUFFIX, TEMP_SUFFIX};
 use crate::safety::{ReplicaRoot, SafetyError};
 use crate::trash::{TrashReason, TrashWriter};
 use filetime::FileTime;
@@ -191,13 +191,22 @@ fn target(ctx: &ExecContext, rel: &RelPath) -> Result<PathBuf, Stop> {
         .map_err(|e| safety_stop(e, ctx.replica.path()))
 }
 
-fn temp_path(target: &Path) -> PathBuf {
+fn with_suffix(target: &Path, suffix: &str) -> PathBuf {
     let mut name = target
         .file_name()
         .expect("targets have a name")
         .to_os_string();
-    name.push(TEMP_SUFFIX);
+    name.push(suffix);
     target.with_file_name(name)
+}
+
+fn temp_path(target: &Path) -> PathBuf {
+    with_suffix(target, TEMP_SUFFIX)
+}
+
+/// Intermediate name for a capital-letters-only rename (see `CASE_RENAME_SUFFIX`).
+fn case_rename_path(from: &Path) -> PathBuf {
+    with_suffix(from, CASE_RENAME_SUFFIX)
 }
 
 pub fn execute(
@@ -420,7 +429,12 @@ fn move_entry(
     }
     fs::create_dir_all(to_path.parent().expect("never the root")).map_err(on_io)?;
     if case_only {
-        let tmp = temp_path(&from_path);
+        let tmp = case_rename_path(&from_path);
+        if fs::symlink_metadata(&tmp).is_ok() {
+            return Err(Stop::Fail(
+                "something already exists at the new location".into(),
+            ));
+        }
         fs::rename(&from_path, &tmp).map_err(on_io)?;
         fs::rename(&tmp, &to_path).map_err(|e| {
             let _ = fs::rename(&tmp, &from_path);
@@ -1009,5 +1023,55 @@ mod apply_tests {
         assert_eq!(retry.results[0].path, rel("a/x.txt"));
         assert_eq!(retry.applied(), 1);
         assert_eq!(fs::read(f.rep.join("a/x.txt")).unwrap(), b"x");
+    }
+    #[test]
+    fn case_rename_intermediate_is_a_normal_replica_entry() {
+        let d = tempfile::tempdir().unwrap();
+        let inter = case_rename_path(&d.path().join("Photo.JPG"));
+        fs::write(&inter, b"x").unwrap();
+        let s = crate::scan::scan(
+            d.path(),
+            &crate::rules::SkipRules::new(&[]).unwrap(),
+            &crate::scan::ScanCounters::default(),
+        )
+        .unwrap();
+        assert!(s.leftovers.is_empty(), "{:?}", s.leftovers);
+        assert!(s.unlisted.is_empty(), "{:?}", s.unlisted);
+        let names: Vec<_> = s.entries.iter().map(|e| e.rel.as_str()).collect();
+        assert_eq!(names, vec![inter.file_name().unwrap().to_str().unwrap()]);
+    }
+
+    #[test]
+    fn capital_letters_move_refuses_a_taken_intermediate_name() {
+        let f = fixture();
+        write_file(&f.src, "photo.jpg", b"x", T0);
+        write_file(&f.rep, "Photo.JPG", b"x", T0);
+        let taken = case_rename_path(&f.rep.join("Photo.JPG"));
+        fs::write(&taken, b"user data").unwrap();
+        let plan = crate::plan::build_plan(
+            vec![Change::Move {
+                from: rel("Photo.JPG"),
+                to: rel("photo.jpg"),
+                kind: MoveKind::File {
+                    size: 1,
+                    mtime_ns: ns(T0),
+                },
+            }],
+            crate::diff::CaseMode::Insensitive,
+        )
+        .unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Failed("something already exists at the new location".into())
+        );
+        assert_eq!(fs::read(&taken).unwrap(), b"user data");
+        assert_eq!(fs::read(f.rep.join("Photo.JPG")).unwrap(), b"x");
     }
 }

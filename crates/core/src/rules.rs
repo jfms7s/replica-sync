@@ -5,6 +5,11 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 /// Suffix of the temporary file a copy writes before renaming into place.
 pub const TEMP_SUFFIX: &str = ".replica-sync.tmp";
+/// Suffix of the intermediate name in a capital-letters-only rename. Deliberately
+/// matched by neither `TEMP_SUFFIX` nor any skip rule: a crash between the two
+/// renames leaves an ordinary, visible replica entry, never one that is silently
+/// deleted as a leftover or hidden forever.
+pub const CASE_RENAME_SUFFIX: &str = ".replica-sync-rename";
 /// File written briefly to test whether a drive ignores capital letters.
 pub const CASE_PROBE_NAME: &str = ".replica-sync-case-probe";
 
