@@ -29,6 +29,8 @@ describe('PairEditor', () => {
     const browse = screen.getAllByRole('button', { name: 'Browse…' });
     await userEvent.click(browse[0]);
     await userEvent.click(browse[1]);
+    expect(pickFolder).toHaveBeenNthCalledWith(1, 'Folder to back up (source)');
+    expect(pickFolder).toHaveBeenNthCalledWith(2, 'Backup folder');
     expect(await screen.findByDisplayValue('21')).toBeInTheDocument(); // default trash age from settings
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/same drive/);

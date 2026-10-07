@@ -41,6 +41,22 @@ describe('Pairs', () => {
     expect(within(card).getByRole('button', { name: 'Sync' })).toBeDisabled();
     await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
     expect(api.relink).toHaveBeenCalledWith('p1', 'Replica', '/media/usb/Backup');
+    expect(pickFolder).toHaveBeenCalledWith('Choose the backup folder on USB');
+  });
+
+  it('offers one re-link button per drive when both are missing', async () => {
+    vi.mocked(api.listPairs).mockResolvedValue([view({ sourceConnected: false, replicaConnected: false })]);
+    vi.mocked(pickFolder).mockResolvedValue('/media/x');
+    vi.mocked(api.relink).mockResolvedValue(view().pair);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    const card = (await screen.findByText('Photos')).closest('article')!;
+    expect(within(card).queryByRole('button', { name: 'Re-link drive' })).not.toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link source drive' }));
+    expect(pickFolder).toHaveBeenLastCalledWith('Choose the source folder on Internal');
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Source', '/media/x');
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link backup drive' }));
+    expect(pickFolder).toHaveBeenLastCalledWith('Choose the backup folder on USB');
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Replica', '/media/x');
   });
 
   it('starts a scan from Sync', async () => {

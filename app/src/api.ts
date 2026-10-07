@@ -120,8 +120,9 @@ export async function onEvent<T>(name: EventName, cb: (payload: T) => void): Pro
   return listen<T>(name, (e) => cb(e.payload));
 }
 
-export async function pickFolder(): Promise<string | null> {
-  const r = await open({ directory: true, multiple: false });
+/** `title` tells the user which folder to pick (the dialog has no other hint). */
+export async function pickFolder(title?: string): Promise<string | null> {
+  const r = await open({ directory: true, multiple: false, title });
   return typeof r === 'string' ? r : null;
 }
 
