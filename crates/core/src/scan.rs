@@ -171,6 +171,12 @@ fn walk<'s>(
                 mtime_ns: modified_ns(&md),
             });
             s.spawn(move |s| walk(s, root, rel, rules, counters, out));
+        } else if !md.is_file() {
+            // FIFO, socket or device: never copied, never deleted.
+            problems.push(Problem {
+                rel,
+                reason: "not a regular file".into(),
+            });
         } else {
             counters.files.fetch_add(1, Ordering::Relaxed);
             counters.bytes.fetch_add(md.len(), Ordering::Relaxed);
@@ -313,5 +319,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ScanError::Root { .. }));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_a_problem_not_a_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "ok.txt", b"1", T0);
+        let fifo = d.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        let names: Vec<_> = s.entries.iter().map(|e| e.rel.as_str()).collect();
+        assert_eq!(names, vec!["ok.txt"]);
+        assert_eq!(
+            s.problems,
+            vec![Problem {
+                rel: RelPath::new("pipe").unwrap(),
+                reason: "not a regular file".into()
+            }]
+        );
     }
 }
