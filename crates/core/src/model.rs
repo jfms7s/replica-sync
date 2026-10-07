@@ -312,7 +312,8 @@ mod tests {
 
     #[test]
     fn mtime_round_trips_before_and_after_epoch() {
-        for ns in [0, 1_700_000_000_123_456_789, -86_400_000_000_000] {
+        // Multiples of 100 ns: Windows SystemTime has 100 ns resolution.
+        for ns in [0, 1_700_000_000_123_456_700, -86_400_000_000_000] {
             assert_eq!(mtime_ns(system_time(ns)), ns);
         }
     }
