@@ -137,7 +137,8 @@ fn main() -> Result<ExitCode> {
                 return Ok(ExitCode::from(2));
             }
             let approved = p.plan.actionable_ids();
-            let replica_root = ReplicaRoot::new(&replica)?;
+            let replica_root = ReplicaRoot::new(&replica)
+                .with_context(|| format!("opening replica {}", replica.display()))?;
             let control = Control::default();
             let ctx = ExecContext {
                 source_root: &source,

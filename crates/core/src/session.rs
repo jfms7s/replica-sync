@@ -47,8 +47,17 @@ pub enum PrepareError {
     Source(ScanError),
     #[error("replica: {0}")]
     Replica(ScanError),
+    #[error("the source and the replica are the same folder or one is inside the other")]
+    Nested,
     #[error(transparent)]
     Plan(#[from] PlanError),
+}
+
+fn canonical(root: &Path) -> Result<std::path::PathBuf, ScanError> {
+    dunce::canonicalize(root).map_err(|source| ScanError::Root {
+        path: root.to_path_buf(),
+        source,
+    })
 }
 
 fn stats(s: &Snapshot, elapsed: Duration) -> ScanStats {
@@ -69,6 +78,11 @@ pub fn prepare(
     counters: &SessionCounters,
 ) -> Result<Prepared, PrepareError> {
     let started = Instant::now();
+    let src_canon = canonical(source_root).map_err(PrepareError::Source)?;
+    let rep_canon = canonical(replica_root).map_err(PrepareError::Replica)?;
+    if src_canon.starts_with(&rep_canon) || rep_canon.starts_with(&src_canon) {
+        return Err(PrepareError::Nested);
+    }
     let timed = |root: &Path, c: &ScanCounters| {
         let t = Instant::now();
         scan(root, rules, c).map(|s| (s, t.elapsed()))
@@ -123,12 +137,12 @@ mod tests {
 
     #[test]
     fn cancelled_prepare_is_an_error() {
-        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let counters = SessionCounters::default();
         counters.cancel();
         let err = prepare(
-            d.path(),
-            d.path(),
+            a.path(),
+            b.path(),
             &SkipRules::new(&[]).unwrap(),
             CaseMode::Sensitive,
             &counters,
@@ -139,5 +153,28 @@ mod tests {
             PrepareError::Source(ScanError::Cancelled)
                 | PrepareError::Replica(ScanError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn prepare_refuses_nested_roots() {
+        let d = tempfile::tempdir().unwrap();
+        let (outer, inner) = (d.path().join("outer"), d.path().join("outer/inner"));
+        write_file(&outer, "a.txt", b"1", T0);
+        write_file(&inner, "b.txt", b"2", T0);
+        let rules = SkipRules::new(&[]).unwrap();
+        let run = |s: &Path, r: &Path| {
+            prepare(
+                s,
+                r,
+                &rules,
+                CaseMode::Sensitive,
+                &SessionCounters::default(),
+            )
+        };
+        for (s, r) in [(&outer, &inner), (&inner, &outer), (&outer, &outer)] {
+            assert!(matches!(run(s, r), Err(PrepareError::Nested)));
+        }
+        assert!(outer.join("a.txt").exists() && inner.join("b.txt").exists());
+        assert!(!outer.join(".sync-trash").exists());
     }
 }
