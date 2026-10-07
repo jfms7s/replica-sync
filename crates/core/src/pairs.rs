@@ -4,7 +4,7 @@ use crate::rules::{RuleError, SkipRules};
 use crate::volume::Volumes;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -279,7 +279,11 @@ impl PairStore {
             pairs: &self.pairs,
         })
         .map_err(io::Error::other)?;
-        fs::write(&tmp, text)?;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        // On disk before the rename, so a crash never leaves an empty or torn store.
+        file.sync_all()?;
+        drop(file);
         fs::rename(tmp, &self.path)
     }
 
@@ -535,6 +539,7 @@ mod tests {
         .unwrap();
         store.upsert(p.clone());
         store.save().unwrap();
+        assert!(!path.with_extension("json.tmp").exists());
         let again = PairStore::load(&path).unwrap();
         assert_eq!(again.get(&p.id), Some(&p));
         let mut again = again;
