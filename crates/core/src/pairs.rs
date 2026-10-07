@@ -81,11 +81,15 @@ pub struct NewPair<'a> {
     pub allow_same_volume: bool,
 }
 
+/// The stored side for `path`, plus its canonical path for comparing with the
+/// other side. Both canonical paths come from `std::fs::canonicalize` (always
+/// verbatim on Windows), so a long path still strips and compares correctly.
 fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairError> {
-    let canonical = dunce::canonicalize(path)?;
+    let canonical = fs::canonicalize(path)?;
     let vol = volumes.volume_of(&canonical)?;
+    let mount_root = fs::canonicalize(&vol.mount_root)?;
     let rest = canonical
-        .strip_prefix(&vol.mount_root)
+        .strip_prefix(&mount_root)
         .map_err(|_| io::Error::other("folder is not under its drive's mount point"))?;
     let rel_path = rest
         .components()
@@ -220,7 +224,7 @@ pub fn relink(
         SideKind::Replica => (&pair.source, SideKind::Source),
     };
     if let Ok(other_path) = resolve_side(other.0, other.1, volumes) {
-        check_folders(&new_path, &dunce::canonicalize(other_path)?)?;
+        check_folders(&new_path, &fs::canonicalize(other_path)?)?;
     }
     match side {
         SideKind::Source => pair.source = new_side,
