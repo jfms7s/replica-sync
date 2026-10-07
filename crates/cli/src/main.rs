@@ -6,7 +6,7 @@ use replica_sync_core::execute::{Control, ExecContext, execute};
 use replica_sync_core::rules::SkipRules;
 use replica_sync_core::runlog::{human_bytes, render_plan, render_run};
 use replica_sync_core::safety::ReplicaRoot;
-use replica_sync_core::session::{Prepared, SessionCounters, prepare};
+use replica_sync_core::session::{Prepared, SessionCounters, check_roots, prepare};
 use replica_sync_core::{trash, volume};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ enum Cmd {
 
 fn prepared(source: &Path, replica: &Path, skip: &[String]) -> Result<Prepared> {
     let rules = SkipRules::new(skip)?;
+    // Before the case probe, which writes a file into the replica.
+    check_roots(source, replica)?;
     let case = volume::case_mode(replica).context("probing the replica drive")?;
     Ok(prepare(
         source,
