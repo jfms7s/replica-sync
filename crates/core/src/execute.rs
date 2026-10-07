@@ -17,6 +17,7 @@ use std::time::Duration;
 
 const CHUNK: usize = 8 * 1024 * 1024;
 const DISCONNECTED: &str = "the backup drive was disconnected";
+const SOURCE_DISCONNECTED: &str = "the source drive was disconnected";
 #[cfg(windows)]
 const DISK_FULL_CODES: &[i32] = &[39, 112]; // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 #[cfg(not(windows))]
@@ -162,11 +163,21 @@ fn io_stop(e: &io::Error, replica_root: &Path) -> Stop {
     Stop::Fail(e.to_string())
 }
 
+/// A replica root that vanished mid-change is fatal, whatever the change found.
+fn replica_gone_or(stop: Stop, root: &Path) -> Stop {
+    if root.is_dir() {
+        stop
+    } else {
+        Stop::Fatal(DISCONNECTED.into())
+    }
+}
+
 fn safety_stop(e: SafetyError, replica_root: &Path) -> Stop {
     match e {
-        SafetyError::Escapes(p) => {
-            Stop::Fail(format!("{} is outside the replica folder", p.display()))
-        }
+        SafetyError::Escapes(p) => replica_gone_or(
+            Stop::Fail(format!("{} is outside the replica folder", p.display())),
+            replica_root,
+        ),
         SafetyError::Io(e) => io_stop(&e, replica_root),
     }
 }
@@ -211,6 +222,10 @@ pub fn execute(
         }
         if !ctx.replica.path().is_dir() {
             report.stopped = Some(StopReason::Fatal(DISCONNECTED.into()));
+            break;
+        }
+        if !ctx.source_root.is_dir() {
+            report.stopped = Some(StopReason::Fatal(SOURCE_DISCONNECTED.into()));
             break;
         }
         progress.current = Some(p.change.path().clone());
@@ -389,7 +404,10 @@ fn move_entry(
     let from_path = target(ctx, from)?;
     let to_path = target(ctx, to)?;
     if fs::symlink_metadata(&from_path).is_err() {
-        return Err(Stop::Skip("no longer in the replica".into()));
+        return Err(replica_gone_or(
+            Stop::Skip("no longer in the replica".into()),
+            root,
+        ));
     }
     let case_only = from.fold() == to.fold();
     if !case_only && fs::symlink_metadata(&to_path).is_ok() {
@@ -412,14 +430,16 @@ fn move_entry(
 
 fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Result<(), Stop> {
     let root = ctx.replica.path();
-    if fs::symlink_metadata(rel.to_path(ctx.source_root)).is_ok() {
-        return Err(Stop::Skip("back on the source since the preview".into()));
+    match fs::symlink_metadata(rel.to_path(ctx.source_root)) {
+        Ok(_) => return Err(Stop::Skip("back on the source since the preview".into())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Stop::Fail(e.to_string())),
     }
     let dest = target(ctx, rel)?;
     let md = match fs::symlink_metadata(&dest) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(Stop::Skip("already gone".into()));
+            return Err(replica_gone_or(Stop::Skip("already gone".into()), root));
         }
         Err(e) => return Err(io_stop(&e, root)),
     };
@@ -431,7 +451,10 @@ fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Res
 fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
     match fs::remove_dir(target(ctx, rel)?) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Stop::Skip("already gone".into())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(replica_gone_or(
+            Stop::Skip("already gone".into()),
+            ctx.replica.path(),
+        )),
         Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
             Err(Stop::Skip("folder not empty".into()))
         }
@@ -851,5 +874,89 @@ mod apply_tests {
         );
         assert_eq!(report.results.len(), 1);
         assert!(no_temp_files(&unplugged));
+    }
+
+    #[test]
+    fn source_disappearing_stops_before_deletes() {
+        let f = fixture();
+        write_file(&f.rep, "gone.txt", b"1", T0);
+        write_file(&f.src, "a.txt", b"1", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let away = f.src.with_file_name("src-away");
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if p.changes_done == 1 && f.src.exists() {
+                    fs::rename(&f.src, &away).unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            report.stopped,
+            Some(StopReason::Fatal(
+                "the source drive was disconnected".into()
+            ))
+        );
+        assert!(f.rep.join("gone.txt").exists());
+    }
+
+    #[test]
+    fn replica_vanishing_inside_a_change_is_fatal() {
+        let f = fixture();
+        let missing = f.rep.join("nope");
+        let fatal = |s: Stop| matches!(s, Stop::Fatal(r) if r == DISCONNECTED);
+        assert!(fatal(replica_gone_or(
+            Stop::Skip("already gone".into()),
+            &missing
+        )));
+        assert!(fatal(safety_stop(
+            SafetyError::Escapes(missing.clone()),
+            &missing
+        )));
+        assert!(matches!(
+            replica_gone_or(Stop::Skip("already gone".into()), &f.rep),
+            Stop::Skip(r) if r == "already gone"
+        ));
+        assert!(matches!(
+            safety_stop(SafetyError::Escapes(f.rep.clone()), &f.rep),
+            Stop::Fail(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_fails_on_unexpected_source_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        write_file(&f.src, "d/x.txt", b"1", T0);
+        write_file(&f.rep, "d/x.txt", b"1", T0);
+        let hidden = f.src.join("d");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::symlink_metadata(hidden.join("x.txt")).is_ok() {
+            fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: permissions are not enforced
+        }
+        let plan = crate::plan::build_plan(
+            vec![Change::Delete {
+                path: rel("d/x.txt"),
+                size: 1,
+                mtime_ns: ns(T0),
+            }],
+            crate::diff::CaseMode::Sensitive,
+        )
+        .unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(report.results[0].outcome, Outcome::Failed(_)));
+        assert!(f.rep.join("d/x.txt").exists());
     }
 }
