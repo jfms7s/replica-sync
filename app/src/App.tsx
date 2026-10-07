@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api, type AppError, type PairView, type PreviewSummary, type RunView } from './api';
 import { I18nProvider, type Lang } from './i18n';
+import Applying from './screens/Applying';
 import Broken from './screens/Broken';
+import CloseGuard from './screens/CloseGuard';
 import Pairs from './screens/Pairs';
 import PairEditor from './screens/PairEditor';
 import Preview from './screens/Preview';
+import Result from './screens/Result';
 import Scanning from './screens/Scanning';
 import Settings from './screens/Settings';
 
@@ -41,6 +44,7 @@ export default function App() {
   return (
     <I18nProvider lang={lang}>
       {broken ? <Broken error={broken} /> : <Current screen={screen} navigate={setScreen} onLanguage={setLang} />}
+      <CloseGuard />
     </I18nProvider>
   );
 }
@@ -57,6 +61,10 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
       return <Scanning pairId={screen.pairId} pairName={screen.pairName} navigate={navigate} />;
     case 'preview':
       return <Preview summary={screen.summary} navigate={navigate} />;
+    case 'applying':
+      return <Applying mode={screen.mode} pairName={screen.pairName} navigate={navigate} />;
+    case 'result':
+      return <Result run={screen.run} pairName={screen.pairName} navigate={navigate} />;
     default:
       return <p className="screen">{screen.name}</p>; // replaced in Tasks 9–11
   }
