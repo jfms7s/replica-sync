@@ -40,4 +40,14 @@ describe('Result', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!); // the modal's button
     expect(api.emptyRun).toHaveBeenCalledWith('p1', '2026-08-01_090000');
   });
+
+  it('a_partial_empty_failure_keeps_only_the_runs_not_yet_emptied', async () => {
+    const two = { ...run, oldTrashRuns: ['2026-08-01_090000', '2026-08-02_090000'] };
+    vi.mocked(api.emptyRun).mockResolvedValueOnce(undefined).mockRejectedValueOnce({ code: 'trash.unsafe', params: {} });
+    render(<I18nProvider lang="en"><Result run={two} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Empty them' }));
+    await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.getByText('1 trash runs are older than 30 days.')).toBeInTheDocument();
+  });
 });

@@ -23,4 +23,14 @@ describe('CloseGuard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Stop and close' }));
     expect(api.stopAndClose).toHaveBeenCalled();
   });
+
+  it('stop_failure_is_shown_in_the_modal', async () => {
+    vi.mocked(api.stopAndClose).mockRejectedValueOnce({ code: 'drive.notConnected', params: { label: 'USB' } });
+    render(<I18nProvider lang="en"><CloseGuard /></I18nProvider>);
+    await vi.waitFor(() => expect(handlers['close-requested']).toBeDefined());
+    act(() => handlers['close-requested'](null));
+    await userEvent.click(screen.getByRole('button', { name: 'Stop and close' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('USB is not connected.');
+    expect(screen.getByRole('button', { name: 'Stop and close' })).toBeEnabled();
+  });
 });

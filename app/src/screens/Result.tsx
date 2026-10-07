@@ -17,8 +17,10 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
   const emptyOld = async () => {
     setConfirmEmpty(false);
     try {
-      for (const id of oldRuns) await api.emptyRun(run.pairId, id);
-      setOldRuns([]);
+      for (const id of oldRuns) {
+        await api.emptyRun(run.pairId, id);
+        setOldRuns((rest) => rest.filter((r) => r !== id));
+      }
     } catch (e) {
       setMessage(errorText(tx, lang, e));
     }
