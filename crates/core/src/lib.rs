@@ -4,6 +4,7 @@
 pub mod diff;
 pub mod model;
 pub mod moves;
+pub mod plan;
 pub mod rules;
 pub mod scan;
 
