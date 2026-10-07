@@ -13,7 +13,7 @@ mod linux;
 pub use linux::LinuxVolumes as SystemVolumes;
 
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 #[cfg(windows)]
 pub use windows::WindowsVolumes as SystemVolumes;
 

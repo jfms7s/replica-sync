@@ -38,7 +38,7 @@ fn mount_root(path: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(from_wide(&buf)))
 }
 
-fn serial_of(root: &Path) -> io::Result<u64> {
+fn serial_from_file_id(root: &Path) -> io::Result<u64> {
     let name = wide(root);
     // SAFETY: `name` is NUL-terminated; null security attributes and template are allowed.
     let handle = unsafe {
@@ -74,6 +74,45 @@ fn serial_of(root: &Path) -> io::Result<u64> {
     } else {
         Ok(info.VolumeSerialNumber)
     }
+}
+
+fn serial_from_volume_info(root: &Path) -> io::Result<u64> {
+    let name = wide(root);
+    let mut serial: u32 = 0;
+    // SAFETY: `name` is NUL-terminated; `serial` is a valid out-pointer; other out-pointers are null.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            name.as_ptr(),
+            ptr::null_mut(),
+            0,
+            &mut serial,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(u64::from(serial))
+    }
+}
+
+/// FILE_ID_INFO's 64-bit serial, or the 32-bit volume serial when a filesystem
+/// doesn't support FileIdInfo (seen on some FAT/exFAT drivers).
+fn serial_of(root: &Path) -> io::Result<u64> {
+    serial_from_file_id(root).or_else(|_| serial_from_volume_info(root))
+}
+
+/// Which source the id came from, printed by `replica-sync-cli volume` for the manual exFAT check.
+pub fn id_method(path: &Path) -> io::Result<&'static str> {
+    let root = mount_root(&dunce::canonicalize(path)?)?;
+    Ok(if serial_from_file_id(&root).is_ok() {
+        "file-id-info"
+    } else {
+        serial_from_volume_info(&root).map(|_| "volume-serial")?
+    })
 }
 
 fn label_of(root: &Path) -> String {
@@ -152,5 +191,10 @@ mod tests {
         assert!(v.id.starts_with("win:") && v.id.len() == 20, "{}", v.id);
         let found = vols.find(&v.id).unwrap().unwrap();
         assert_eq!(found.mount_root, v.mount_root);
+    }
+
+    #[test]
+    fn volume_info_serial_is_non_zero() {
+        assert_ne!(serial_from_volume_info(Path::new(r"C:\")).unwrap(), 0);
     }
 }

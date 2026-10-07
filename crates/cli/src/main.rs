@@ -43,6 +43,8 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Show the drive id the app would store for a folder.
+    Volume { path: PathBuf },
     /// Write a deterministic test tree.
     GenTree {
         dir: PathBuf,
@@ -153,6 +155,18 @@ fn main() -> Result<ExitCode> {
             if report.failed() > 0 || report.stopped.is_some() {
                 return Ok(ExitCode::from(1));
             }
+        }
+        Cmd::Volume { path } => {
+            use replica_sync_core::volume::Volumes;
+            let v = volume::system().volume_of(&path)?;
+            println!(
+                "id: {}\nmount root: {}\nlabel: {}",
+                v.id,
+                v.mount_root.display(),
+                v.label
+            );
+            #[cfg(windows)]
+            println!("method: {}", volume::windows::id_method(&path)?);
         }
         Cmd::GenTree { dir, files, large } => {
             if dir.exists() && fs::read_dir(&dir)?.next().is_some() {

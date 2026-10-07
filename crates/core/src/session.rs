@@ -102,13 +102,18 @@ pub fn prepare(
         || timed(replica_root, &counters.replica),
     );
     let (src, src_t) = src.map_err(PrepareError::Source)?;
-    let (rep, rep_t) = rep.map_err(PrepareError::Replica)?;
+    let (mut rep, rep_t) = rep.map_err(PrepareError::Replica)?;
     // Temp files from an interrupted run: never user data, safe to delete.
-    let leftovers_removed = rep
+    // Only leftovers that could not be removed still pin their folder.
+    let removed: std::collections::HashSet<_> = rep
         .leftovers
         .iter()
         .filter(|r| fs::remove_file(r.to_path(replica_root)).is_ok())
-        .count();
+        .cloned()
+        .collect();
+    let leftovers_removed = removed.len();
+    rep.leftovers.retain(|r| !removed.contains(r));
+    rep.unlisted.retain(|r| !removed.contains(r));
     let plan = build_plan(detect_moves(diff(&src, &rep, case), &src, &rep, case), case)?;
     Ok(Prepared {
         plan,
