@@ -2,6 +2,7 @@
 
 use crate::AppState;
 use app_state::error::AppError;
+use app_state::paths::AppPaths;
 use app_state::progress::{JobDone, ScanProgressView, Throttle};
 use app_state::session::{ApplyJob, PairInput, PairView, PreviewSummary, Session};
 use app_state::settings::{self, Settings};
@@ -353,7 +354,9 @@ pub fn open_data_folder(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
     open(&app, &state.data_dir)
 }
 
+/// Opens a run log. Only files inside the app's logs folder are opened.
 #[tauri::command]
-pub fn open_path(app: AppHandle, path: PathBuf) -> Res<()> {
-    open_path_raw(&app, &path)
+pub fn open_path(app: AppHandle, state: State<'_, AppState>, path: PathBuf) -> Res<()> {
+    let file = AppPaths::new(state.data_dir.clone()).log_file(&path)?;
+    open_path_raw(&app, &file)
 }
