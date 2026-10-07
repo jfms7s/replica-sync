@@ -3,6 +3,7 @@
 
 pub mod model;
 pub mod rules;
+pub mod scan;
 
 #[cfg(test)]
 mod testutil;
