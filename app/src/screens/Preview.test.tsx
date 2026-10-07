@@ -5,7 +5,7 @@ import { I18nProvider } from '../i18n';
 import type { PreviewSummary } from '../api';
 
 vi.mock('../api', () => ({
-  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue([]), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
+  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
   pickSaveFile: vi.fn(),
 }));
 import { api } from '../api';
@@ -87,5 +87,15 @@ describe('Preview', () => {
     expect(navigate).toHaveBeenCalledWith({
       name: 'trash', pairId: 'p1', pairName: 'Photos', back: { name: 'preview', summary: short },
     });
+  });
+
+  it('show_them_opens_at_most_50_folders', async () => {
+    const many = Array.from({ length: 120 }, (_, i) => `d${String(i).padStart(3, '0')}`);
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, deleteFolders: many }} navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Show them' }));
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(51));
+    const asked = vi.mocked(api.treeChildren).mock.calls.slice(1).map(([p]) => p);
+    expect(asked).toEqual(many.slice(0, 50));
   });
 });

@@ -79,6 +79,7 @@
   "detail.movedFolder": "movido de {from} ({files} ficheiros)",
   "detail.renamedFrom": "renomeado de {from}",
   "tree.label": "Alterações",
+  "tree.more": "Mais {count} não mostrados — use a caixa da pasta para os incluir ou excluir todos.",
 
   "apply.title": "A aplicar alterações",
   "apply.progress": "{done} de {total} alterações · {bytes} de {totalBytes}",

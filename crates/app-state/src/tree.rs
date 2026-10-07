@@ -47,6 +47,14 @@ pub struct NodeView {
     pub tick: Tick,
 }
 
+/// One folder's children: the first `limit` of them, and how many there are in all.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildrenPage {
+    pub nodes: Vec<NodeView>,
+    pub total: usize,
+}
+
 struct Row {
     key: String,
     idx: usize,
@@ -94,12 +102,14 @@ impl PlanTree {
         !matches!(plan.changes[idx].change, Change::Skipped { .. })
     }
 
+    /// At most `limit` children are built; `total` counts them all.
     pub fn children(
         &self,
         plan: &Plan,
         folder: &RelPath,
         sel: &HashSet<ChangeId>,
-    ) -> Vec<NodeView> {
+        limit: usize,
+    ) -> ChildrenPage {
         let (lo, hi) = self.range(folder);
         let skip = if folder.is_root() {
             0
@@ -107,6 +117,7 @@ impl PlanTree {
             folder.as_str().len() + 1
         };
         let mut out = Vec::new();
+        let mut total = 0;
         let mut i = lo;
         while i < hi {
             let path = plan.changes[self.rows[i].idx].change.path();
@@ -121,10 +132,13 @@ impl PlanTree {
                 .to_owned();
             let child = folder.join(&name);
             let (clo, chi) = self.range(&child);
-            out.push(self.node(plan, &child, name, clo, chi, sel));
+            if out.len() < limit {
+                out.push(self.node(plan, &child, name, clo, chi, sel));
+            }
+            total += 1;
             i = chi.max(i + 1);
         }
-        out
+        ChildrenPage { nodes: out, total }
     }
 
     fn node(
@@ -223,6 +237,8 @@ mod tests {
     use replica_sync_core::plan::build_plan;
     use replica_sync_core::reason::SkipReason;
 
+    const ALL: usize = usize::MAX;
+
     fn rel(s: &str) -> RelPath {
         RelPath::new(s).unwrap()
     }
@@ -276,7 +292,7 @@ mod tests {
     fn root_children_group_by_first_component() {
         let (plan, tree) = fixture();
         let sel = plan.actionable_ids();
-        let root = tree.children(&plan, &RelPath::root(), &sel);
+        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
         // byte order of the \0-separated keys: uppercase first, "a" before "a-c"
         assert_eq!(names(&root), vec!["New", "a", "a-c", "lnk", "top.txt"]);
         let a = root.iter().find(|n| n.name == "a").unwrap();
@@ -301,7 +317,7 @@ mod tests {
     fn sibling_with_a_shared_prefix_is_not_inside_the_folder() {
         let (plan, tree) = fixture();
         let sel = plan.actionable_ids();
-        let a = tree.children(&plan, &rel("a"), &sel);
+        let a = tree.children(&plan, &rel("a"), &sel, ALL).nodes;
         assert_eq!(names(&a), vec!["b", "old.txt"]);
     }
 
@@ -311,7 +327,8 @@ mod tests {
         let mut sel = plan.actionable_ids();
         tree.toggle(&plan, &rel("a"), &mut sel);
         let tick_a = |sel: &HashSet<ChangeId>| {
-            tree.children(&plan, &RelPath::root(), sel)
+            tree.children(&plan, &RelPath::root(), sel, ALL)
+                .nodes
                 .into_iter()
                 .find(|n| n.name == "a")
                 .unwrap()
@@ -347,6 +364,23 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_folder_gives_the_first_children_and_the_full_count() {
+        let changes: Vec<Change> = (0..2500)
+            .map(|i| create(&format!("big/f{i:05}.txt"), 1))
+            .collect();
+        let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let page = tree.children(&plan, &rel("big"), &sel, 2000);
+        assert_eq!((page.nodes.len(), page.total), (2000, 2500));
+        assert_eq!(page.nodes[0].name, "f00000.txt");
+        let all = tree.children(&plan, &rel("big"), &sel, ALL);
+        assert_eq!((all.nodes.len(), all.total), (2500, 2500));
+        let v = serde_json::to_value(&page).unwrap();
+        assert_eq!(v["total"], 2500);
+    }
+
+    #[test]
     fn root_children_and_toggle_with_200k_changes_are_fast() {
         let changes: Vec<Change> = (0..200_000)
             .map(|i| create(&format!("d{:03}/f{i:06}.txt", i % 500), 1))
@@ -355,7 +389,7 @@ mod tests {
         let tree = PlanTree::new(&plan);
         let mut sel = plan.actionable_ids();
         let t = std::time::Instant::now();
-        let root = tree.children(&plan, &RelPath::root(), &sel);
+        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
         tree.toggle(&plan, &RelPath::root(), &mut sel);
         let elapsed = t.elapsed();
         assert_eq!(root.len(), 500);

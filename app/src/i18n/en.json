@@ -79,6 +79,7 @@
   "detail.movedFolder": "moved from {from} ({files} files)",
   "detail.renamedFrom": "renamed from {from}",
   "tree.label": "Changes",
+  "tree.more": "{count} more not shown — use the folder's checkbox to include or exclude them all.",
 
   "apply.title": "Applying changes",
   "apply.progress": "{done} of {total} changes · {bytes} of {totalBytes}",
