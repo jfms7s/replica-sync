@@ -73,6 +73,12 @@ impl TrashWriter {
         let (_, run_dir, manifest) = self.run.as_mut().expect("opened above");
         let dest = rel.to_path(&run_dir.join(FILES_DIR));
         fs::create_dir_all(dest.parent().expect("a trashed path is never the root"))?;
+        if fs::symlink_metadata(&dest).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{rel} is already in trash run {run_dir:?}"),
+            ));
+        }
         fs::rename(rel.to_path(&self.replica_root), &dest)?;
         let line = serde_json::to_string(&ManifestLine::Item(TrashItem {
             path: rel.clone(),
@@ -268,6 +274,13 @@ pub fn restore(
     paths: &[RelPath],
     on_conflict: OnConflict,
 ) -> Result<usize, RestoreError> {
+    let mut seen = HashSet::new();
+    let paths: Vec<RelPath> = paths
+        .iter()
+        .filter(|p| seen.insert((*p).clone()))
+        .cloned()
+        .collect();
+    let paths = paths.as_slice();
     let run = run_dir(replica_root, run_id)?;
     let contents = run_contents(replica_root, run_id)?;
     let known: HashSet<&RelPath> = contents.items.iter().map(|i| &i.path).collect();
@@ -282,6 +295,12 @@ pub fn restore(
     let conflicts: Vec<usize> = (0..paths.len())
         .filter(|&i| fs::symlink_metadata(&targets[i]).is_ok())
         .collect();
+    if let Some(&i) = conflicts
+        .iter()
+        .find(|&&i| fs::symlink_metadata(&targets[i]).is_ok_and(|m| m.is_dir()))
+    {
+        return Err(RestoreError::Conflict(paths[i].clone()));
+    }
     if let (Some(&i), OnConflict::Refuse) = (conflicts.first(), on_conflict) {
         return Err(RestoreError::Conflict(paths[i].clone()));
     }
@@ -296,6 +315,8 @@ pub fn restore(
         .open(run.join(MANIFEST))?;
     for (p, target) in paths.iter().zip(&targets) {
         fs::create_dir_all(target.parent().expect("never the root"))?;
+        // NOTE: fs::rename replaces a file created after the conflict check above;
+        // a no-replace rename is deferred.
         fs::rename(p.to_path(&run.join(FILES_DIR)), target)?;
         let line = serde_json::to_string(&ManifestLine::Restored {
             restored: p.clone(),
@@ -497,5 +518,50 @@ mod tests {
             runs_older_than(d.path(), 30, now).unwrap(),
             vec!["2026-08-01_090000".to_string()]
         );
+    }
+
+    #[test]
+    fn trashing_the_same_path_twice_in_one_run_keeps_the_first_copy() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"first", T0);
+        let mut w = trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        write_file(d.path(), "x.txt", b"second", T0);
+        let err = w
+            .move_in(&rel("x.txt"), 6, ns(T0), TrashReason::Deleted)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let run = d.path().join(TRASH_DIR).join(STAMP).join(FILES_DIR);
+        assert_eq!(fs::read(run.join("x.txt")).unwrap(), b"first");
+        assert_eq!(fs::read(d.path().join("x.txt")).unwrap(), b"second");
+    }
+
+    #[test]
+    fn restore_with_duplicate_paths_restores_once() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        let n = restore(
+            d.path(),
+            STAMP,
+            &[rel("x.txt"), rel("x.txt")],
+            OnConflict::Refuse,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(fs::read(d.path().join("x.txt")).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn restore_refuses_a_folder_in_the_way() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        write_file(d.path(), "x.txt/inner", b"i", T0);
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("x.txt")], OnConflict::TrashExisting),
+            Err(RestoreError::Conflict(_))
+        ));
+        assert!(d.path().join("x.txt/inner").exists());
+        assert_eq!(run_contents(d.path(), STAMP).unwrap().items.len(), 1);
     }
 }
