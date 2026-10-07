@@ -59,7 +59,11 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
         </span>
       </header>
       {s.isEmpty ? (
-        <p className="panel">{t('preview.inSync')}</p>
+        <>
+          <p className="panel">{t('preview.inSync')}</p>
+          {/* Skipped items are not changes, but the user may want to see why. */}
+          {s.totals.skipped > 0 && <Tree onSummary={update} expandRequest={null} refreshToken={refreshToken} />}
+        </>
       ) : (
         <>
           {s.totals.deletes > 0 && (
