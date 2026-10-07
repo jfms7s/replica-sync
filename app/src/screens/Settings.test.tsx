@@ -19,4 +19,21 @@ describe('Settings', () => {
     expect(api.setSettings).toHaveBeenCalledWith({ language: 'pt-PT', defaultTrashDays: 30 });
     expect(onLanguage).toHaveBeenCalledWith('pt-PT');
   });
+
+  it('never sends a default trash age of 0 or an empty one', async () => {
+    vi.mocked(api.setSettings).mockClear();
+    vi.mocked(api.getSettings).mockResolvedValue({ settings: { language: 'en', defaultTrashDays: 30 }, resolvedLanguage: 'en' });
+    vi.mocked(api.setSettings).mockResolvedValue({ settings: { language: 'en', defaultTrashDays: 5 }, resolvedLanguage: 'en' });
+    render(<I18nProvider lang="en"><Settings navigate={vi.fn()} onLanguage={vi.fn()} /></I18nProvider>);
+    const days = await screen.findByDisplayValue('30');
+    await userEvent.clear(days);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await userEvent.type(days, '0');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.setSettings).not.toHaveBeenCalled();
+    await userEvent.clear(days);
+    await userEvent.type(days, '5');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.setSettings).toHaveBeenCalledWith({ language: 'en', defaultTrashDays: 5 });
+  });
 });

@@ -47,6 +47,7 @@ pub const ERROR_CODES: &[&str] = &[
     "pair.notFound",
     "pair.foldersRequired",
     "pair.nameRequired",
+    "pair.badTrashDays",
     "drive.notConnected",
     "drive.folderMissing",
     "drive.wrongVolume",
