@@ -1,5 +1,6 @@
 //! Types shared by every stage: relative paths, scanned entries, changes.
 
+use crate::reason::SkipReason;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
@@ -151,7 +152,22 @@ pub struct Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
     pub rel: RelPath,
-    pub reason: String,
+    pub kind: ProblemKind,
+    pub detail: String,
+}
+
+/// Which side of a pair something belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SideKind {
+    Source,
+    Replica,
+}
+
+/// Why the scan could not list something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemKind {
+    Unreadable,
+    NotRegularFile,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -218,7 +234,7 @@ pub enum Change {
     /// Replica-only folder, removed once empty.
     RmDir { path: RelPath },
     /// Shown to the user, never applied.
-    Skipped { path: RelPath, reason: String },
+    Skipped { path: RelPath, reason: SkipReason },
 }
 
 impl Change {

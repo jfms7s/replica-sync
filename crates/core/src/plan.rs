@@ -199,7 +199,7 @@ mod tests {
                 delete("z"),
                 Change::Skipped {
                     path: rel("s"),
-                    reason: "link (not followed)".into(),
+                    reason: crate::reason::SkipReason::Link,
                 },
                 create("b", 1),
                 Change::MkDir { path: rel("m/n") },

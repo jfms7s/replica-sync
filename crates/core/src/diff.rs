@@ -1,6 +1,10 @@
 //! Compare two snapshots into the raw list of changes that make the replica match.
 
-use crate::model::{Change, Entry, Kind, MTIME_TOLERANCE_NS, MoveKind, RelPath, Snapshot};
+use crate::model::{
+    Change, Entry, Kind, MTIME_TOLERANCE_NS, MoveKind, Problem, ProblemKind, RelPath, SideKind,
+    Snapshot,
+};
+use crate::reason::SkipReason;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
@@ -39,13 +43,23 @@ fn index<'a>(
     map
 }
 
+fn problem_reason(p: &Problem, side: SideKind) -> SkipReason {
+    match p.kind {
+        ProblemKind::NotRegularFile => SkipReason::NotRegularFile,
+        ProblemKind::Unreadable => SkipReason::Unreadable {
+            side,
+            detail: p.detail.clone(),
+        },
+    }
+}
+
 /// Keys at and under which nothing may change, with the reason shown to the user.
 #[derive(Default)]
-struct Blocks(BTreeMap<String, (RelPath, String)>);
+struct Blocks(BTreeMap<String, (RelPath, SkipReason)>);
 
 impl Blocks {
-    fn add(&mut self, k: String, rel: RelPath, reason: impl Into<String>) {
-        self.0.entry(k).or_insert((rel, reason.into()));
+    fn add(&mut self, k: String, rel: RelPath, reason: SkipReason) {
+        self.0.entry(k).or_insert((rel, reason));
     }
 
     fn has_blocked_ancestor(&self, k: &str) -> bool {
@@ -93,43 +107,35 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
 
     let mut blocks = Blocks::default();
     for (k, rel) in collisions {
-        blocks.add(
-            k,
-            rel,
-            "two names differ only by capital letters; the backup drive can't hold both",
-        );
+        blocks.add(k, rel, SkipReason::CaseCollision);
     }
     for p in &source.problems {
         blocks.add(
             key(&p.rel, case),
             p.rel.clone(),
-            format!("could not read on the source: {}", p.reason),
+            problem_reason(p, SideKind::Source),
         );
     }
     for p in &replica.problems {
         blocks.add(
             key(&p.rel, case),
             p.rel.clone(),
-            format!("could not read on the replica: {}", p.reason),
+            problem_reason(p, SideKind::Replica),
         );
     }
     for (k, s) in &src {
         if s.kind == Kind::Link {
-            blocks.add(k.clone(), s.rel.clone(), "link (not followed)");
+            blocks.add(k.clone(), s.rel.clone(), SkipReason::Link);
         }
     }
     for (k, r) in &rep {
         if r.kind == Kind::Link {
-            blocks.add(k.clone(), r.rel.clone(), "link (not followed)");
+            blocks.add(k.clone(), r.rel.clone(), SkipReason::Link);
         } else if let Some(s) = src.get(k)
             && s.kind != r.kind
             && s.kind != Kind::Link
         {
-            blocks.add(
-                k.clone(),
-                s.rel.clone(),
-                "a file on one side and a folder on the other",
-            );
+            blocks.add(k.clone(), s.rel.clone(), SkipReason::FileVsFolder);
         }
     }
 
@@ -205,7 +211,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Change, MoveKind, Problem};
+    use crate::model::{Change, MoveKind};
     use crate::testutil::{T0, dir, file, link, ns, rel, snap};
 
     fn d(src: Vec<Entry>, rep: Vec<Entry>) -> Vec<Change> {
@@ -373,7 +379,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0], Change::Skipped { reason, .. } if reason.contains("capital letters"))
+            matches!(&out[0], Change::Skipped { reason, .. } if *reason == SkipReason::CaseCollision)
         );
     }
 
@@ -387,7 +393,7 @@ mod tests {
             out,
             vec![Change::Skipped {
                 path: rel("alias"),
-                reason: "link (not followed)".into()
+                reason: SkipReason::Link
             }]
         );
     }
@@ -399,7 +405,7 @@ mod tests {
             out,
             vec![Change::Skipped {
                 path: rel("x"),
-                reason: "a file on one side and a folder on the other".into(),
+                reason: SkipReason::FileVsFolder,
             }]
         );
     }
@@ -409,7 +415,8 @@ mod tests {
         let mut src = snap(vec![dir("Docs")]);
         src.problems.push(Problem {
             rel: rel("Docs"),
-            reason: "Permission denied".into(),
+            kind: ProblemKind::Unreadable,
+            detail: "Permission denied".into(),
         });
         let rep = snap(vec![
             dir("Docs"),
@@ -426,7 +433,8 @@ mod tests {
         let mut src = snap(vec![]);
         src.problems.push(Problem {
             rel: RelPath::root(),
-            reason: "boom".into(),
+            kind: ProblemKind::Unreadable,
+            detail: "boom".into(),
         });
         let out = diff(&src, &snap(vec![file("a", 1, T0)]), CaseMode::Sensitive);
         assert_eq!(out.len(), 1);
@@ -474,7 +482,8 @@ mod tests {
         rep.leftovers.push(rel("L/a.jpg.replica-sync.tmp"));
         rep.problems.push(Problem {
             rel: rel("P/locked.bin"),
-            reason: "Permission denied".into(),
+            kind: ProblemKind::Unreadable,
+            detail: "Permission denied".into(),
         });
         let src = snap(vec![file("B/x", 1, T0)]); // file vs folder: blocked key B/x
         let out = diff(&src, &rep, CaseMode::Sensitive);

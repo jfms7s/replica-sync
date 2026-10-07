@@ -50,11 +50,7 @@ impl Pair {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SideKind {
-    Source,
-    Replica,
-}
+pub use crate::model::SideKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PairError {

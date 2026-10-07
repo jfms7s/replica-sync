@@ -1,6 +1,6 @@
 //! Parallel walk of one side of a pair into a sorted `Snapshot`.
 
-use crate::model::{Entry, Kind, Problem, RelPath, Snapshot, modified_ns};
+use crate::model::{Entry, Kind, Problem, ProblemKind, RelPath, Snapshot, modified_ns};
 use crate::rules::{SkipRules, TEMP_SUFFIX};
 use std::fs;
 use std::io;
@@ -97,7 +97,8 @@ fn walk<'s>(
         Err(e) => {
             out.problems.lock().unwrap().push(Problem {
                 rel: dir,
-                reason: e.to_string(),
+                kind: ProblemKind::Unreadable,
+                detail: e.to_string(),
             });
             return;
         }
@@ -111,7 +112,8 @@ fn walk<'s>(
                 // A listing that fails part-way: block the whole folder.
                 problems.push(Problem {
                     rel: dir.clone(),
-                    reason: e.to_string(),
+                    kind: ProblemKind::Unreadable,
+                    detail: e.to_string(),
                 });
                 continue;
             }
@@ -121,7 +123,8 @@ fn walk<'s>(
         if raw.to_str().is_none() {
             problems.push(Problem {
                 rel,
-                reason: "name is not valid Unicode".into(),
+                kind: ProblemKind::Unreadable,
+                detail: "name is not valid Unicode".into(),
             });
             continue;
         }
@@ -135,7 +138,8 @@ fn walk<'s>(
             Err(e) => {
                 problems.push(Problem {
                     rel,
-                    reason: e.to_string(),
+                    kind: ProblemKind::Unreadable,
+                    detail: e.to_string(),
                 });
                 continue;
             }
@@ -158,7 +162,8 @@ fn walk<'s>(
             Err(e) => {
                 problems.push(Problem {
                     rel,
-                    reason: e.to_string(),
+                    kind: ProblemKind::Unreadable,
+                    detail: e.to_string(),
                 });
                 continue;
             }
@@ -175,7 +180,8 @@ fn walk<'s>(
             // FIFO, socket or device: never copied, never deleted.
             problems.push(Problem {
                 rel,
-                reason: "not a regular file".into(),
+                kind: ProblemKind::NotRegularFile,
+                detail: String::new(),
             });
         } else {
             counters.files.fetch_add(1, Ordering::Relaxed);
@@ -337,7 +343,8 @@ mod tests {
             s.problems,
             vec![Problem {
                 rel: RelPath::new("pipe").unwrap(),
-                reason: "not a regular file".into()
+                kind: ProblemKind::NotRegularFile,
+                detail: String::new()
             }]
         );
     }
