@@ -36,6 +36,20 @@ enum ManifestLine {
     Restored { restored: RelPath },
 }
 
+/// `<replica>/.sync-trash`, refused when it is a link (or junction): following
+/// one would trash, restore and permanently delete files outside the replica.
+fn trash_base(replica_root: &Path) -> io::Result<PathBuf> {
+    let base = replica_root.join(TRASH_DIR);
+    match fs::symlink_metadata(&base) {
+        Ok(m) if m.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the .sync-trash folder is a link",
+        )),
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(base),
+    }
+}
+
 pub fn new_run_stamp() -> String {
     chrono::Local::now().format(STAMP_FORMAT).to_string()
 }
@@ -92,7 +106,7 @@ impl TrashWriter {
     }
 
     fn open_run(&self) -> io::Result<(String, PathBuf, File)> {
-        let base = self.replica_root.join(TRASH_DIR);
+        let base = trash_base(&self.replica_root)?;
         fs::create_dir_all(&base)?;
         hide(&base);
         let (mut id, mut n) = (self.stamp.clone(), 1);
@@ -157,7 +171,7 @@ fn run_dir(replica_root: &Path, run_id: &str) -> io::Result<PathBuf> {
             format!("invalid trash run id {run_id:?}"),
         ));
     }
-    Ok(replica_root.join(TRASH_DIR).join(run_id))
+    Ok(trash_base(replica_root)?.join(run_id))
 }
 
 /// Adds every file under `dir` to `out`. Anything that vanishes mid-walk (a
@@ -279,7 +293,7 @@ pub fn run_contents(replica_root: &Path, run_id: &str) -> io::Result<TrashRunCon
 }
 
 pub fn list_runs(replica_root: &Path) -> io::Result<Vec<TrashRunInfo>> {
-    let base = replica_root.join(TRASH_DIR);
+    let base = trash_base(replica_root)?;
     let entries = match fs::read_dir(&base) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -394,7 +408,7 @@ pub fn runs_older_than(
     days: u32,
     now: chrono::NaiveDateTime,
 ) -> io::Result<Vec<String>> {
-    let base = replica_root.join(TRASH_DIR);
+    let base = trash_base(replica_root)?;
     let entries = match fs::read_dir(&base) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -660,5 +674,46 @@ mod tests {
         restore(d.path(), STAMP, &[rel("x.txt")], OnConflict::Refuse).unwrap();
         assert_eq!(fs::read(run.join("notes.txt")).unwrap(), b"keep me");
         assert!(run.join(MANIFEST).exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_sync_trash_folder_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write_file(
+            outside.path(),
+            &format!("{STAMP}/{FILES_DIR}/kept.txt"),
+            b"k",
+            T0,
+        );
+        std::os::unix::fs::symlink(outside.path(), d.path().join(TRASH_DIR)).unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        let is_link_err = |e: &io::Error| {
+            e.kind() == io::ErrorKind::InvalidInput
+                && e.to_string() == "the .sync-trash folder is a link"
+        };
+        let is_link_error = |e: io::Error| is_link_err(&e);
+        let mut w = TrashWriter::new(d.path(), "2026-10-07_130000".into());
+        assert!(is_link_error(
+            w.move_in(&rel("x.txt"), 3, ns(T0), TrashReason::Deleted)
+                .unwrap_err()
+        ));
+        assert_eq!(fs::read(d.path().join("x.txt")).unwrap(), b"abc");
+        assert!(is_link_error(empty_run(d.path(), STAMP).unwrap_err()));
+        assert!(is_link_error(list_runs(d.path()).unwrap_err()));
+        assert!(is_link_error(run_contents(d.path(), STAMP).unwrap_err()));
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("kept.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_link_err(&e)
+        ));
+        let now = chrono::NaiveDateTime::parse_from_str("2027-01-01_000000", STAMP_FORMAT).unwrap();
+        assert!(is_link_error(
+            runs_older_than(d.path(), 30, now).unwrap_err()
+        ));
+        assert_eq!(
+            fs::read(outside.path().join(STAMP).join(FILES_DIR).join("kept.txt")).unwrap(),
+            b"k"
+        );
+        assert!(!outside.path().join("2026-10-07_130000").exists());
     }
 }
