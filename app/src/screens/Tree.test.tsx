@@ -47,4 +47,23 @@ describe('Tree', () => {
     expect(await screen.findByRole('treeitem', { name: /m/ })).toHaveAttribute('aria-checked', 'mixed');
     expect(screen.getByRole('checkbox', { name: 's' })).toBeDisabled();
   });
+
+  it('reexpanding_a_collapsed_folder_after_a_toggle_refetches_it', async () => {
+    vi.mocked(api.toggle).mockResolvedValue({} as never);
+    vi.mocked(api.treeChildren).mockImplementation(async (p) =>
+      p === '' ? [folder('a', 'on'), folder('b', 'on')] : [file]);
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    const a = await screen.findByRole('treeitem', { name: /^a$/ });
+    a.focus();
+    await userEvent.keyboard('{ArrowRight}');
+    await screen.findByText('x.txt');
+    await userEvent.keyboard('{ArrowLeft}');
+    await userEvent.keyboard('{ArrowDown} ');
+    await waitFor(() => expect(api.toggle).toHaveBeenCalledWith('b'));
+    const before = vi.mocked(api.treeChildren).mock.calls.filter(([p]) => p === 'a').length;
+    screen.getByRole('treeitem', { name: /^a$/ }).focus();
+    await userEvent.keyboard('{ArrowRight}');
+    await waitFor(() =>
+      expect(vi.mocked(api.treeChildren).mock.calls.filter(([p]) => p === 'a').length).toBe(before + 1));
+  });
 });

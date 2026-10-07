@@ -11,11 +11,12 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
   const { t, tx, lang } = useT();
   const [s, setS] = useState(initial);
   const [expandRequest, setExpandRequest] = useState<string[] | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
 
   const guardOpen = s.guard !== null && !s.guardConfirmed;
   const canApply = !guardOpen && s.shortfall === null && s.selectedCount > 0;
-  const run = (f: () => Promise<PreviewSummary>) => f().then(setS).catch((e) => setMessage(errorText(tx, lang, e)));
+  const run = (f: () => Promise<PreviewSummary>) => f().then((next) => { setS(next); setRefreshToken((n) => n + 1); }).catch((e) => setMessage(errorText(tx, lang, e)));
 
   const savePreview = async () => {
     const file = await pickSaveFile(`${s.pairName}-preview.txt`);
@@ -57,7 +58,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
               </button>
             </p>
           )}
-          <Tree onSummary={setS} expandRequest={expandRequest} />
+          <Tree onSummary={setS} expandRequest={expandRequest} refreshToken={refreshToken} />
         </>
       )}
       {message && <p role="status">{message}</p>}
