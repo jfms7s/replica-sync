@@ -150,10 +150,9 @@ fn collapse_folder_moves(
         if src_keys.contains(&k(&x)) || rep_keys.contains(&k(&y)) {
             continue;
         }
-        if done
-            .iter()
-            .any(|(dx, dy, ..)| x.is_within(dx) || y.is_within(dy))
-        {
+        if done.iter().any(|(dx, dy, ..)| {
+            x.is_within(dx) || dx.is_within(&x) || y.is_within(dy) || dy.is_within(&y)
+        }) {
             continue;
         }
         let prefix = format!("{x}/");
@@ -188,7 +187,22 @@ fn collapse_folder_moves(
     }
 
     let in_x = |p: &RelPath| done.iter().any(|(x, ..)| p.is_within(x));
-    let in_y = |p: &RelPath| done.iter().any(|(_, y, ..)| p.is_within(y));
+    let rep_dirs: HashSet<String> = replica
+        .entries
+        .iter()
+        .filter(|e| e.kind == Kind::Dir)
+        .map(|e| k(&e.rel))
+        .collect();
+    // A MkDir under Y is covered only when it is one of X's folders being renamed.
+    let covered_by_rename = |p: &RelPath| {
+        done.iter().any(|(x, y, ..)| {
+            p.is_within(y)
+                && match p.strip_dir(y) {
+                    None => true,
+                    Some(rest) => rep_dirs.contains(&k(&x.join(rest))),
+                }
+        })
+    };
     let mut out: Vec<Change> = changes
         .into_iter()
         .filter(|c| match c {
@@ -198,7 +212,7 @@ fn collapse_folder_moves(
                 ..
             } => !in_x(from),
             Change::RmDir { path } => !in_x(path),
-            Change::MkDir { path } => !in_y(path),
+            Change::MkDir { path } => !covered_by_rename(path),
             _ => true,
         })
         .collect();
@@ -471,5 +485,144 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    fn dir_moves(out: &[Change]) -> Vec<&Change> {
+        out.iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Move {
+                        kind: MoveKind::Dir { .. },
+                        ..
+                    }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn uncovered_empty_source_folder_keeps_its_mkdir() {
+        let out = pipeline(
+            vec![
+                dir("2025"),
+                dir("2025/Trip"),
+                dir("2025/Trip/empty"),
+                file("2025/Trip/a.jpg", 10, T0),
+            ],
+            vec![dir("Old"), dir("Old/Trip"), file("Old/Trip/a.jpg", 10, T0)],
+        );
+        assert_eq!(
+            out,
+            vec![
+                Change::Move {
+                    from: rel("Old"),
+                    to: rel("2025"),
+                    kind: MoveKind::Dir {
+                        files: 1,
+                        bytes: 10
+                    },
+                },
+                Change::MkDir {
+                    path: rel("2025/Trip/empty")
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_destinations_are_not_both_collapsed() {
+        let out = pipeline(
+            vec![
+                dir("c"),
+                dir("c/d"),
+                dir("c/d/e"),
+                file("c/d/e/f", 1, T0),
+                file("c/d/g", 2, T0),
+            ],
+            vec![dir("a"), file("a/f", 1, T0), dir("p"), file("p/g", 2, T0)],
+        );
+        let dirs = dir_moves(&out);
+        assert!(dirs.len() <= 1);
+        for a in &dirs {
+            for b in &dirs {
+                if let (Change::Move { to: ta, .. }, Change::Move { to: tb, .. }) = (a, b) {
+                    assert!(ta == tb || !(ta.is_within(tb) || tb.is_within(ta)));
+                }
+            }
+        }
+        let file_moves = out
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Move {
+                        kind: MoveKind::File { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(file_moves + dirs.len(), 2);
+    }
+
+    #[test]
+    fn insensitive_mode_collapses_with_mixed_case() {
+        let (s, r) = (
+            snap(vec![
+                dir("New"),
+                dir("New/Trip"),
+                file("New/Trip/a.jpg", 10, T0),
+            ]),
+            snap(vec![
+                dir("old"),
+                dir("old/Trip"),
+                file("old/Trip/a.jpg", 10, T0),
+            ]),
+        );
+        let out = detect_moves(
+            diff(&s, &r, CaseMode::Insensitive),
+            &s,
+            &r,
+            CaseMode::Insensitive,
+        );
+        assert_eq!(
+            out,
+            vec![Change::Move {
+                from: rel("old"),
+                to: rel("New"),
+                kind: MoveKind::Dir {
+                    files: 1,
+                    bytes: 10
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn link_under_folder_rejects_collapse() {
+        let out = pipeline(
+            vec![dir("B"), file("B/a.jpg", 10, T0)],
+            vec![
+                dir("A"),
+                file("A/a.jpg", 10, T0),
+                crate::testutil::link("A/l"),
+            ],
+        );
+        assert!(dir_moves(&out).is_empty());
+    }
+
+    #[test]
+    fn folder_still_on_source_rejects_collapse() {
+        let out = pipeline(
+            vec![
+                dir("A"),
+                file("A/x", 1, T0),
+                dir("B"),
+                file("B/a.jpg", 10, T0),
+            ],
+            vec![dir("A"), file("A/a.jpg", 10, T0)],
+        );
+        assert!(dir_moves(&out).is_empty());
     }
 }
