@@ -1,0 +1,26 @@
+import { act, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import { I18nProvider } from '../i18n';
+
+const handlers: Record<string, (p: unknown) => void> = {};
+vi.mock('../api', () => ({
+  api: { stopAndClose: vi.fn().mockResolvedValue(undefined) },
+  onEvent: vi.fn(async (name: string, cb: (p: unknown) => void) => { handlers[name] = cb; return () => {}; }),
+}));
+import { api } from '../api';
+import CloseGuard from './CloseGuard';
+
+describe('CloseGuard', () => {
+  it('asks when the window is closed mid-sync and stops on Yes', async () => {
+    render(<I18nProvider lang="en"><CloseGuard /></I18nProvider>);
+    await vi.waitFor(() => expect(handlers['close-requested']).toBeDefined());
+    act(() => handlers['close-requested'](null));
+    expect(screen.getByRole('dialog', { name: 'A sync is running' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Keep syncing' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    act(() => handlers['close-requested'](null));
+    await userEvent.click(screen.getByRole('button', { name: 'Stop and close' }));
+    expect(api.stopAndClose).toHaveBeenCalled();
+  });
+});
