@@ -113,6 +113,7 @@ impl ScanJob {
 }
 
 pub struct ApplyJob {
+    pair_id: String,
     prepared: Arc<Prepared>,
     approved: HashSet<ChangeId>,
     source_root: PathBuf,
@@ -141,6 +142,7 @@ pub struct Session {
     scan_counters: Option<Arc<SessionCounters>>,
     control: Option<Arc<Control>>,
     applying: bool,
+    scanning: bool,
 }
 
 fn connected(side: &pairs::Side, volumes: &dyn Volumes) -> bool {
@@ -166,6 +168,7 @@ impl Session {
             scan_counters: None,
             control: None,
             applying: false,
+            scanning: false,
         })
     }
 
@@ -198,7 +201,7 @@ impl Session {
     }
 
     fn ensure_idle(&self) -> Result<(), AppError> {
-        if self.applying {
+        if self.applying || self.scanning {
             Err(AppError::new("apply.busy"))
         } else {
             Ok(())
@@ -293,6 +296,9 @@ impl Session {
         pairs::relink(&mut pair, side, folder, volumes)?;
         self.store.upsert(pair.clone());
         self.store.save()?;
+        if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
+            self.current = None; // the preview no longer matches the pair
+        }
         Ok(pair)
     }
 
@@ -307,6 +313,7 @@ impl Session {
         self.current = None;
         let counters = Arc::new(SessionCounters::default());
         self.scan_counters = Some(counters.clone());
+        self.scanning = true;
         Ok(ScanJob {
             pair_id: pair.id,
             resolved,
@@ -329,6 +336,14 @@ impl Session {
         result: Result<Prepared, AppError>,
         _volumes: &dyn Volumes,
     ) -> Result<PreviewSummary, AppError> {
+        let current_scan = self
+            .scan_counters
+            .as_ref()
+            .is_some_and(|c| Arc::ptr_eq(c, &job.counters));
+        if !current_scan {
+            return Err(AppError::new("scan.cancelled"));
+        }
+        self.scanning = false;
         self.scan_counters = None;
         let prepared = result?;
         let free_space = volume::free_space(&job.resolved.replica_root)?;
@@ -376,7 +391,8 @@ impl Session {
         let pair = self.pair(&c.pair_id)?;
         let plan = &c.prepared.plan;
         let selected = selected_totals(plan, &c.selection);
-        let shortfall = space_shortfall(selected.bytes_to_copy, c.free_space);
+        let free_space = volume::free_space(&c.resolved.replica_root).unwrap_or(c.free_space);
+        let shortfall = space_shortfall(selected.bytes_to_copy, free_space);
         let guard = if c.first_sync {
             first_sync_guard(plan, &c.selection, c.prepared.replica_files)
         } else {
@@ -435,7 +451,14 @@ impl Session {
 
     pub fn begin_apply(&mut self, volumes: &dyn Volumes) -> Result<ApplyJob, AppError> {
         self.ensure_idle()?;
-        let approved = self.current()?.selection.clone();
+        let c = self.current()?;
+        if c.last_report.is_some() {
+            return Err(AppError::new("apply.noPlan"));
+        }
+        if c.selection.is_empty() {
+            return Err(AppError::new("apply.nothingSelected"));
+        }
+        let approved = c.selection.clone();
         self.verify_drives(volumes)?;
         let s = self.summary()?;
         if s.guard.is_some() && !s.guard_confirmed {
@@ -466,6 +489,11 @@ impl Session {
     fn verify_drives(&self, volumes: &dyn Volumes) -> Result<(), AppError> {
         let c = self.current()?;
         let pair = self.pair(&c.pair_id)?;
+        let now = pairs::resolve(pair, volumes)?;
+        if now.source_root != c.resolved.source_root || now.replica_root != c.resolved.replica_root
+        {
+            return Err(AppError::new("drive.wrongVolume").with("path", now.replica_root.display()));
+        }
         pairs::verify_source(pair, &c.resolved, volumes)?;
         pairs::verify_replica(pair, &c.resolved, volumes)?;
         Ok(())
@@ -476,6 +504,7 @@ impl Session {
         let replica = ReplicaRoot::new(&c.resolved.replica_root)?;
         let control = Arc::new(Control::default());
         let job = ApplyJob {
+            pair_id: c.pair_id.clone(),
             prepared: c.prepared.clone(),
             approved,
             source_root: c.resolved.source_root.clone(),
@@ -509,10 +538,8 @@ impl Session {
     pub fn finish_apply(&mut self, job: ApplyJob, report: RunReport) -> Result<RunView, AppError> {
         self.applying = false;
         self.control = None;
-        let (pair_id, replica_root) = {
-            let c = self.current()?;
-            (c.pair_id.clone(), c.resolved.replica_root.clone())
-        };
+        let pair_id = job.pair_id.clone();
+        let replica_root = job.replica.path().to_path_buf();
         let (name, trash_days) = {
             let p = self.pair(&pair_id)?;
             (p.name.clone(), p.trash_days)
@@ -544,7 +571,11 @@ impl Session {
             chrono::Local::now().naive_local(),
         )
         .unwrap_or_default();
-        if let Some(c) = self.current.as_mut() {
+        if let Some(c) = self
+            .current
+            .as_mut()
+            .filter(|c| Arc::ptr_eq(&c.prepared, &job.prepared))
+        {
             c.last_report = Some(report.clone());
         }
         Ok(RunView {
@@ -822,5 +853,91 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert!(w.rep().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn relinking_drops_the_preview() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        fs::create_dir_all(w.t.path().join("diskB/Other")).unwrap();
+        let other = w.t.path().join("diskB/Other");
+        w.s.relink(&w.id, SideKind::Replica, &other, &w.v).unwrap();
+        assert_eq!(w.s.begin_apply(&w.v).err().unwrap().code, "apply.noPlan");
+        assert!(!w.rep().join("a.txt").exists());
+    }
+
+    #[test]
+    fn a_second_scan_is_refused_while_one_runs() {
+        let mut w = world();
+        let _job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        assert_eq!(
+            w.s.begin_scan(&w.id, &w.v).err().unwrap().code,
+            "apply.busy"
+        );
+    }
+
+    #[test]
+    fn stale_scan_finish_changes_nothing() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let twin = clone_job(&job);
+        let (r, r2) = (job.run(), twin.run());
+        w.s.finish_scan(job, r, &w.v).unwrap();
+        assert_eq!(
+            w.s.finish_scan(twin, r2, &w.v).err().unwrap().code,
+            "scan.cancelled"
+        );
+        assert!(w.s.summary().is_ok());
+    }
+
+    fn clone_job(j: &ScanJob) -> ScanJob {
+        ScanJob {
+            pair_id: j.pair_id.clone(),
+            resolved: j.resolved.clone(),
+            rules: j.rules.clone(),
+            case: j.case,
+            counters: j.counters.clone(),
+            approx_files: j.approx_files,
+        }
+    }
+
+    #[test]
+    fn nothing_can_toggle_while_scanning() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        assert_eq!(
+            w.s.toggle(&RelPath::new("a.txt").unwrap())
+                .err()
+                .unwrap()
+                .code,
+            "apply.busy"
+        );
+        let r = job.run();
+        w.s.finish_scan(job, r, &w.v).unwrap();
+    }
+
+    #[test]
+    fn a_plan_applies_once() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        w.apply();
+        assert_eq!(w.s.begin_apply(&w.v).err().unwrap().code, "apply.noPlan");
+    }
+
+    #[test]
+    fn empty_selection_is_refused() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        w.s.select_all(false).unwrap();
+        assert_eq!(
+            w.s.begin_apply(&w.v).err().unwrap().code,
+            "apply.nothingSelected"
+        );
     }
 }

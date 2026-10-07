@@ -62,6 +62,7 @@ pub const ERROR_CODES: &[&str] = &[
     "apply.busy",
     "apply.spaceShortfall",
     "apply.nothingToRetry",
+    "apply.nothingSelected",
     "store.unreadable",
     "io",
 ];
