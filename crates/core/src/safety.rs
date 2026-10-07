@@ -39,7 +39,14 @@ impl ReplicaRoot {
             match dunce::canonicalize(dir) {
                 Ok(real) if real.starts_with(&self.canonical) => return Ok(target),
                 Ok(_) => return Err(SafetyError::Escapes(target)),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => probe = dir.parent(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    // If the directory exists (e.g., dangling symlink), it has escaped.
+                    // Only walk up if the path doesn't exist.
+                    if std::fs::symlink_metadata(dir).is_ok() {
+                        return Err(SafetyError::Escapes(target));
+                    }
+                    probe = dir.parent();
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -73,5 +80,35 @@ mod tests {
             r.target(&rel("Docs/x.txt")),
             Err(SafetyError::Escapes(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinked_parent_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        // Create a symlink to a non-existent location outside the replica
+        std::os::unix::fs::symlink("/outside/not-yet-created", d.path().join("Docs")).unwrap();
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        // The dangling symlink should be caught and refused
+        assert!(matches!(
+            r.target(&rel("Docs/x.txt")),
+            Err(SafetyError::Escapes(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_that_stays_inside_is_allowed() {
+        let d = tempfile::tempdir().unwrap();
+        // Create a real directory inside the replica
+        std::fs::create_dir(d.path().join("real")).unwrap();
+        // Create a symlink inside the replica pointing to the real directory
+        std::os::unix::fs::symlink(d.path().join("real"), d.path().join("alias")).unwrap();
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        // The symlink that stays inside should be allowed
+        assert_eq!(
+            r.target(&rel("alias/x.txt")).unwrap(),
+            d.path().join("alias").join("x.txt")
+        );
     }
 }
