@@ -4,6 +4,8 @@ import { I18nProvider, type Lang } from './i18n';
 import Broken from './screens/Broken';
 import Pairs from './screens/Pairs';
 import PairEditor from './screens/PairEditor';
+import Preview from './screens/Preview';
+import Scanning from './screens/Scanning';
 import Settings from './screens/Settings';
 
 export type Screen =
@@ -51,6 +53,10 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
       return <PairEditor pair={screen.pair} navigate={navigate} />;
     case 'settings':
       return <Settings navigate={navigate} onLanguage={onLanguage} />;
+    case 'scanning':
+      return <Scanning pairId={screen.pairId} pairName={screen.pairName} navigate={navigate} />;
+    case 'preview':
+      return <Preview summary={screen.summary} navigate={navigate} />;
     default:
       return <p className="screen">{screen.name}</p>; // replaced in Tasks 9–11
   }
