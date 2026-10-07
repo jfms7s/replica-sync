@@ -1,0 +1,11 @@
+[package]
+name = "replica-sync-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+filetime = "0.2"
+replica-sync-core = { path = "../core" }
