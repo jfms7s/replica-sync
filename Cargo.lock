@@ -577,6 +577,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "replica-sync-app-state"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "dunce",
+ "filetime",
+ "replica-sync-core",
+ "serde",
+ "serde_json",
+ "sys-locale",
+ "tempfile",
+]
+
+[[package]]
 name = "replica-sync-cli"
 version = "0.2.0"
 dependencies = [
@@ -716,6 +730,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
