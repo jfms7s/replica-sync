@@ -94,6 +94,7 @@
   "close.body": "Stop after the current file? Changes already made stay done.",
   "close.stop": "Stop and close",
   "close.keep": "Keep syncing",
+  "close.stopping": "Stopping after the current file…",
 
   "result.title": "Sync finished",
   "result.summary": "{applied} applied · {skipped} skipped · {failed} failed",

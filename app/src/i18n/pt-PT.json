@@ -94,6 +94,7 @@
   "close.body": "Parar depois do ficheiro atual? O que já foi feito fica feito.",
   "close.stop": "Parar e fechar",
   "close.keep": "Continuar a sincronizar",
+  "close.stopping": "A parar depois do ficheiro atual…",
 
   "result.title": "Sincronização terminada",
   "result.summary": "{applied} feitas · {skipped} ignoradas · {failed} falharam",
