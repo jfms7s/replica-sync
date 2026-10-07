@@ -120,7 +120,10 @@ impl RunReport {
     pub fn failed(&self) -> usize {
         self.count(|o| matches!(o, Outcome::Failed(_)))
     }
-    /// For "Retry failed": re-plan and approve only these.
+    /// For "Retry failed": call [`execute`] again on the SAME [`Plan`] with these
+    /// ids approved; it re-checks every change against the disk before applying it.
+    /// A [`ChangeId`] is a position in one plan, so these ids mean nothing for any
+    /// other plan (a re-plan renumbers its changes).
     pub fn failed_ids(&self) -> HashSet<ChangeId> {
         self.results
             .iter()
@@ -958,5 +961,53 @@ mod apply_tests {
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(report.results[0].outcome, Outcome::Failed(_)));
         assert!(f.rep.join("d/x.txt").exists());
+    }
+    #[test]
+    fn retry_failed_reruns_only_the_failed_changes_of_the_same_plan() {
+        let f = fixture();
+        write_file(&f.src, "a/x.txt", b"x", T0);
+        write_file(&f.src, "b.txt", b"b", T0);
+        write_file(&f.rep, "a", b"in the way", T0); // a file where the folder must go
+        let plan = crate::plan::build_plan(
+            vec![
+                Change::Create {
+                    path: rel("a/x.txt"),
+                    size: 1,
+                    mtime_ns: ns(T0),
+                },
+                Change::Create {
+                    path: rel("b.txt"),
+                    size: 1,
+                    mtime_ns: ns(T0),
+                },
+            ],
+            crate::diff::CaseMode::Sensitive,
+        )
+        .unwrap();
+        let first = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            (first.applied(), first.failed()),
+            (1, 1),
+            "{:?}",
+            first.results
+        );
+        fs::remove_file(f.rep.join("a")).unwrap();
+        let retry = run_with(
+            &f,
+            &plan,
+            &first.failed_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(retry.results.len(), 1);
+        assert_eq!(retry.results[0].path, rel("a/x.txt"));
+        assert_eq!(retry.applied(), 1);
+        assert_eq!(fs::read(f.rep.join("a/x.txt")).unwrap(), b"x");
     }
 }
