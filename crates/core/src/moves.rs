@@ -49,6 +49,7 @@ fn pair_file_moves(changes: Vec<Change>) -> Vec<Change> {
                 }
             }
         }
+        pairs.sort_unstable();
         pairs
     };
 
@@ -192,5 +193,36 @@ mod tests {
         };
         let out = run(vec![up.clone(), Change::MkDir { path: rel("m") }]);
         assert_eq!(out, vec![up, Change::MkDir { path: rel("m") }]);
+    }
+
+    #[test]
+    fn several_moves_come_out_in_input_order() {
+        let out = run(vec![
+            delete("x/a.jpg", 5, T0),
+            create("y/a.jpg", 5, T0 + 1),
+            delete("x/b.jpg", 10, T0),
+            create("y/b.jpg", 10, T0 + 1),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                Change::Move {
+                    from: rel("x/a.jpg"),
+                    to: rel("y/a.jpg"),
+                    kind: MoveKind::File {
+                        size: 5,
+                        mtime_ns: ns(T0 + 1)
+                    },
+                },
+                Change::Move {
+                    from: rel("x/b.jpg"),
+                    to: rel("y/b.jpg"),
+                    kind: MoveKind::File {
+                        size: 10,
+                        mtime_ns: ns(T0 + 1)
+                    },
+                },
+            ]
+        );
     }
 }
