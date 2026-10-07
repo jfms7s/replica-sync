@@ -8,9 +8,10 @@ import { changeDetail } from './changeText';
 interface Row { node: NodeView; depth: number }
 
 /** The Preview's folder tree: loads one folder at a time from Rust. */
-export default function Tree({ onSummary, expandRequest }: {
+export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   onSummary: (s: PreviewSummary) => void;
   expandRequest: string[] | null;
+  refreshToken?: number;
 }) {
   const { t, tx, lang } = useT();
   const [children, setChildren] = useState<Map<string, NodeView[]>>(new Map());
@@ -18,6 +19,8 @@ export default function Tree({ onSummary, expandRequest }: {
   const [focus, setFocus] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
 
   const load = useCallback(async (paths: string[]) => {
     const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
@@ -47,6 +50,24 @@ export default function Tree({ onSummary, expandRequest }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expandRequest]);
 
+  /** Reload the root and the open folders; every other cached folder is dropped so a later expand refetches. */
+  const refresh = useCallback(async () => {
+    const paths = ['', ...expandedRef.current];
+    const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
+    setChildren(new Map(loaded));
+  }, []);
+
+  const firstRefresh = useRef(true);
+  useEffect(() => {
+    if (firstRefresh.current) {
+      firstRefresh.current = false;
+      return;
+    }
+    refresh().catch((e) => setError(errorText(tx, lang, e)));
+    // Only react to a new token.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken]);
+
   const collapse = (path: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -58,7 +79,7 @@ export default function Tree({ onSummary, expandRequest }: {
     try {
       const summary = await api.toggle(path);
       onSummary(summary);
-      await load(['', ...expanded]);
+      await refresh();
     } catch (e) {
       setError(errorText(tx, lang, e));
     }

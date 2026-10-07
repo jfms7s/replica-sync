@@ -50,4 +50,14 @@ describe('Preview', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Apply selected' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'applying', mode: 'apply', pairName: 'Photos' });
   });
+
+  it('approve_all_refreshes_the_tree', async () => {
+    vi.mocked(api.selectAll).mockResolvedValue(base);
+    render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Approve all' }));
+    expect(api.selectAll).toHaveBeenCalledWith(true);
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(2));
+    expect(api.treeChildren).toHaveBeenLastCalledWith('');
+  });
 });

@@ -7,7 +7,7 @@ vi.mock('../api', () => ({
   api: { startScan: vi.fn().mockResolvedValue(undefined), cancelScan: vi.fn() },
   onEvent: vi.fn(async (name: string, cb: (p: unknown) => void) => { handlers[name] = cb; return () => {}; }),
 }));
-import { api } from '../api';
+import { api, onEvent } from '../api';
 import Scanning from './Scanning';
 
 describe('Scanning', () => {
@@ -37,5 +37,20 @@ describe('Scanning', () => {
     act(() => handlers['scan-done']({ ok: null, error: { code: 'scan.nested', params: {} } }));
     expect(screen.getByRole('alert')).toHaveTextContent('one is inside the other');
     expect(screen.getByRole('button', { name: 'Edit pair' })).toBeInTheDocument();
+  });
+
+  it('unmounting_before_listeners_resolve_never_starts_a_scan', async () => {
+    const unlisten = [vi.fn(), vi.fn()];
+    const resolvers: (() => void)[] = [];
+    vi.mocked(onEvent).mockImplementation((() => {
+      const off = unlisten[resolvers.length];
+      return new Promise((res) => { resolvers.push(() => res(off)); });
+    }) as never);
+    const { unmount } = render(<I18nProvider lang="en"><Scanning pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    unmount();
+    resolvers[0]();
+    await vi.waitFor(() => expect(unlisten[0]).toHaveBeenCalled());
+    expect(resolvers.length).toBe(1);
+    expect(api.startScan).not.toHaveBeenCalled();
   });
 });

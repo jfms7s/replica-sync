@@ -14,13 +14,17 @@ export default function Scanning({ pairId, pairName, navigate }: { pairId: strin
     let alive = true;
     const offs: (() => void)[] = [];
     (async () => {
-      offs.push(await onEvent<ScanProgress>('scan-progress', (p) => alive && setProgress(p)));
-      offs.push(await onEvent<JobDone<PreviewSummary>>('scan-done', (d) => {
+      const offProgress = await onEvent<ScanProgress>('scan-progress', (p) => alive && setProgress(p));
+      offs.push(offProgress);
+      if (!alive) return offProgress();
+      const offDone = await onEvent<JobDone<PreviewSummary>>('scan-done', (d) => {
         if (!alive) return;
         if (d.ok) navigate({ name: 'preview', summary: d.ok });
         else if (d.error?.code === 'scan.cancelled') navigate({ name: 'pairs' });
         else setError(d.error);
-      }));
+      });
+      offs.push(offDone);
+      if (!alive) return offDone();
       try {
         await api.startScan(pairId); // only after both listeners are in place
       } catch (e) {
