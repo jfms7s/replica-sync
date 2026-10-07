@@ -10,6 +10,7 @@ import Preview from './screens/Preview';
 import Result from './screens/Result';
 import Scanning from './screens/Scanning';
 import Settings from './screens/Settings';
+import Trash from './screens/Trash';
 
 export type Screen =
   | { name: 'pairs' }
@@ -65,7 +66,7 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
       return <Applying mode={screen.mode} pairName={screen.pairName} navigate={navigate} />;
     case 'result':
       return <Result run={screen.run} pairName={screen.pairName} navigate={navigate} />;
-    default:
-      return <p className="screen">{screen.name}</p>; // replaced in Tasks 9–11
+    case 'trash':
+      return <Trash pairId={screen.pairId} pairName={screen.pairName} navigate={navigate} />;
   }
 }
