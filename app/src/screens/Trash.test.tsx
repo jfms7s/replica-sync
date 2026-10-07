@@ -36,6 +36,7 @@ describe('Trash', () => {
     expect(await screen.findByRole('dialog', { name: 'Something is in the way' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Replace' }));
     expect(api.restore).toHaveBeenLastCalledWith('p1', runId, ['a.txt'], true);
+    expect(await screen.findByText('Restored: 1')).toBeInTheDocument();
   });
 
   it('empties a run only after confirming', async () => {

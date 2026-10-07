@@ -46,6 +46,7 @@ describe('Result', () => {
   it('empties old trash runs only after confirming', async () => {
     render(<I18nProvider lang="en"><Result run={run} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
     await userEvent.click(screen.getByRole('button', { name: 'Empty them' }));
+    expect(screen.getByText("Permanently delete the old trash runs (1)? This can't be undone.")).toBeInTheDocument();
     expect(api.emptyRun).not.toHaveBeenCalled();
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!); // the modal's button
     expect(api.emptyRun).toHaveBeenCalledWith('p1', '2026-08-01_090000');
@@ -58,6 +59,6 @@ describe('Result', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Empty them' }));
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!);
     expect(await screen.findByRole('alert')).toBeInTheDocument();
-    expect(screen.getByText('1 trash runs are older than 30 days.')).toBeInTheDocument();
+    expect(screen.getByText('Trash runs older than 30 days: 1.')).toBeInTheDocument();
   });
 });

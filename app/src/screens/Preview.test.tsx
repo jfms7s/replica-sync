@@ -49,7 +49,7 @@ describe('Preview', () => {
   it('applies the selection', async () => {
     const navigate = vi.fn();
     render(<I18nProvider lang="en"><Preview summary={base} navigate={navigate} /></I18nProvider>);
-    expect(screen.getByText(/3 files will be deleted/)).toBeInTheDocument();
+    expect(screen.getByText(/Files to delete from the backup: 3\./)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Apply selected' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'applying', mode: 'apply', pairName: 'Photos' });
   });

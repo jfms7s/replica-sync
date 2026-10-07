@@ -24,6 +24,20 @@ describe('translate', () => {
     );
   });
 
+  it('uses the reviewed European Portuguese wording', () => {
+    expect(translate('pt-PT', 'apply.pause')).toBe('Pausar');
+    expect(translate('pt-PT', 'editor.builtins')).toBe('Sempre ignorados');
+    expect(translate('pt-PT', 'error.scan.planConflict', { path: 'a' })).toMatch(/Por favor, comunique este problema\.$/);
+    expect(translate('pt-PT', 'reason.skip.caseCollision')).toMatch(/não consegue guardar os dois$/);
+    expect(translate('pt-PT', 'editor.rulesHelp')).toMatch(/^\*\.tmp ignora esses ficheiros em qualquer pasta\./);
+    expect(translate('pt-PT', 'preview.deleteBanner', { count: 3 })).toBe(
+      '⚠ Ficheiros a apagar da cópia: 3. Vão para .sync-trash e podem ser recuperados.');
+    expect(translate('pt-PT', 'result.oldTrash', { count: 2, days: 30 })).toBe('Lixos com mais de 30 dias: 2.');
+    expect(translate('pt-PT', 'trash.restored', { count: 1 })).toBe('Recuperados: 1');
+    expect(translate('pt-PT', 'result.emptyOldConfirm', { count: 2 })).toBe(
+      'Apagar definitivamente os lixos antigos (2)? Não é possível desfazer.');
+  });
+
   it('formats bytes per language', () => {
     expect(formatBytes('en', 1536)).toBe('1.5 KB');
     expect(formatBytes('pt-PT', 1536)).toBe('1,5 KB');
