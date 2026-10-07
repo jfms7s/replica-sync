@@ -8,8 +8,10 @@ pub mod moves;
 pub mod pairs;
 pub mod plan;
 pub mod rules;
+pub mod runlog;
 pub mod safety;
 pub mod scan;
+pub mod session;
 pub mod trash;
 pub mod volume;
 
