@@ -162,6 +162,9 @@ pub struct Snapshot {
     pub problems: Vec<Problem>,
     /// `*.replica-sync.tmp` files left by an interrupted run.
     pub leftovers: Vec<RelPath>,
+    /// Paths present on disk but not listed as entries because a skip rule or
+    /// the temp suffix matched them (leftovers appear here too). Unsorted.
+    pub unlisted: Vec<RelPath>,
 }
 
 impl Snapshot {

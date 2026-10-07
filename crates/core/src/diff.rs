@@ -2,7 +2,7 @@
 
 use crate::model::{Change, Entry, Kind, MTIME_TOLERANCE_NS, MoveKind, RelPath, Snapshot};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
 
 /// Whether the replica's filesystem treats `A.jpg` and `a.jpg` as one name.
@@ -66,6 +66,26 @@ fn has_children(map: &BTreeMap<String, &Entry>, k: &str) -> bool {
         .is_some_and(|(c, _)| c.starts_with(&prefix))
 }
 
+/// Replica folders an RmDir could never empty, because something the plan leaves
+/// alone sits somewhere under them: a path the scan did not list (skip rule or
+/// temp suffix), a leftover temp file, or a blocked key (which covers replica
+/// links and replica problems too). Removing them would fail on every sync.
+fn pinned_folders(replica: &Snapshot, blocks: &Blocks, case: CaseMode) -> HashSet<String> {
+    let mut pinned = HashSet::new();
+    let mut pin_ancestors = |k: &str| {
+        for (i, _) in k.match_indices('/') {
+            pinned.insert(k[..i].to_owned());
+        }
+    };
+    for r in replica.unlisted.iter().chain(&replica.leftovers) {
+        pin_ancestors(&key(r, case));
+    }
+    for k in blocks.0.keys() {
+        pin_ancestors(k);
+    }
+    pinned
+}
+
 pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change> {
     let mut collisions = BTreeMap::new();
     let src = index(source, case, &mut collisions);
@@ -123,6 +143,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
         }
     }
 
+    let pinned = pinned_folders(replica, &blocks, case);
     let keys: BTreeSet<&String> = src.keys().chain(rep.keys()).collect();
     for k in keys {
         if blocks.covers(k) {
@@ -146,10 +167,10 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                     size: r.size,
                     mtime_ns: r.mtime_ns,
                 }),
-                Kind::Dir => out.push(Change::RmDir {
+                Kind::Dir if !pinned.contains(k) => out.push(Change::RmDir {
                     path: r.rel.clone(),
                 }),
-                Kind::Link => {}
+                Kind::Dir | Kind::Link => {}
             },
             (Some(s), Some(r)) => {
                 if s.rel.name() != r.rel.name() {
@@ -410,5 +431,60 @@ mod tests {
         let out = diff(&src, &snap(vec![file("a", 1, T0)]), CaseMode::Sensitive);
         assert_eq!(out.len(), 1);
         assert!(matches!(&out[0], Change::Skipped { .. }));
+    }
+    #[test]
+    fn replica_only_folder_holding_an_unlisted_entry_is_not_removed() {
+        let mut rep = snap(vec![
+            dir("OldTrip"),
+            file("OldTrip/p.jpg", 1, T0),
+            dir("Deep"),
+            dir("Deep/sub"),
+            dir("Gone"),
+            file("Gone/q.jpg", 1, T0),
+        ]);
+        rep.unlisted.push(rel("OldTrip/Thumbs.db"));
+        rep.unlisted.push(rel("Deep/sub/Temp"));
+        let out = diff(&snap(vec![]), &rep, CaseMode::Sensitive);
+        let rmdirs: Vec<&str> = out
+            .iter()
+            .filter_map(|c| match c {
+                Change::RmDir { path } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rmdirs, vec!["Gone"]);
+        assert!(
+            out.iter().any(
+                |c| matches!(c, Change::Delete { path, .. } if path.as_str() == "OldTrip/p.jpg")
+            )
+        );
+    }
+
+    #[test]
+    fn leftovers_links_problems_and_blocks_keep_their_replica_folders() {
+        let mut rep = snap(vec![
+            dir("L"),
+            dir("K"),
+            link("K/alias"),
+            dir("P"),
+            dir("B"),
+            dir("B/x"),
+            dir("Free"),
+        ]);
+        rep.leftovers.push(rel("L/a.jpg.replica-sync.tmp"));
+        rep.problems.push(Problem {
+            rel: rel("P/locked.bin"),
+            reason: "Permission denied".into(),
+        });
+        let src = snap(vec![file("B/x", 1, T0)]); // file vs folder: blocked key B/x
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        let rmdirs: Vec<&str> = out
+            .iter()
+            .filter_map(|c| match c {
+                Change::RmDir { path } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rmdirs, vec!["Free"]);
     }
 }
