@@ -10,6 +10,7 @@ pub mod rules;
 pub mod safety;
 pub mod scan;
 pub mod trash;
+pub mod volume;
 
 #[cfg(test)]
 mod testutil;
