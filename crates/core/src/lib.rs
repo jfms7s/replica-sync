@@ -2,6 +2,7 @@
 //! replica match the source, and apply the approved ones safely.
 
 pub mod model;
+pub mod rules;
 
 #[cfg(test)]
 mod testutil;
