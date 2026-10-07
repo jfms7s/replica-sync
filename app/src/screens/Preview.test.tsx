@@ -42,8 +42,18 @@ describe('Preview', () => {
   });
 
   it('says Already in sync for an empty plan', () => {
-    render(<I18nProvider lang="en"><Preview summary={{ ...base, isEmpty: true, totals: { ...totals, creates: 0, deletes: 0 } }} navigate={vi.fn()} /></I18nProvider>);
+    const none = { ...totals, creates: 0, deletes: 0, skipped: 0 };
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, isEmpty: true, totals: none }} navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByText('Already in sync. Nothing to do.')).toBeInTheDocument();
+    expect(screen.queryByRole('tree')).not.toBeInTheDocument();
+  });
+
+  it('still shows the tree when an in-sync plan has skipped items', async () => {
+    const skippedOnly = { ...totals, creates: 0, deletes: 0, skipped: 2 };
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, isEmpty: true, totals: skippedOnly }} navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText('Already in sync. Nothing to do.')).toBeInTheDocument();
+    expect(screen.getByRole('tree')).toBeInTheDocument();
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith(''));
   });
 
   it('applies the selection', async () => {
