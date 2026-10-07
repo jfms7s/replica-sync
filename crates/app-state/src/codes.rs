@@ -22,7 +22,10 @@ mod tests {
         if std::env::var_os("UPDATE_CODES").is_some() {
             std::fs::write(&path, &want).unwrap();
         }
-        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        // Git may check the file out with CRLF line endings on Windows.
+        let have = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             have, want,
             "codes.json is stale: run `UPDATE_CODES=1 cargo test -p replica-sync-app-state codes_json`"
