@@ -47,7 +47,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                let guard = state.session.lock().unwrap();
+                let guard = state.session.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = guard.as_ref() {
                     if s.is_applying() {
                         api.prevent_close();

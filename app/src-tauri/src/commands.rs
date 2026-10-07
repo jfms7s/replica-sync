@@ -33,6 +33,18 @@ fn with_session<T>(state: &AppState, f: impl FnOnce(&mut Session) -> Res<T>) -> 
     }
 }
 
+/// Runs `f` on a blocking thread so slow disk or volume work never freezes
+/// the main thread (and with it the window and the close handler).
+async fn blocking<T: Send + 'static>(
+    app: &AppHandle,
+    f: impl FnOnce(&AppState) -> Res<T> + Send + 'static,
+) -> Res<T> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&app.state::<AppState>()))
+        .await
+        .map_err(|e| AppError::new("io").with("detail", e))?
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
@@ -88,33 +100,40 @@ pub fn builtin_rules() -> Vec<&'static str> {
 }
 
 #[tauri::command]
-pub fn list_pairs(state: State<'_, AppState>) -> Res<Vec<PairView>> {
-    with_session(&state, |s| Ok(s.pair_views(&state.volumes)))
+pub async fn list_pairs(app: AppHandle) -> Res<Vec<PairView>> {
+    blocking(&app, |st| {
+        with_session(st, |s| Ok(s.pair_views(&st.volumes)))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_pair(state: State<'_, AppState>, input: PairInput) -> Res<Pair> {
-    with_session(&state, |s| s.save_pair(input, &state.volumes))
+pub async fn save_pair(app: AppHandle, input: PairInput) -> Res<Pair> {
+    blocking(&app, |st| {
+        with_session(st, |s| s.save_pair(input, &st.volumes))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_pair(state: State<'_, AppState>, id: String) -> Res<()> {
-    with_session(&state, |s| s.delete_pair(&id))
+pub async fn delete_pair(app: AppHandle, id: String) -> Res<()> {
+    blocking(&app, move |st| with_session(st, |s| s.delete_pair(&id))).await
 }
 
 #[tauri::command]
-pub fn relink(
-    state: State<'_, AppState>,
-    id: String,
-    side: SideKind,
-    folder: PathBuf,
-) -> Res<Pair> {
-    with_session(&state, |s| s.relink(&id, side, &folder, &state.volumes))
+pub async fn relink(app: AppHandle, id: String, side: SideKind, folder: PathBuf) -> Res<Pair> {
+    blocking(&app, move |st| {
+        with_session(st, |s| s.relink(&id, side, &folder, &st.volumes))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn start_scan(app: AppHandle, state: State<'_, AppState>, id: String) -> Res<()> {
-    let job = with_session(&state, |s| s.begin_scan(&id, &state.volumes))?;
+pub async fn start_scan(app: AppHandle, id: String) -> Res<()> {
+    let job = blocking(&app, move |st| {
+        with_session(st, |s| s.begin_scan(&id, &st.volumes))
+    })
+    .await?;
     let done = Arc::new(AtomicBool::new(false));
     {
         let (app, counters, done, approx) = (
@@ -186,8 +205,8 @@ pub fn confirm_wrong_folder(state: State<'_, AppState>) -> Res<PreviewSummary> {
 }
 
 #[tauri::command]
-pub fn save_preview(state: State<'_, AppState>, file: PathBuf) -> Res<()> {
-    with_session(&state, |s| s.save_preview(&file))
+pub async fn save_preview(app: AppHandle, file: PathBuf) -> Res<()> {
+    blocking(&app, move |st| with_session(st, |s| s.save_preview(&file))).await
 }
 
 fn spawn_apply(app: AppHandle, job: ApplyJob) {
@@ -212,15 +231,15 @@ fn spawn_apply(app: AppHandle, job: ApplyJob) {
 }
 
 #[tauri::command]
-pub fn apply(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
-    let job = with_session(&state, |s| s.begin_apply(&state.volumes))?;
+pub async fn apply(app: AppHandle) -> Res<()> {
+    let job = blocking(&app, |st| with_session(st, |s| s.begin_apply(&st.volumes))).await?;
     spawn_apply(app, job);
     Ok(())
 }
 
 #[tauri::command]
-pub fn retry_failed(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
-    let job = with_session(&state, |s| s.begin_retry(&state.volumes))?;
+pub async fn retry_failed(app: AppHandle) -> Res<()> {
+    let job = blocking(&app, |st| with_session(st, |s| s.begin_retry(&st.volumes))).await?;
     spawn_apply(app, job);
     Ok(())
 }
@@ -276,35 +295,41 @@ pub fn stop_and_close(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
 }
 
 #[tauri::command]
-pub fn trash_runs(state: State<'_, AppState>, id: String) -> Res<Vec<TrashRunInfo>> {
-    with_session(&state, |s| s.trash_runs(&id, &state.volumes))
+pub async fn trash_runs(app: AppHandle, id: String) -> Res<Vec<TrashRunInfo>> {
+    blocking(&app, move |st| {
+        with_session(st, |s| s.trash_runs(&id, &st.volumes))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn trash_contents(
-    state: State<'_, AppState>,
-    id: String,
-    run: String,
-) -> Res<TrashRunContents> {
-    with_session(&state, |s| s.trash_contents(&id, &run, &state.volumes))
+pub async fn trash_contents(app: AppHandle, id: String, run: String) -> Res<TrashRunContents> {
+    blocking(&app, move |st| {
+        with_session(st, |s| s.trash_contents(&id, &run, &st.volumes))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn restore(
-    state: State<'_, AppState>,
+pub async fn restore(
+    app: AppHandle,
     id: String,
     run: String,
     paths: Vec<RelPath>,
     replace: bool,
 ) -> Res<usize> {
-    with_session(&state, |s| {
-        s.restore(&id, &run, &paths, replace, &state.volumes)
+    blocking(&app, move |st| {
+        with_session(st, |s| s.restore(&id, &run, &paths, replace, &st.volumes))
     })
+    .await
 }
 
 #[tauri::command]
-pub fn empty_run(state: State<'_, AppState>, id: String, run: String) -> Res<()> {
-    with_session(&state, |s| s.empty_run(&id, &run, &state.volumes))
+pub async fn empty_run(app: AppHandle, id: String, run: String) -> Res<()> {
+    blocking(&app, move |st| {
+        with_session(st, |s| s.empty_run(&id, &run, &st.volumes))
+    })
+    .await
 }
 
 fn open(app: &AppHandle, path: &std::path::Path) -> Res<()> {
