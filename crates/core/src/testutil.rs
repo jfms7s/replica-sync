@@ -86,3 +86,27 @@ pub fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     walk(root, root, &mut out);
     out
 }
+
+use crate::diff::{CaseMode, diff};
+use crate::moves::detect_moves;
+use crate::plan::{Plan, build_plan};
+use crate::rules::SkipRules;
+use crate::scan::{ScanCounters, scan};
+
+/// Scan → diff → moves → plan for two real folders (case-sensitive).
+pub fn plan_for(source: &Path, replica: &Path) -> Plan {
+    let rules = SkipRules::new(&[]).unwrap();
+    let c = ScanCounters::default();
+    let s = scan(source, &rules, &c).unwrap();
+    let r = scan(replica, &rules, &c).unwrap();
+    build_plan(
+        detect_moves(
+            diff(&s, &r, CaseMode::Sensitive),
+            &s,
+            &r,
+            CaseMode::Sensitive,
+        ),
+        CaseMode::Sensitive,
+    )
+    .unwrap()
+}
