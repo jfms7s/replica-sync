@@ -4,7 +4,7 @@
 use crate::model::{RelPath, modified_ns};
 use crate::safety::{ReplicaRoot, SafetyError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -288,18 +288,23 @@ fn read_manifest(run: &Path) -> io::Result<Vec<TrashItem>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
-    let mut items: Vec<TrashItem> = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+    // Replay in one pass: the latest line for a path wins, and its position in
+    // the manifest decides the order (as re-appending it to a list would).
+    let mut live: HashMap<RelPath, (usize, TrashItem)> = HashMap::new();
+    for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         match serde_json::from_str::<ManifestLine>(line) {
             Ok(ManifestLine::Item(item)) => {
-                items.retain(|i| i.path != item.path);
-                items.push(item);
+                live.insert(item.path.clone(), (n, item));
             }
-            Ok(ManifestLine::Restored { restored }) => items.retain(|i| i.path != restored),
+            Ok(ManifestLine::Restored { restored }) => {
+                live.remove(&restored);
+            }
             Err(_) => {} // torn last line after a crash
         }
     }
-    Ok(items)
+    let mut items: Vec<(usize, TrashItem)> = live.into_values().collect();
+    items.sort_unstable_by_key(|(n, _)| *n);
+    Ok(items.into_iter().map(|(_, item)| item).collect())
 }
 
 pub fn run_contents(replica_root: &Path, run_id: &str) -> io::Result<TrashRunContents> {
@@ -337,11 +342,14 @@ pub fn list_runs(replica_root: &Path) -> io::Result<Vec<TrashRunInfo>> {
         if !valid_run_id(&id) {
             continue;
         }
-        let c = run_contents(replica_root, &id)?;
+        // Counts come from the manifest alone, so the list costs one small read
+        // per run instead of a walk of every trashed file. Files that got into
+        // a run without a manifest line show up in `run_contents` (`unrecorded`).
+        let items = read_manifest(&run_paths(replica_root, &id)?.run)?;
         runs.push(TrashRunInfo {
-            files: c.items.len() + c.unrecorded.len(),
-            bytes: c.bytes,
-            unrecorded: c.unrecorded.len(),
+            files: items.len(),
+            bytes: items.iter().map(|i| i.size).sum(),
+            unrecorded: 0,
             id,
         });
     }
@@ -521,6 +529,85 @@ mod tests {
     }
 
     #[test]
+    fn manifest_replay_is_linear_and_keeps_manifest_order() {
+        let d = tempfile::tempdir().unwrap();
+        let run = d.path().join("run");
+        fs::create_dir(&run).unwrap();
+        let mut text = String::new();
+        for i in 0..50_000 {
+            let item = ManifestLine::Item(TrashItem {
+                path: rel(&format!("d/f{i}.bin")),
+                size: 1,
+                mtime_ns: 0,
+                reason: TrashReason::Deleted,
+            });
+            text.push_str(&serde_json::to_string(&item).unwrap());
+            text.push('\n');
+        }
+        for i in (0..50_000).step_by(5) {
+            let line = ManifestLine::Restored {
+                restored: rel(&format!("d/f{i}.bin")),
+            };
+            text.push_str(&serde_json::to_string(&line).unwrap());
+            text.push('\n');
+        }
+        fs::write(run.join(MANIFEST), text).unwrap();
+        let started = std::time::Instant::now();
+        let items = read_manifest(&run).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(items.len(), 40_000);
+        assert_eq!(items[0].path, rel("d/f1.bin"));
+        assert_eq!(items[3].path, rel("d/f4.bin"));
+        assert_eq!(items[4].path, rel("d/f6.bin"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "replay took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_re_trashed_path_moves_to_its_latest_position() {
+        let d = tempfile::tempdir().unwrap();
+        let run = d.path().join("run");
+        fs::create_dir(&run).unwrap();
+        let item = |p: &str, size| {
+            serde_json::to_string(&ManifestLine::Item(TrashItem {
+                path: rel(p),
+                size,
+                mtime_ns: 0,
+                reason: TrashReason::Deleted,
+            }))
+            .unwrap()
+        };
+        fs::write(
+            run.join(MANIFEST),
+            [item("a", 1), item("b", 2), item("a", 3)].join("\n"),
+        )
+        .unwrap();
+        let items = read_manifest(&run).unwrap();
+        let got: Vec<_> = items.iter().map(|i| (i.path.as_str(), i.size)).collect();
+        assert_eq!(got, vec![("b", 2), ("a", 3)]);
+    }
+
+    #[test]
+    fn list_runs_counts_the_manifest_without_walking_files() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            write_file(d.path(), &format!("x{i}.txt"), b"abc", T0);
+        }
+        let mut w = TrashWriter::new(d.path(), STAMP.into());
+        for i in 0..3 {
+            w.move_in(&rel(&format!("x{i}.txt")), 3, ns(T0), TrashReason::Deleted)
+                .unwrap();
+        }
+        drop(w);
+        // With the trashed files gone, the counts can only have come from the manifest.
+        fs::remove_dir_all(d.path().join(TRASH_DIR).join(STAMP).join(FILES_DIR)).unwrap();
+        let runs = list_runs(d.path()).unwrap();
+        assert_eq!((runs[0].files, runs[0].bytes), (3, 9));
+    }
+
+    #[test]
     fn list_and_contents_show_items_and_unrecorded_files() {
         let d = tempfile::tempdir().unwrap();
         write_file(d.path(), "x.txt", b"abc", T0);
@@ -532,14 +619,15 @@ mod tests {
             b"12345",
             T0,
         );
+        // The list counts the manifest only; the unrecorded file shows in the contents.
         let runs = list_runs(d.path()).unwrap();
         assert_eq!(
             runs,
             vec![TrashRunInfo {
                 id: STAMP.into(),
-                files: 2,
-                bytes: 8,
-                unrecorded: 1
+                files: 1,
+                bytes: 3,
+                unrecorded: 0
             }]
         );
         let c = run_contents(d.path(), STAMP).unwrap();
