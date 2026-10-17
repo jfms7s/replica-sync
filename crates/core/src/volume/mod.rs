@@ -3,7 +3,7 @@
 
 use crate::diff::CaseMode;
 use crate::rules::CASE_PROBE_NAME;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub fn case_mode(dir: &Path) -> io::Result<CaseMode> {
         return Ok(CaseMode::Insensitive);
     }
     let probe = dir.join(CASE_PROBE_NAME);
-    fs::write(&probe, b"")?;
+    create_probe(&probe)?;
     let upper = fs::symlink_metadata(dir.join(CASE_PROBE_NAME.to_uppercase()));
     fs::remove_file(&probe)?;
     let insensitive = match upper {
@@ -56,6 +56,31 @@ pub fn case_mode(dir: &Path) -> io::Result<CaseMode> {
     } else {
         CaseMode::Sensitive
     })
+}
+
+/// Creates the probe file without following anything already at its name:
+/// `create_new` fails on an existing entry, symlinks included. A regular file
+/// left there by a crash is removed and the create retried once; anything
+/// else (a planted link, a folder) is refused.
+fn create_probe(probe: &Path) -> io::Result<()> {
+    let create = || OpenOptions::new().write(true).create_new(true).open(probe);
+    match create() {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(probe)?.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the backup drive contains an unexpected link at {}",
+                        probe.display()
+                    ),
+                ));
+            }
+            fs::remove_file(probe)?;
+            create().map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(unix)]
@@ -110,6 +135,39 @@ mod tests {
                 CaseMode::Sensitive
             }
         );
+        assert!(std::fs::read_dir(d.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_probe_refuses_planted_symlink() {
+        let base = tempfile::tempdir().unwrap();
+        let replica = base.path().join("replica");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&replica).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"keep me").unwrap();
+        let link = replica.join(CASE_PROBE_NAME);
+        std::os::unix::fs::symlink("../outside/victim.txt", &link).unwrap();
+
+        let err = case_mode(&replica).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_probe_replaces_leftover_probe_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(CASE_PROBE_NAME), b"stale").unwrap();
+        assert_eq!(case_mode(d.path()).unwrap(), CaseMode::Sensitive);
         assert!(std::fs::read_dir(d.path()).unwrap().next().is_none());
     }
 
