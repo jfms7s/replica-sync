@@ -1,4 +1,10 @@
-//! Apply the approved changes of a plan to the replica, one at a time.
+//! Apply the approved changes of a plan to the replica, one at a time, in plan
+//! order.
+//!
+//! Copies go through a [`Batch`]: each is written to a temp name, a whole batch
+//! is made durable with one flush, and only then are its temps renamed into place
+//! (in plan order). A crash or unplug at any point leaves at most temps, never a
+//! partial file under a real name; the next run's scan removes leftover temps.
 
 use crate::model::{Change, MoveKind, RelPath, modified_ns};
 use crate::plan::{ChangeId, Plan, Planned};
@@ -220,72 +226,326 @@ pub fn execute(
         changes_total: todo.len(),
         ..Progress::default()
     };
-    let mut trash = TrashWriter::new(ctx.replica.path(), ctx.trash_stamp.clone());
-    let mut report = RunReport::default();
+    let mut run = Run {
+        ctx,
+        disk: durable::Replica::open(ctx.replica.path()),
+        trash: TrashWriter::new(ctx.replica.path(), ctx.trash_stamp.clone()),
+        report: RunReport::default(),
+        batch: Batch::default(),
+        progress: &mut progress,
+        on_progress,
+    };
     for p in todo {
-        if !ctx.control.proceed() {
-            report.stopped = Some(StopReason::Cancelled);
+        let copy = match &p.change {
+            Change::Create {
+                path,
+                size,
+                mtime_ns,
+            }
+            | Change::Update {
+                path,
+                size,
+                mtime_ns,
+                ..
+            } => Some((path, *size, *mtime_ns)),
+            _ => None,
+        };
+        if (copy.is_none() || run.batch.is_full()) && !run.flush() {
             break;
         }
-        if !ctx.replica.path().is_dir() {
-            report.stopped = Some(StopReason::ReplicaDisconnected);
+        if let Some(stop) = run.check_roots() {
+            run.stop(stop);
             break;
         }
-        if !ctx.source_root.is_dir() {
-            report.stopped = Some(StopReason::SourceDisconnected);
-            break;
-        }
-        progress.current = Some(p.change.path().clone());
-        on_progress(&progress);
-        let outcome = match apply_one(&p.change, ctx, &mut trash, &mut progress, on_progress) {
+        run.progress.current = Some(p.change.path().clone());
+        (run.on_progress)(run.progress);
+        let result = match copy {
+            Some((rel, size, mtime_ns)) => run.write_copy(p.id, rel, size, mtime_ns),
+            None => apply_one(&p.change, ctx, &mut run.trash),
+        };
+        let outcome = match result {
             Ok(()) => Outcome::Applied,
             Err(Stop::Skip(r)) => Outcome::Skipped(r),
             Err(Stop::Fail(r)) => Outcome::Failed(r),
             Err(Stop::Cancelled) => {
-                report.stopped = Some(StopReason::Cancelled);
+                run.stop(StopReason::Cancelled);
                 break;
             }
             Err(Stop::Fatal(r)) => {
-                report.results.push(ChangeResult {
-                    id: p.id,
-                    path: p.change.path().clone(),
-                    outcome: Outcome::Failed(FailReason::Interrupted),
-                });
-                report.stopped = Some(r);
+                // A full disk still holds the batch's whole temps: keep them.
+                if r != StopReason::ReplicaFull || run.flush() {
+                    run.stop(r);
+                }
+                run.interrupted(p.id, p.change.path());
                 break;
             }
         };
-        report.results.push(ChangeResult {
-            id: p.id,
-            path: p.change.path().clone(),
-            outcome,
-        });
-        progress.changes_done += 1;
-        on_progress(&progress);
+        if copy.is_some() && outcome == Outcome::Applied {
+            continue; // written to a temp; `flush` reports it
+        }
+        run.record(p.id, p.change.path(), outcome);
     }
-    report.trash_run = trash.run_id().map(str::to_owned);
+    if run.report.stopped.is_none() {
+        run.flush();
+    }
+    let mut report = run.report;
+    report.trash_run = run.trash.run_id().map(str::to_owned);
     report
 }
 
-fn apply_one(
-    change: &Change,
-    ctx: &ExecContext,
-    trash: &mut TrashWriter,
-    progress: &mut Progress,
-    on_progress: &mut dyn FnMut(&Progress),
-) -> Result<(), Stop> {
-    match change {
-        Change::Create {
-            path,
-            size,
-            mtime_ns,
+/// How many copies may wait in one [`Batch`] (written, not yet flushed and
+/// renamed). Only Linux has a one-call flush for many files (`syncfs`); elsewhere
+/// each temp is synced on its own and a batch holds one copy, as before.
+#[cfg(target_os = "linux")]
+const BATCH_FILES: usize = 256;
+#[cfg(not(target_os = "linux"))]
+const BATCH_FILES: usize = 1;
+/// Bytes of temps a batch may hold before it is flushed.
+const BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A copy whose temp is complete but not yet durable, so not yet renamed.
+struct Written {
+    id: ChangeId,
+    rel: RelPath,
+    dest: PathBuf,
+    tmp: PathBuf,
+    src_path: PathBuf,
+    len: u64,
+    mtime_ns: i64,
+}
+
+enum Pending {
+    Written(Written),
+    /// A copy that skipped or failed while the batch was open; reported in plan order.
+    Done(ChangeResult),
+}
+
+/// Copies that are written to temps, waiting for one flush before any is renamed
+/// into place: nothing reaches a real name before its data is on disk.
+#[derive(Default)]
+struct Batch {
+    items: Vec<Pending>,
+    bytes: u64,
+}
+
+impl Batch {
+    fn is_full(&self) -> bool {
+        self.items.len() >= BATCH_FILES || self.bytes >= BATCH_BYTES
+    }
+}
+
+/// The state of one `execute` call.
+struct Run<'a, 'p> {
+    ctx: &'a ExecContext<'a>,
+    disk: durable::Replica,
+    trash: TrashWriter,
+    report: RunReport,
+    batch: Batch,
+    progress: &'p mut Progress,
+    on_progress: &'p mut dyn FnMut(&Progress),
+}
+
+impl Run<'_, '_> {
+    fn check_roots(&self) -> Option<StopReason> {
+        if !self.ctx.control.proceed() {
+            Some(StopReason::Cancelled)
+        } else if !self.ctx.replica.path().is_dir() {
+            Some(StopReason::ReplicaDisconnected)
+        } else if !self.ctx.source_root.is_dir() {
+            Some(StopReason::SourceDisconnected)
+        } else {
+            None
         }
-        | Change::Update {
-            path,
-            size,
+    }
+
+    /// Reports one finished change and counts it as done.
+    fn finish(&mut self, id: ChangeId, path: &RelPath, outcome: Outcome) {
+        self.report.results.push(ChangeResult {
+            id,
+            path: path.clone(),
+            outcome,
+        });
+        self.progress.changes_done += 1;
+        (self.on_progress)(self.progress);
+    }
+
+    /// Reports the change a fatal stop cut short; it never counts as done.
+    fn interrupted(&mut self, id: ChangeId, path: &RelPath) {
+        self.report.results.push(ChangeResult {
+            id,
+            path: path.clone(),
+            outcome: Outcome::Failed(FailReason::Interrupted),
+        });
+    }
+
+    /// Reports a change now, or after the open batch so results keep plan order.
+    fn record(&mut self, id: ChangeId, path: &RelPath, outcome: Outcome) {
+        if self.batch.items.is_empty() {
+            self.finish(id, path, outcome);
+        } else {
+            self.batch.items.push(Pending::Done(ChangeResult {
+                id,
+                path: path.clone(),
+                outcome,
+            }));
+        }
+    }
+
+    /// Ends the run: copies still waiting in the batch are not done, so their
+    /// temps are removed and they stay out of the report.
+    fn stop(&mut self, reason: StopReason) {
+        self.discard();
+        self.report.stopped = Some(reason);
+    }
+
+    /// Drops the open batch: removes every waiting temp and reports the changes
+    /// that already have an outcome.
+    fn discard(&mut self) {
+        for item in std::mem::take(&mut self.batch.items) {
+            match item {
+                Pending::Written(w) => self.disk.remove_temp(self.ctx.replica.path(), &w.tmp),
+                Pending::Done(r) => self.finish(r.id, &r.path, r.outcome),
+            }
+        }
+        self.batch.bytes = 0;
+    }
+
+    /// Copies `rel` into a temp that joins the batch. `Ok` means "written,
+    /// pending flush"; `flush` reports the outcome.
+    fn write_copy(
+        &mut self,
+        id: ChangeId,
+        rel: &RelPath,
+        size: u64,
+        mtime_ns: i64,
+    ) -> Result<(), Stop> {
+        let ctx = self.ctx;
+        let root = ctx.replica.path();
+        let src_path = rel.to_path(ctx.source_root);
+        let before = match fs::metadata(&src_path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Stop::Skip(SkipReason::DeletedSinceScan));
+            }
+            Err(e) => return Err(io_stop(&e, root)),
+        };
+        if before.len() != size || modified_ns(&before) != mtime_ns {
+            return Err(Stop::Skip(SkipReason::ChangedSincePreview));
+        }
+        let dest = target(ctx, rel)?;
+        fs::create_dir_all(dest.parent().expect("never the root"))
+            .map_err(|e| io_stop(&e, root))?;
+        let tmp = temp_path(&dest);
+        if let Err(stop) = write_temp(
+            ctx,
+            &src_path,
+            &tmp,
+            &before,
+            self.progress,
+            self.on_progress,
+        ) {
+            self.disk.remove_temp(root, &tmp);
+            return Err(stop);
+        }
+        self.batch.bytes += before.len();
+        self.batch.items.push(Pending::Written(Written {
+            id,
+            rel: rel.clone(),
+            dest,
+            tmp,
+            src_path,
+            len: before.len(),
             mtime_ns,
-            ..
-        } => copy_file(ctx, path, *size, *mtime_ns, trash, progress, on_progress),
+        }));
+        Ok(())
+    }
+
+    /// Makes the batch durable with one flush, then renames its temps into place
+    /// in plan order, re-checking each source first. False once the run stopped.
+    fn flush(&mut self) -> bool {
+        let root = self.ctx.replica.path();
+        let has_written = self
+            .batch
+            .items
+            .iter()
+            .any(|i| matches!(i, Pending::Written(_)));
+        let mut sync_failed = None;
+        if has_written && let Err(e) = self.disk.flush(root) {
+            match io_stop(&e, root) {
+                Stop::Fatal(r) => {
+                    self.stop(r);
+                    return false;
+                }
+                Stop::Fail(r) => sync_failed = Some(r),
+                Stop::Skip(_) | Stop::Cancelled => unreachable!("io_stop only fails"),
+            }
+        }
+        let mut items = std::mem::take(&mut self.batch.items).into_iter();
+        self.batch.bytes = 0;
+        while let Some(item) = items.next() {
+            let w = match item {
+                Pending::Done(r) => {
+                    self.finish(r.id, &r.path, r.outcome);
+                    continue;
+                }
+                Pending::Written(w) => w,
+            };
+            let result = match &sync_failed {
+                Some(r) => Err(Stop::Fail(r.clone())),
+                None => match self.check_roots() {
+                    Some(stop) => {
+                        self.batch.items =
+                            std::iter::once(Pending::Written(w)).chain(items).collect();
+                        self.stop(stop);
+                        return false;
+                    }
+                    None => self.commit(&w),
+                },
+            };
+            let outcome = match result {
+                Ok(()) => Outcome::Applied,
+                Err(Stop::Skip(r)) => Outcome::Skipped(r),
+                Err(Stop::Fail(r)) => Outcome::Failed(r),
+                Err(Stop::Cancelled) => unreachable!("commit never waits on the control"),
+                Err(Stop::Fatal(r)) => {
+                    self.disk.remove_temp(root, &w.tmp);
+                    self.interrupted(w.id, &w.rel);
+                    self.batch.items = items.collect();
+                    self.stop(r);
+                    return false;
+                }
+            };
+            if outcome != Outcome::Applied {
+                self.disk.remove_temp(root, &w.tmp);
+            }
+            self.finish(w.id, &w.rel, outcome);
+        }
+        true
+    }
+
+    /// Renames one durable temp into place, unless its source changed since it
+    /// was first read.
+    fn commit(&mut self, w: &Written) -> Result<(), Stop> {
+        let root = self.ctx.replica.path();
+        let after = match fs::metadata(&w.src_path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Stop::Skip(SkipReason::DeletedSinceScan));
+            }
+            Err(e) => return Err(io_stop(&e, root)),
+        };
+        if after.len() != w.len || modified_ns(&after) != w.mtime_ns {
+            return Err(Stop::Fail(FailReason::ChangedDuringCopy));
+        }
+        replace_with_temp(&w.rel, &w.dest, &w.tmp, &mut self.trash, root)
+    }
+}
+
+fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Result<(), Stop> {
+    match change {
+        Change::Create { .. } | Change::Update { .. } => {
+            unreachable!("copies go through Run::write_copy")
+        }
         Change::MkDir { path } => {
             fs::create_dir_all(target(ctx, path)?).map_err(|e| io_stop(&e, ctx.replica.path()))
         }
@@ -294,38 +554,6 @@ fn apply_one(
         Change::RmDir { path } => remove_dir(ctx, path),
         Change::Skipped { .. } => Ok(()),
     }
-}
-
-fn copy_file(
-    ctx: &ExecContext,
-    rel: &RelPath,
-    size: u64,
-    mtime_ns: i64,
-    trash: &mut TrashWriter,
-    progress: &mut Progress,
-    on_progress: &mut dyn FnMut(&Progress),
-) -> Result<(), Stop> {
-    let root = ctx.replica.path();
-    let src_path = rel.to_path(ctx.source_root);
-    let before = match fs::metadata(&src_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(Stop::Skip(SkipReason::DeletedSinceScan));
-        }
-        Err(e) => return Err(io_stop(&e, root)),
-    };
-    if before.len() != size || modified_ns(&before) != mtime_ns {
-        return Err(Stop::Skip(SkipReason::ChangedSincePreview));
-    }
-    let dest = target(ctx, rel)?;
-    fs::create_dir_all(dest.parent().expect("never the root")).map_err(|e| io_stop(&e, root))?;
-    let tmp = temp_path(&dest);
-    let result = write_temp(ctx, &src_path, &tmp, &before, progress, on_progress)
-        .and_then(|()| replace_with_temp(rel, &dest, &tmp, trash, root));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 
 fn write_temp(
@@ -362,15 +590,102 @@ fn write_temp(
             return Err(Stop::Cancelled);
         }
     }
-    out.sync_all().map_err(on_io)?;
+    if durable::SYNC_EACH_FILE {
+        out.sync_all().map_err(on_io)?;
+    }
     let mtime = FileTime::from_system_time(before.modified().map_err(on_io)?);
     filetime::set_file_handle_times(&out, None, Some(mtime)).map_err(on_io)?;
-    drop(out);
-    let after = fs::metadata(src_path).map_err(on_io)?;
-    if after.len() != before.len() || modified_ns(&after) != modified_ns(before) {
-        return Err(Stop::Fail(FailReason::ChangedDuringCopy));
-    }
     Ok(())
+}
+
+/// Durability for the replica disk.
+#[cfg(target_os = "linux")]
+mod durable {
+    use std::ffi::CString;
+    use std::fs::{self, File};
+    use std::io;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// One `syncfs` per batch makes every temp in it durable.
+    pub const SYNC_EACH_FILE: bool = false;
+
+    #[cfg(test)]
+    thread_local! {
+        /// How many batch flushes this thread has run (tests check flush-before-rename).
+        pub static FLUSHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// An open handle on the replica root: `syncfs` needs a descriptor on the
+    /// disk, and temps can still be removed through it after the root folder is
+    /// moved or renamed.
+    pub struct Replica(Option<File>);
+
+    impl Replica {
+        pub fn open(root: &Path) -> Replica {
+            Replica(File::open(root).ok())
+        }
+
+        pub fn flush(&self, root: &Path) -> io::Result<()> {
+            let opened;
+            let file = match &self.0 {
+                Some(f) => f,
+                None => {
+                    opened = File::open(root)?;
+                    &opened
+                }
+            };
+            #[cfg(test)]
+            FLUSHES.with(|n| n.set(n.get() + 1));
+            // SAFETY: `file` is an open descriptor for the duration of the call.
+            if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        /// Best effort: a temp that cannot be removed is a leftover the next scan
+        /// deletes.
+        pub fn remove_temp(&self, root: &Path, tmp: &Path) {
+            let (Some(dir), Ok(rel)) = (&self.0, tmp.strip_prefix(root)) else {
+                let _ = fs::remove_file(tmp);
+                return;
+            };
+            let Ok(rel) = CString::new(rel.as_os_str().as_bytes()) else {
+                return;
+            };
+            // SAFETY: `dir` is an open descriptor and `rel` is NUL-terminated.
+            unsafe { libc::unlinkat(dir.as_raw_fd(), rel.as_ptr(), 0) };
+        }
+    }
+}
+
+/// Durability for the replica disk: each temp is synced as it is written.
+#[cfg(not(target_os = "linux"))]
+mod durable {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+
+    pub const SYNC_EACH_FILE: bool = true;
+
+    pub struct Replica;
+
+    impl Replica {
+        pub fn open(_root: &Path) -> Replica {
+            Replica
+        }
+
+        pub fn flush(&self, _root: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        pub fn remove_temp(&self, _root: &Path, tmp: &Path) {
+            let _ = fs::remove_file(tmp);
+        }
+    }
 }
 
 fn replace_with_temp(
@@ -1089,5 +1404,243 @@ mod apply_tests {
         );
         assert_eq!(fs::read(&taken).unwrap(), b"user data");
         assert_eq!(fs::read(f.rep.join("Photo.JPG")).unwrap(), b"x");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod batch_tests {
+    use super::tests::{fixture, no_temp_files, run_all, run_with};
+    use super::*;
+    use crate::testutil::{T0, plan_for, read_tree, write_file};
+    use std::collections::HashMap;
+    use std::fs;
+
+    fn name(i: usize) -> String {
+        format!("d/f{i:02}.txt")
+    }
+
+    /// `n` small source files, `d/f00.txt`…, each holding its own name.
+    fn sources(f: &super::tests::Fixture, n: usize) {
+        for i in 0..n {
+            write_file(&f.src, &name(i), name(i).as_bytes(), T0);
+        }
+    }
+
+    fn flushes() -> u64 {
+        durable::FLUSHES.with(|n| n.get())
+    }
+
+    /// Every real-named (non-temp) replica file holds its complete source content.
+    fn no_partial_real_files(f: &super::tests::Fixture) -> bool {
+        read_tree(&f.rep)
+            .iter()
+            .filter(|(k, _)| !k.ends_with(TEMP_SUFFIX))
+            .all(|(k, v)| fs::read(f.src.join(k)).ok().as_ref() == Some(v))
+    }
+
+    #[test]
+    fn a_batch_of_ten_files_renames_all_after_one_flush() {
+        let f = fixture();
+        sources(&f, 10);
+        let before = flushes();
+        let report = run_all(&f);
+        assert_eq!(flushes() - before, 1, "one flush for the whole batch");
+        assert_eq!(report.applied(), 10, "{:?}", report.results);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn nothing_is_renamed_before_its_batch_is_flushed() {
+        let f = fixture();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        let mut written_at: HashMap<String, u64> = HashMap::new();
+        let mut seen_done = 0;
+        let mut checked = 0;
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                // Whatever moment a crash or unplug hits, real names hold whole files.
+                assert!(no_partial_real_files(&f));
+                if p.changes_done == 0 && p.bytes_done > 0 {
+                    // Still writing the batch: only temps so far.
+                    assert!(read_tree(&f.rep).keys().all(|k| k.ends_with(TEMP_SUFFIX)));
+                    let cur = p.current.as_ref().unwrap().as_str().to_owned();
+                    written_at.entry(cur).or_insert_with(flushes);
+                }
+                if p.changes_done > seen_done {
+                    seen_done = p.changes_done;
+                    let done = name(seen_done - 1);
+                    assert!(f.rep.join(&done).exists());
+                    assert!(
+                        flushes() > written_at[&done],
+                        "{done} renamed before a flush"
+                    );
+                    checked += 1;
+                }
+            },
+        );
+        assert_eq!(report.applied(), 10);
+        assert_eq!(checked, 10);
+    }
+
+    #[test]
+    fn a_crash_mid_batch_leaves_only_temps_and_the_next_run_recovers() {
+        let f = fixture();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_with(
+                &f,
+                &plan,
+                &plan.actionable_ids(),
+                &Control::default(),
+                &mut |p: &Progress| {
+                    if p.current.as_ref().is_some_and(|c| c.as_str() == name(6)) {
+                        panic!("simulated crash");
+                    }
+                },
+            )
+        }));
+        assert!(crashed.is_err());
+        let left = read_tree(&f.rep);
+        assert!(!left.is_empty(), "the crash left the batch's temps");
+        assert!(left.keys().all(|k| k.ends_with(TEMP_SUFFIX)), "{left:?}");
+        let report = run_all(&f);
+        assert_eq!(report.applied(), 10, "{:?}", report.results);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn cancel_mid_batch_stops_at_once_and_drops_the_written_temps() {
+        let f = fixture();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        let mut opened = Vec::new();
+        let before = flushes();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &control,
+            &mut |p: &Progress| {
+                if let Some(c) = &p.current
+                    && opened.last() != Some(c)
+                {
+                    opened.push(c.clone());
+                }
+                if p.current.as_ref().is_some_and(|c| c.as_str() == name(4)) && p.bytes_done > 0 {
+                    control.cancel();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::Cancelled));
+        assert!(report.results.is_empty(), "{:?}", report.results);
+        assert_eq!(
+            opened.last().unwrap().as_str(),
+            name(4),
+            "no file after the cancel"
+        );
+        assert_eq!(flushes(), before, "a cancel does not wait for a flush");
+        assert!(read_tree(&f.rep).is_empty());
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn a_source_changing_inside_a_batch_fails_only_that_file() {
+        let f = fixture();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        fs::remove_file(f.src.join(name(7))).unwrap();
+        let mut edited = false;
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                // f03's temp is complete; its source changes before the flush.
+                if !edited && p.current.as_ref().is_some_and(|c| c.as_str() == name(5)) {
+                    use std::io::Write;
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(f.src.join(name(3)))
+                        .unwrap()
+                        .write_all(b" more")
+                        .unwrap();
+                    edited = true;
+                }
+            },
+        );
+        let ids: Vec<_> = report.results.iter().map(|r| r.id).collect();
+        let planned: Vec<_> = plan.changes.iter().map(|p| p.id).collect();
+        assert_eq!(ids, planned, "one result per change, in plan order");
+        for (i, r) in report.results.iter().enumerate() {
+            assert_eq!(r.path.as_str(), name(i));
+            let want = match i {
+                3 => Outcome::Failed(FailReason::ChangedDuringCopy),
+                7 => Outcome::Skipped(SkipReason::DeletedSinceScan),
+                _ => Outcome::Applied,
+            };
+            assert_eq!(r.outcome, want, "{}", r.path);
+        }
+        assert!(!f.rep.join(name(3)).exists() && !f.rep.join(name(7)).exists());
+        assert_eq!(read_tree(&f.rep).len(), 8);
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn replica_moved_away_mid_batch_stops_and_removes_its_temps() {
+        let f = fixture();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        let unplugged = f.rep.with_file_name("rep-unplugged");
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if p.current.as_ref().is_some_and(|c| c.as_str() == name(5)) && f.rep.exists() {
+                    fs::rename(&f.rep, &unplugged).unwrap();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
+        // f00-f04 were waiting for the flush, so they are not done; f05 was cut short.
+        let results: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| (r.path.as_str().to_owned(), r.outcome.clone()))
+            .collect();
+        assert_eq!(
+            results,
+            vec![(name(5), Outcome::Failed(FailReason::Interrupted))]
+        );
+        assert!(
+            read_tree(&unplugged).is_empty(),
+            "{:?}",
+            read_tree(&unplugged)
+        );
+    }
+
+    #[test]
+    fn many_files_flush_in_batches_of_at_most_256() {
+        let f = fixture();
+        let n = BATCH_FILES + 44;
+        for i in 0..n {
+            write_file(&f.src, &format!("m/{i:04}"), b"x", T0);
+        }
+        let before = flushes();
+        let report = run_all(&f);
+        assert_eq!(report.applied(), n);
+        assert_eq!(flushes() - before, 2);
+        assert!(no_temp_files(&f.rep));
     }
 }
