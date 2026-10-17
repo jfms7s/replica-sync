@@ -68,6 +68,32 @@ fn moved_folder_is_renamed_not_copied() {
 }
 
 #[test]
+fn folder_move_leaves_skipped_replica_files_in_place() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "New/a.jpg", &[1u8; 64], T0);
+    write_file(&s, "New/b.jpg", &[2u8; 64], T0);
+    write_file(&r, "Old/a.jpg", &[1u8; 64], T0);
+    write_file(&r, "Old/b.jpg", &[2u8; 64], T0);
+    write_file(&r, "Old/cache/x.bin", b"keep me", T0);
+
+    let p = prepare_with(&s, &r, &["Old/cache/"]);
+    let report = apply_all(&s, &r, &p);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+
+    let again = prepare_with(&s, &r, &["Old/cache/"]);
+    assert!(
+        !again
+            .plan
+            .changes
+            .iter()
+            .any(|c| matches!(c.change, Change::Delete { .. })),
+        "{:?}",
+        again.plan.changes
+    );
+    assert_eq!(fs::read(r.join("Old/cache/x.bin")).unwrap(), b"keep me");
+}
+
+#[test]
 fn skip_rules_protect_replica_copies() {
     let (_d, s, r) = dirs();
     write_file(&r, "Temp/scratch.txt", b"mine", T0);

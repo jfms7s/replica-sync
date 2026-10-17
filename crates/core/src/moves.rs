@@ -142,11 +142,20 @@ fn collapse_folder_moves(
             .is_ok_and(|i| replica.entries[i].kind == Kind::Dir)
     };
 
-    let problem_keys: Vec<String> = replica.problems.iter().map(|p| k(&p.rel)).collect();
-    // An unreadable entry at or under X must not be carried along by a rename.
+    // An unreadable entry, or one a skip rule hides (leftovers included), at or
+    // under X must not be carried along by a rename: the skipped entry would
+    // land where its rule no longer matches it.
+    let blocked_keys: Vec<String> = replica
+        .problems
+        .iter()
+        .map(|p| &p.rel)
+        .chain(&replica.unlisted)
+        .chain(&replica.leftovers)
+        .map(k)
+        .collect();
     let has_problem = |x: &RelPath| {
         let kx = k(x);
-        problem_keys.iter().any(|p| {
+        blocked_keys.iter().any(|p| {
             *p == kx
                 || p.strip_prefix(kx.as_str())
                     .is_some_and(|r| r.starts_with('/'))
@@ -380,6 +389,50 @@ mod tests {
         );
         out.sort_by(|a, b| a.path().cmp(b.path()));
         out
+    }
+
+    #[test]
+    fn folder_holding_a_skipped_entry_is_not_collapsed() {
+        let s = snap(vec![
+            dir("New"),
+            file("New/a.jpg", 10, T0),
+            file("New/b.jpg", 20, T0),
+        ]);
+        let mut r = snap(vec![
+            dir("Old"),
+            file("Old/a.jpg", 10, T0),
+            file("Old/b.jpg", 20, T0),
+        ]);
+        r.unlisted = vec![rel("Old/cache/x.bin")];
+        let out = detect_moves(
+            diff(&s, &r, CaseMode::Sensitive),
+            &s,
+            &r,
+            CaseMode::Sensitive,
+        );
+        let file_moves = out
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Move {
+                        kind: MoveKind::File { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(file_moves, 2, "{out:?}");
+        assert!(
+            !out.iter().any(|c| matches!(
+                c,
+                Change::Move {
+                    kind: MoveKind::Dir { .. },
+                    ..
+                }
+            )),
+            "{out:?}"
+        );
     }
 
     #[test]
