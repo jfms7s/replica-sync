@@ -110,3 +110,22 @@ pub fn plan_for(source: &Path, replica: &Path) -> Plan {
     )
     .unwrap()
 }
+
+/// Makes `link` a directory junction to `target`. Junctions need no admin
+/// rights or Developer Mode (unlike directory symlinks), so they are what a
+/// Windows user or tool is likely to leave in a replica.
+#[cfg(windows)]
+pub fn junction(link: &Path, target: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .status()
+        .expect("run mklink");
+    assert!(
+        status.success(),
+        "mklink /J {} {} failed",
+        link.display(),
+        target.display()
+    );
+}

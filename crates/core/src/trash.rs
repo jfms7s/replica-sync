@@ -716,4 +716,68 @@ mod tests {
         );
         assert!(!outside.path().join("2026-10-07_130000").exists());
     }
+    #[cfg(windows)]
+    #[test]
+    fn a_junctioned_sync_trash_folder_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write_file(
+            outside.path(),
+            &format!("{STAMP}/{FILES_DIR}/kept.txt"),
+            b"k",
+            T0,
+        );
+        crate::testutil::junction(&d.path().join(TRASH_DIR), outside.path());
+        write_file(d.path(), "x.txt", b"abc", T0);
+        let is_link_err = |e: &io::Error| {
+            e.kind() == io::ErrorKind::InvalidInput
+                && e.to_string() == "the .sync-trash folder is a link"
+        };
+        let is_link_error = |e: io::Error| is_link_err(&e);
+        let mut w = TrashWriter::new(d.path(), "2026-10-07_130000".into());
+        assert!(is_link_error(
+            w.move_in(&rel("x.txt"), 3, ns(T0), TrashReason::Deleted)
+                .unwrap_err()
+        ));
+        assert_eq!(fs::read(d.path().join("x.txt")).unwrap(), b"abc");
+        assert!(is_link_error(empty_run(d.path(), STAMP).unwrap_err()));
+        assert!(is_link_error(list_runs(d.path()).unwrap_err()));
+        assert!(is_link_error(run_contents(d.path(), STAMP).unwrap_err()));
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("kept.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_link_err(&e)
+        ));
+        let now = chrono::NaiveDateTime::parse_from_str("2027-01-01_000000", STAMP_FORMAT).unwrap();
+        assert!(is_link_error(
+            runs_older_than(d.path(), 30, now).unwrap_err()
+        ));
+        assert_eq!(
+            fs::read(outside.path().join(STAMP).join(FILES_DIR).join("kept.txt")).unwrap(),
+            b"k"
+        );
+        assert!(!outside.path().join("2026-10-07_130000").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_trash_folder_is_hidden() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        };
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        let name: Vec<u16> = d
+            .path()
+            .join(TRASH_DIR)
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: `name` is NUL-terminated and outlives the call.
+        let attrs = unsafe { GetFileAttributesW(name.as_ptr()) };
+        assert_ne!(attrs, INVALID_FILE_ATTRIBUTES);
+        assert_ne!(attrs & FILE_ATTRIBUTE_HIDDEN, 0, "attributes {attrs:#x}");
+    }
 }
