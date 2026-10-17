@@ -99,6 +99,32 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn junctioned_parent_pointing_outside_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        crate::testutil::junction(&d.path().join("Docs"), outside.path());
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        assert!(matches!(
+            r.target(&rel("Docs/x.txt")),
+            Err(SafetyError::Escapes(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_that_stays_inside_is_allowed() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("real")).unwrap();
+        crate::testutil::junction(&d.path().join("alias"), &d.path().join("real"));
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        assert_eq!(
+            r.target(&rel("alias/x.txt")).unwrap(),
+            d.path().join("alias").join("x.txt")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_that_stays_inside_is_allowed() {

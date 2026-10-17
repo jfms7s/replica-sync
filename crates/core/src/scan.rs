@@ -283,6 +283,22 @@ mod tests {
         assert_eq!(alias[0].kind, Kind::Link);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn junctions_are_links_and_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "real/a.txt", b"1", T0);
+        crate::testutil::junction(&d.path().join("alias"), &d.path().join("real"));
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        let alias: Vec<_> = s
+            .entries
+            .iter()
+            .filter(|e| e.rel.as_str().starts_with("alias"))
+            .collect();
+        assert_eq!(alias.len(), 1);
+        assert_eq!(alias[0].kind, Kind::Link);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_folder_is_a_problem_and_scan_continues() {

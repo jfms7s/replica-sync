@@ -666,6 +666,36 @@ mod tests {
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn write_through_junctioned_folder_is_refused() {
+        let f = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        crate::testutil::junction(&f.rep.join("Docs"), outside.path());
+        write_file(&f.src, "Docs/x.txt", b"1", T0);
+        let plan = crate::plan::build_plan(
+            vec![Change::Create {
+                path: crate::testutil::rel("Docs/x.txt"),
+                size: 1,
+                mtime_ns: ns(T0),
+            }],
+            crate::diff::CaseMode::Insensitive,
+        )
+        .unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert!(matches!(
+            &report.results[0].outcome,
+            Outcome::Failed(FailReason::OutsideReplica)
+        ));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn stale_temp_symlink_is_not_followed() {
