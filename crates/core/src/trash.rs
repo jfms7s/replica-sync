@@ -93,7 +93,6 @@ impl TrashWriter {
                 format!("{rel} is already in trash run {run_dir:?}"),
             ));
         }
-        fs::rename(rel.to_path(&self.replica_root), &dest)?;
         let line = serde_json::to_string(&ManifestLine::Item(TrashItem {
             path: rel.clone(),
             size,
@@ -101,8 +100,21 @@ impl TrashWriter {
             reason,
         }))
         .map_err(io::Error::other)?;
-        writeln!(manifest, "{line}")?;
-        manifest.sync_data()
+        let recorded = manifest.metadata()?.len();
+        let from = rel.to_path(&self.replica_root);
+        fs::rename(&from, &dest)?;
+        if let Err(e) = append_line(manifest, &line) {
+            // Undo, so a full or failing disk never leaves a trashed file the
+            // manifest does not list (or a torn line that hides later ones).
+            if manifest.set_len(recorded).is_err() {
+                // (Windows append handles cannot truncate.) End the torn line so
+                // the next one still parses; replay skips the torn one.
+                let _ = manifest.write_all(b"\n");
+            }
+            let _ = fs::rename(&dest, &from);
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn open_run(&self) -> io::Result<(String, PathBuf, File)> {
@@ -128,6 +140,24 @@ impl TrashWriter {
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Appending a manifest line fails with this errno (tests).
+    pub(crate) static MANIFEST_ERRNO: std::cell::Cell<Option<i32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn append_line(manifest: &mut File, line: &str) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(errno) = MANIFEST_ERRNO.get() {
+        // Like a disk that fills up mid-line: part of it lands, then the error.
+        let _ = manifest.write_all(&line.as_bytes()[..line.len() / 2]);
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    writeln!(manifest, "{line}")?;
+    manifest.sync_data()
 }
 
 #[cfg(windows)]
@@ -516,6 +546,38 @@ mod tests {
         let manifest = fs::read_to_string(run.join(MANIFEST)).unwrap();
         assert_eq!(manifest.lines().count(), 1);
         assert!(manifest.contains("\"reason\":\"deleted\""));
+    }
+
+    #[test]
+    fn a_failed_manifest_write_puts_the_file_back_and_keeps_the_manifest_whole() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a/first.txt", b"one", T0);
+        write_file(d.path(), "a/x.txt", b"abc", T0);
+        let mut w = trash_one(d.path(), "a/first.txt", TrashReason::Deleted);
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        let manifest_before = fs::read(run.join(MANIFEST)).unwrap();
+        MANIFEST_ERRNO.set(Some(28)); // ENOSPC
+        let err = w.move_in(&rel("a/x.txt"), 3, ns(T0), TrashReason::Replaced);
+        MANIFEST_ERRNO.set(None);
+        assert_eq!(err.unwrap_err().raw_os_error(), Some(28));
+        assert_eq!(fs::read(d.path().join("a/x.txt")).unwrap(), b"abc");
+        assert!(!run.join(FILES_DIR).join("a").join("x.txt").exists());
+        #[cfg(unix)]
+        assert_eq!(fs::read(run.join(MANIFEST)).unwrap(), manifest_before);
+        let _ = manifest_before;
+        let listed = |w: &TrashWriter| -> Vec<RelPath> {
+            run_contents(d.path(), w.run_id().unwrap())
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|i| i.path)
+                .collect()
+        };
+        assert_eq!(listed(&w), vec![rel("a/first.txt")]);
+        // The run is still usable and lists exactly what it holds.
+        w.move_in(&rel("a/x.txt"), 3, ns(T0), TrashReason::Replaced)
+            .unwrap();
+        assert_eq!(listed(&w), vec![rel("a/first.txt"), rel("a/x.txt")]);
     }
 
     #[test]
