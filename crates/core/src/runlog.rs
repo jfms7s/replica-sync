@@ -1,6 +1,6 @@
 //! Plain-text plan and run logs, kept for 90 days.
 
-use crate::execute::{Outcome, RunReport, StopReason};
+use crate::execute::{Durability, Outcome, RunReport, StopReason};
 use crate::model::{Change, MoveKind, SideKind};
 use crate::plan::{ChangeId, Plan, selected_totals};
 use crate::reason::{FailReason, SkipReason};
@@ -171,7 +171,24 @@ pub fn render_run(
     if let Some(run) = &report.trash_run {
         let _ = writeln!(out, "trash run: {run}");
     }
+    let _ = writeln!(out, "{}", durability_text(&report.durability));
     out
+}
+
+/// How the run made copies durable, e.g. `durability: one flush per batch (btrfs)`.
+pub fn durability_text(d: &Durability) -> String {
+    let mut line = if d.batched {
+        format!("durability: one flush per batch ({})", d.why)
+    } else {
+        format!("durability: one flush per file ({})", d.why)
+    };
+    if d.synced_separately > 0 {
+        line += &format!(
+            "; {} copies on another filesystem flushed one by one",
+            d.synced_separately
+        );
+    }
+    line
 }
 
 fn sanitise(name: &str) -> String {
@@ -273,6 +290,33 @@ mod tests {
         assert!(text.contains("[x] create   a.txt (3 B)"));
         assert!(text.contains("[ ] delete   old.txt"));
         assert!(text.contains(" -  skipped  lnk: link (not followed)"));
+    }
+
+    #[test]
+    fn durability_line_names_the_mode_and_why() {
+        let mut d = Durability {
+            batched: true,
+            why: "btrfs".into(),
+            synced_separately: 0,
+        };
+        assert_eq!(
+            durability_text(&d),
+            "durability: one flush per batch (btrfs)"
+        );
+        d.synced_separately = 3;
+        assert_eq!(
+            durability_text(&d),
+            "durability: one flush per batch (btrfs); 3 copies on another filesystem flushed one by one"
+        );
+        let d = Durability {
+            batched: false,
+            why: "exfat: syncfs may not reach the disk".into(),
+            synced_separately: 0,
+        };
+        assert_eq!(
+            durability_text(&d),
+            "durability: one flush per file (exfat: syncfs may not reach the disk)"
+        );
     }
 
     #[test]

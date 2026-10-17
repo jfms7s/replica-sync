@@ -105,6 +105,19 @@ pub struct RunReport {
     pub results: Vec<ChangeResult>,
     pub stopped: Option<StopReason>,
     pub trash_run: Option<String>,
+    pub durability: Durability,
+}
+
+/// How a run made its copies durable before renaming them; the run log shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Durability {
+    /// True when copies were flushed in batches (one `syncfs` per batch).
+    pub batched: bool,
+    /// The replica's filesystem when batched, otherwise why not.
+    pub why: String,
+    /// Batched-run copies on another filesystem than the replica root (a mount
+    /// inside it), each synced on its own.
+    pub synced_separately: usize,
 }
 
 impl RunReport {
@@ -250,7 +263,8 @@ pub fn execute(
             } => Some((path, *size, *mtime_ns)),
             _ => None,
         };
-        if (copy.is_none() || run.batch.is_full()) && !run.flush() {
+        let full = run.batch.is_full(run.disk.batch_files());
+        if (copy.is_none() || full) && !run.flush(Commit::All) {
             break;
         }
         if let Some(stop) = run.check_roots() {
@@ -260,7 +274,10 @@ pub fn execute(
         run.progress.current = Some(p.change.path().clone());
         (run.on_progress)(run.progress);
         let result = match copy {
-            Some((rel, size, mtime_ns)) => run.write_copy(p.id, rel, size, mtime_ns),
+            Some((rel, size, mtime_ns)) => {
+                let replaces = matches!(p.change, Change::Update { .. });
+                run.write_copy(p.id, rel, size, mtime_ns, replaces)
+            }
             None => apply_one(&p.change, ctx, &mut run.trash),
         };
         let outcome = match result {
@@ -272,8 +289,9 @@ pub fn execute(
                 break;
             }
             Err(Stop::Fatal(r)) => {
-                // A full disk still holds the batch's whole temps: keep them.
-                if r != StopReason::ReplicaFull || run.flush() {
+                // A full disk still holds the batch's whole temps: keep the new
+                // files, which need no room in the trash.
+                if r != StopReason::ReplicaFull || run.flush(Commit::CreatesOnly) {
                     run.stop(r);
                 }
                 run.interrupted(p.id, p.change.path());
@@ -286,20 +304,14 @@ pub fn execute(
         run.record(p.id, p.change.path(), outcome);
     }
     if run.report.stopped.is_none() {
-        run.flush();
+        run.flush(Commit::All);
     }
     let mut report = run.report;
     report.trash_run = run.trash.run_id().map(str::to_owned);
+    report.durability = run.disk.durability();
     report
 }
 
-/// How many copies may wait in one [`Batch`] (written, not yet flushed and
-/// renamed). Only Linux has a one-call flush for many files (`syncfs`); elsewhere
-/// each temp is synced on its own and a batch holds one copy, as before.
-#[cfg(target_os = "linux")]
-const BATCH_FILES: usize = 256;
-#[cfg(not(target_os = "linux"))]
-const BATCH_FILES: usize = 1;
 /// Bytes of temps a batch may hold before it is flushed.
 const BATCH_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -312,6 +324,19 @@ struct Written {
     src_path: PathBuf,
     len: u64,
     mtime_ns: i64,
+    /// An `Update`: renaming it in trashes the old version first.
+    replaces: bool,
+    /// Already synced on its own, so the batch flush need not cover it.
+    synced: bool,
+}
+
+/// Which waiting copies a flush renames into place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Commit {
+    All,
+    /// The disk is full: only new files, since trashing an old version writes
+    /// to the trash manifest. The others are reported interrupted.
+    CreatesOnly,
 }
 
 enum Pending {
@@ -329,8 +354,9 @@ struct Batch {
 }
 
 impl Batch {
-    fn is_full(&self) -> bool {
-        self.items.len() >= BATCH_FILES || self.bytes >= BATCH_BYTES
+    /// `files`: how many copies this run's disk lets wait for one flush.
+    fn is_full(&self, files: usize) -> bool {
+        self.items.len() >= files || self.bytes >= BATCH_BYTES
     }
 }
 
@@ -418,6 +444,7 @@ impl Run<'_, '_> {
         rel: &RelPath,
         size: u64,
         mtime_ns: i64,
+        replaces: bool,
     ) -> Result<(), Stop> {
         let ctx = self.ctx;
         let root = ctx.replica.path();
@@ -436,17 +463,21 @@ impl Run<'_, '_> {
         fs::create_dir_all(dest.parent().expect("never the root"))
             .map_err(|e| io_stop(&e, root))?;
         let tmp = temp_path(&dest);
-        if let Err(stop) = write_temp(
+        let synced = match write_temp(
             ctx,
+            &mut self.disk,
             &src_path,
             &tmp,
             &before,
             self.progress,
             self.on_progress,
         ) {
-            self.disk.remove_temp(root, &tmp);
-            return Err(stop);
-        }
+            Ok(synced) => synced,
+            Err(stop) => {
+                self.disk.remove_temp(root, &tmp);
+                return Err(stop);
+            }
+        };
         self.batch.bytes += before.len();
         self.batch.items.push(Pending::Written(Written {
             id,
@@ -456,21 +487,23 @@ impl Run<'_, '_> {
             src_path,
             len: before.len(),
             mtime_ns,
+            replaces,
+            synced,
         }));
         Ok(())
     }
 
     /// Makes the batch durable with one flush, then renames its temps into place
     /// in plan order, re-checking each source first. False once the run stopped.
-    fn flush(&mut self) -> bool {
+    fn flush(&mut self, which: Commit) -> bool {
         let root = self.ctx.replica.path();
-        let has_written = self
+        let unsynced = self
             .batch
             .items
             .iter()
-            .any(|i| matches!(i, Pending::Written(_)));
+            .any(|i| matches!(i, Pending::Written(w) if !w.synced));
         let mut sync_failed = None;
-        if has_written && let Err(e) = self.disk.flush(root) {
+        if unsynced && let Err(e) = self.disk.flush() {
             match io_stop(&e, root) {
                 Stop::Fatal(r) => {
                     self.stop(r);
@@ -490,6 +523,12 @@ impl Run<'_, '_> {
                 }
                 Pending::Written(w) => w,
             };
+            if which == Commit::CreatesOnly && (w.replaces || fs::symlink_metadata(&w.dest).is_ok())
+            {
+                self.disk.remove_temp(root, &w.tmp);
+                self.interrupted(w.id, &w.rel);
+                continue;
+            }
             let result = match &sync_failed {
                 Some(r) => Err(Stop::Fail(r.clone())),
                 None => match self.check_roots() {
@@ -556,14 +595,17 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
     }
 }
 
+/// Copies the source into `tmp` and sets its mtime. True when the temp was also
+/// synced on its own (otherwise the batch flush makes it durable).
 fn write_temp(
     ctx: &ExecContext,
+    disk: &mut durable::Replica,
     src_path: &Path,
     tmp: &Path,
     before: &fs::Metadata,
     progress: &mut Progress,
     on_progress: &mut dyn FnMut(&Progress),
-) -> Result<(), Stop> {
+) -> Result<bool, Stop> {
     let root = ctx.replica.path();
     let on_io = |e: io::Error| io_stop(&e, root);
     let mut src = File::open(src_path).map_err(on_io)?;
@@ -577,6 +619,7 @@ fn write_temp(
         .create_new(true)
         .open(tmp)
         .map_err(on_io)?;
+    durable::write_fault(tmp).map_err(on_io)?;
     let mut buf = vec![0u8; CHUNK];
     loop {
         let n = src.read(&mut buf).map_err(on_io)?;
@@ -590,54 +633,186 @@ fn write_temp(
             return Err(Stop::Cancelled);
         }
     }
-    if durable::SYNC_EACH_FILE {
-        out.sync_all().map_err(on_io)?;
-    }
     let mtime = FileTime::from_system_time(before.modified().map_err(on_io)?);
     filetime::set_file_handle_times(&out, None, Some(mtime)).map_err(on_io)?;
-    Ok(())
+    disk.sync_temp(&out).map_err(on_io)
 }
 
 /// Durability for the replica disk.
+///
+/// A batch is flushed with one `syncfs`, but only where that is a real flush:
+/// on ext4, btrfs, xfs and f2fs `syncfs` commits the filesystem and flushes the
+/// disk's write cache, and from Linux 5.8 it reports write errors. Elsewhere
+/// (FUSE such as ntfs-3g or exfat-fuse, kernel vfat/exfat, tmpfs, anything
+/// unknown) `syncfs` may not reach the disk, so each temp gets its own
+/// `sync_all` and a batch holds one copy, as before batching existed.
 #[cfg(target_os = "linux")]
 mod durable {
-    use std::ffi::CString;
+    use super::Durability;
+    use std::ffi::{CStr, CString};
     use std::fs::{self, File};
     use std::io;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
-    /// One `syncfs` per batch makes every temp in it durable.
-    pub const SYNC_EACH_FILE: bool = false;
+    /// `statfs` magics (Linux `include/uapi/linux/magic.h`) whose `syncfs`
+    /// commits and flushes the disk.
+    pub(super) const BATCH_FILESYSTEMS: &[(u32, &str)] = &[
+        (0xEF53, "ext4"),
+        (0x9123_683E, "btrfs"),
+        (0x5846_5342, "xfs"),
+        (0xF2F5_2010, "f2fs"),
+    ];
 
-    #[cfg(test)]
-    thread_local! {
-        /// How many batch flushes this thread has run (tests check flush-before-rename).
-        pub static FLUSHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Magics named in the log when they rule batching out.
+    const OTHER_FILESYSTEMS: &[(u32, &str)] = &[
+        (0x6573_5546, "fuse"),
+        (0x4d44, "vfat"),
+        (0x2011_BAB0, "exfat"),
+        (0x7366_746E, "ntfs3"),
+        (0x5346_544E, "ntfs"),
+        (0x0102_1994, "tmpfs"),
+    ];
+
+    /// The first kernel whose `syncfs` reports write errors (errseq).
+    const MIN_KERNEL: (u32, u32) = (5, 8);
+
+    pub(super) const BATCH_FILES: usize = 256;
+
+    /// Whether a run may flush in batches: `Ok(filesystem)` when it may,
+    /// `Err(why not)` when each copy must be synced on its own.
+    pub(super) fn decide(
+        f_type: Option<u32>,
+        kernel: Option<(u32, u32)>,
+    ) -> Result<&'static str, String> {
+        let f_type = f_type.ok_or("the replica folder could not be opened")?;
+        let name = |t: u32| {
+            BATCH_FILESYSTEMS
+                .iter()
+                .chain(OTHER_FILESYSTEMS)
+                .find(|(m, _)| *m == t)
+                .map(|(_, n)| (*n).to_owned())
+                .unwrap_or_else(|| format!("filesystem type {t:#x}"))
+        };
+        let Some(&(_, fs)) = BATCH_FILESYSTEMS.iter().find(|(m, _)| *m == f_type) else {
+            return Err(format!("{}: syncfs may not reach the disk", name(f_type)));
+        };
+        match kernel {
+            Some(k) if k >= MIN_KERNEL => Ok(fs),
+            Some((major, minor)) => Err(format!(
+                "{fs} on Linux {major}.{minor}: syncfs reports write errors only from 5.8"
+            )),
+            None => Err(format!("{fs}: unknown kernel version")),
+        }
+    }
+
+    /// `major.minor` from a `uname` release such as `6.8.0-45-generic`.
+    pub(super) fn parse_kernel(release: &str) -> Option<(u32, u32)> {
+        let mut parts = release.split(|c: char| !c.is_ascii_digit());
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    }
+
+    fn kernel() -> Option<(u32, u32)> {
+        // SAFETY: `utsname` is plain data; `uname` fills it in.
+        let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+        // SAFETY: `u` is a valid, writable `utsname`.
+        if unsafe { libc::uname(&mut u) } != 0 {
+            return None;
+        }
+        // SAFETY: `uname` NUL-terminates `release`.
+        let release = unsafe { CStr::from_ptr(u.release.as_ptr()) };
+        parse_kernel(release.to_str().ok()?)
+    }
+
+    fn f_type(file: &File) -> Option<u32> {
+        // SAFETY: `statfs` is plain data; `fstatfs` fills it in.
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `file` is an open descriptor and `st` is writable.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) } != 0 {
+            return None;
+        }
+        // Magics are 32-bit; `f_type`'s width and sign vary by architecture.
+        Some(st.f_type as u32)
     }
 
     /// An open handle on the replica root: `syncfs` needs a descriptor on the
     /// disk, and temps can still be removed through it after the root folder is
     /// moved or renamed.
-    pub struct Replica(Option<File>);
+    pub struct Replica {
+        root: Option<File>,
+        dev: u64,
+        mode: Result<&'static str, String>,
+        synced_separately: usize,
+    }
 
     impl Replica {
         pub fn open(root: &Path) -> Replica {
-            Replica(File::open(root).ok())
+            let file = File::open(root).ok();
+            let dev = file.as_ref().and_then(|f| f.metadata().ok());
+            let file = file.filter(|_| dev.is_some());
+            #[allow(unused_mut)]
+            let mut mode = decide(file.as_ref().and_then(f_type), kernel());
+            #[cfg(test)]
+            if hooks::FORCE_BATCH.get() && file.is_some() {
+                mode = Ok("test");
+            }
+            Replica {
+                root: file,
+                dev: dev.map_or(0, |m| m.dev()),
+                mode,
+                synced_separately: 0,
+            }
         }
 
-        pub fn flush(&self, root: &Path) -> io::Result<()> {
-            let opened;
-            let file = match &self.0 {
-                Some(f) => f,
-                None => {
-                    opened = File::open(root)?;
-                    &opened
+        pub fn durability(&self) -> Durability {
+            Durability {
+                batched: self.mode.is_ok(),
+                why: match &self.mode {
+                    Ok(fs) => (*fs).to_owned(),
+                    Err(why) => why.clone(),
+                },
+                synced_separately: self.synced_separately,
+            }
+        }
+
+        pub fn batch_files(&self) -> usize {
+            if self.mode.is_ok() { BATCH_FILES } else { 1 }
+        }
+
+        /// Syncs a finished temp now unless the batch's `syncfs` will cover it.
+        /// True when it was synced.
+        pub fn sync_temp(&mut self, out: &File) -> io::Result<bool> {
+            if self.mode.is_ok() {
+                #[allow(unused_mut)]
+                let mut other = out.metadata()?.dev() != self.dev;
+                #[cfg(test)]
+                {
+                    other |= hooks::OTHER_DEVICE.get();
                 }
-            };
+                if !other {
+                    return Ok(false);
+                }
+                // A mount inside the replica: the root's `syncfs` misses it.
+                self.synced_separately += 1;
+            }
             #[cfg(test)]
-            FLUSHES.with(|n| n.set(n.get() + 1));
+            hooks::FILE_SYNCS.set(hooks::FILE_SYNCS.get() + 1);
+            out.sync_all()?;
+            Ok(true)
+        }
+
+        /// One `syncfs` on the replica root's filesystem.
+        pub fn flush(&self) -> io::Result<()> {
+            let file = self.root.as_ref().expect("batching needs the root open");
+            #[cfg(test)]
+            {
+                hooks::FLUSHES.set(hooks::FLUSHES.get() + 1);
+                if let Some(errno) = hooks::SYNCFS_ERRNO.get() {
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+            }
             // SAFETY: `file` is an open descriptor for the duration of the call.
             if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 {
                 Ok(())
@@ -649,7 +824,7 @@ mod durable {
         /// Best effort: a temp that cannot be removed is a leftover the next scan
         /// deletes.
         pub fn remove_temp(&self, root: &Path, tmp: &Path) {
-            let (Some(dir), Ok(rel)) = (&self.0, tmp.strip_prefix(root)) else {
+            let (Some(dir), Ok(rel)) = (&self.root, tmp.strip_prefix(root)) else {
                 let _ = fs::remove_file(tmp);
                 return;
             };
@@ -660,16 +835,48 @@ mod durable {
             unsafe { libc::unlinkat(dir.as_raw_fd(), rel.as_ptr(), 0) };
         }
     }
+
+    /// Test-only write failure (see `hooks::WRITE_ERRNO`).
+    pub fn write_fault(_tmp: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some((prefix, errno)) = hooks::WRITE_ERRNO.get()
+            && _tmp
+                .file_name()
+                .is_some_and(|n| n.as_bytes().starts_with(prefix.as_bytes()))
+        {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub mod hooks {
+        use std::cell::Cell;
+        thread_local! {
+            /// Batch flushes run by this thread.
+            pub static FLUSHES: Cell<u64> = const { Cell::new(0) };
+            /// Temps this thread synced one by one.
+            pub static FILE_SYNCS: Cell<u64> = const { Cell::new(0) };
+            /// Batch whatever the filesystem (test temp folders are on tmpfs).
+            pub static FORCE_BATCH: Cell<bool> = const { Cell::new(false) };
+            /// Treat every temp as on another filesystem than the replica root.
+            pub static OTHER_DEVICE: Cell<bool> = const { Cell::new(false) };
+            /// `syncfs` fails with this errno.
+            pub static SYNCFS_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+            /// Writing a temp whose name starts with this fails with the errno.
+            pub static WRITE_ERRNO: Cell<Option<(&'static str, i32)>> = const { Cell::new(None) };
+        }
+    }
 }
 
-/// Durability for the replica disk: each temp is synced as it is written.
+/// Durability for the replica disk: each temp is synced as it is written and a
+/// batch holds one copy (`FlushFileBuffers` batching on Windows is a follow-up).
 #[cfg(not(target_os = "linux"))]
 mod durable {
-    use std::fs;
+    use super::Durability;
+    use std::fs::{self, File};
     use std::io;
     use std::path::Path;
-
-    pub const SYNC_EACH_FILE: bool = true;
 
     pub struct Replica;
 
@@ -678,13 +885,34 @@ mod durable {
             Replica
         }
 
-        pub fn flush(&self, _root: &Path) -> io::Result<()> {
+        pub fn durability(&self) -> Durability {
+            Durability {
+                batched: false,
+                why: "this platform syncs each file".into(),
+                synced_separately: 0,
+            }
+        }
+
+        pub fn batch_files(&self) -> usize {
+            1
+        }
+
+        pub fn sync_temp(&mut self, out: &File) -> io::Result<bool> {
+            out.sync_all()?;
+            Ok(true)
+        }
+
+        pub fn flush(&self) -> io::Result<()> {
             Ok(())
         }
 
         pub fn remove_temp(&self, _root: &Path, tmp: &Path) {
             let _ = fs::remove_file(tmp);
         }
+    }
+
+    pub fn write_fault(_tmp: &Path) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1412,8 +1640,28 @@ mod batch_tests {
     use super::tests::{fixture, no_temp_files, run_all, run_with};
     use super::*;
     use crate::testutil::{T0, plan_for, read_tree, write_file};
+    use durable::hooks;
     use std::collections::HashMap;
     use std::fs;
+
+    /// Batching on for this test whatever the temp folder's filesystem; every
+    /// hook is reset when it drops.
+    struct Hooks;
+
+    impl Drop for Hooks {
+        fn drop(&mut self) {
+            hooks::FORCE_BATCH.set(false);
+            hooks::OTHER_DEVICE.set(false);
+            hooks::SYNCFS_ERRNO.set(None);
+            hooks::WRITE_ERRNO.set(None);
+            crate::trash::MANIFEST_ERRNO.set(None);
+        }
+    }
+
+    fn batched() -> (Hooks, super::tests::Fixture) {
+        hooks::FORCE_BATCH.set(true);
+        (Hooks, fixture())
+    }
 
     fn name(i: usize) -> String {
         format!("d/f{i:02}.txt")
@@ -1427,7 +1675,7 @@ mod batch_tests {
     }
 
     fn flushes() -> u64 {
-        durable::FLUSHES.with(|n| n.get())
+        hooks::FLUSHES.get()
     }
 
     /// Every real-named (non-temp) replica file holds its complete source content.
@@ -1440,7 +1688,7 @@ mod batch_tests {
 
     #[test]
     fn a_batch_of_ten_files_renames_all_after_one_flush() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let before = flushes();
         let report = run_all(&f);
@@ -1452,7 +1700,7 @@ mod batch_tests {
 
     #[test]
     fn nothing_is_renamed_before_its_batch_is_flushed() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let plan = plan_for(&f.src, &f.rep);
         let mut written_at: HashMap<String, u64> = HashMap::new();
@@ -1490,7 +1738,7 @@ mod batch_tests {
 
     #[test]
     fn a_crash_mid_batch_leaves_only_temps_and_the_next_run_recovers() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let plan = plan_for(&f.src, &f.rep);
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1518,7 +1766,7 @@ mod batch_tests {
 
     #[test]
     fn cancel_mid_batch_stops_at_once_and_drops_the_written_temps() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let plan = plan_for(&f.src, &f.rep);
         let control = Control::default();
@@ -1554,7 +1802,7 @@ mod batch_tests {
 
     #[test]
     fn a_source_changing_inside_a_batch_fails_only_that_file() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let plan = plan_for(&f.src, &f.rep);
         fs::remove_file(f.src.join(name(7))).unwrap();
@@ -1597,7 +1845,7 @@ mod batch_tests {
 
     #[test]
     fn replica_moved_away_mid_batch_stops_and_removes_its_temps() {
-        let f = fixture();
+        let (_on, f) = batched();
         sources(&f, 10);
         let plan = plan_for(&f.src, &f.rep);
         let unplugged = f.rep.with_file_name("rep-unplugged");
@@ -1632,8 +1880,8 @@ mod batch_tests {
 
     #[test]
     fn many_files_flush_in_batches_of_at_most_256() {
-        let f = fixture();
-        let n = BATCH_FILES + 44;
+        let (_on, f) = batched();
+        let n = durable::BATCH_FILES + 44;
         for i in 0..n {
             write_file(&f.src, &format!("m/{i:04}"), b"x", T0);
         }
@@ -1642,5 +1890,202 @@ mod batch_tests {
         assert_eq!(report.applied(), n);
         assert_eq!(flushes() - before, 2);
         assert!(no_temp_files(&f.rep));
+    }
+
+    fn outcomes(report: &RunReport) -> Vec<(String, Outcome)> {
+        report
+            .results
+            .iter()
+            .map(|r| (r.path.as_str().to_owned(), r.outcome.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn batching_only_on_filesystems_whose_syncfs_flushes_the_disk() {
+        use durable::{decide, parse_kernel};
+        let new = Some((6, 8));
+        for (magic, fs) in [
+            (0xEF53, "ext4"),
+            (0x9123_683E, "btrfs"),
+            (0x5846_5342, "xfs"),
+            (0xF2F5_2010, "f2fs"),
+        ] {
+            assert_eq!(decide(Some(magic), new), Ok(fs));
+        }
+        assert_eq!(libc::XFS_SUPER_MAGIC as u32, 0x5846_5342);
+        for (magic, fs) in [
+            (0x6573_5546, "fuse"),
+            (0x4d44, "vfat"),
+            (0x2011_BAB0, "exfat"),
+            (0x7366_746E, "ntfs3"),
+            (0x0102_1994, "tmpfs"),
+            (0x1234_5678, "filesystem type 0x12345678"),
+        ] {
+            let why = decide(Some(magic), new).unwrap_err();
+            assert!(why.starts_with(fs), "{why}");
+        }
+        assert!(decide(None, new).is_err(), "root not opened");
+        assert!(decide(Some(0xEF53), Some((5, 7))).is_err());
+        assert_eq!(decide(Some(0xEF53), Some((5, 8))), Ok("ext4"));
+        assert!(decide(Some(0xEF53), None).is_err());
+        assert_eq!(parse_kernel("7.2.9-201.fc44.x86_64"), Some((7, 2)));
+        assert_eq!(parse_kernel("5.8"), Some((5, 8)));
+        assert_eq!(parse_kernel("6.10.0-rc1"), Some((6, 10)));
+        assert_eq!(parse_kernel("bogus"), None);
+    }
+
+    #[test]
+    fn an_unopenable_root_or_tmpfs_syncs_each_file() {
+        let d = tempfile::tempdir().unwrap();
+        let gone = durable::Replica::open(&d.path().join("missing"));
+        assert!(!gone.durability().batched);
+        assert_eq!(gone.batch_files(), 1);
+        let shm = Path::new("/dev/shm");
+        if shm.is_dir() {
+            let d = tempfile::tempdir_in(shm).unwrap();
+            let r = durable::Replica::open(d.path());
+            assert!(!r.durability().batched, "{:?}", r.durability());
+            assert!(r.durability().why.starts_with("tmpfs"));
+        }
+    }
+
+    #[test]
+    fn a_run_reports_its_durability_mode() {
+        let (_on, f) = batched();
+        sources(&f, 2);
+        let d = run_all(&f).durability;
+        assert!(d.batched && d.why == "test" && d.synced_separately == 0);
+        hooks::FORCE_BATCH.set(false);
+        let g = fixture();
+        write_file(&g.src, "a", b"1", T0);
+        let expected = durable::Replica::open(&g.rep).durability();
+        assert_eq!(run_all(&g).durability, expected);
+    }
+
+    #[test]
+    fn temps_on_another_filesystem_are_synced_one_by_one() {
+        let (_on, f) = batched();
+        sources(&f, 10);
+        hooks::OTHER_DEVICE.set(true);
+        let (flushed, syncs) = (flushes(), hooks::FILE_SYNCS.get());
+        let report = run_all(&f);
+        assert_eq!(report.applied(), 10);
+        assert_eq!(hooks::FILE_SYNCS.get() - syncs, 10);
+        assert_eq!(flushes(), flushed, "the root's syncfs would not cover them");
+        assert_eq!(report.durability.synced_separately, 10);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
+    fn a_failed_syncfs_fails_every_copy_in_the_batch() {
+        let (_on, f) = batched();
+        sources(&f, 5);
+        hooks::SYNCFS_ERRNO.set(Some(libc::EIO));
+        let report = run_all(&f);
+        assert_eq!(report.stopped, None, "the next batch may still work");
+        assert_eq!(report.results.len(), 5);
+        for r in &report.results {
+            assert!(
+                matches!(&r.outcome, Outcome::Failed(FailReason::Io { .. })),
+                "{r:?}"
+            );
+        }
+        assert!(read_tree(&f.rep).is_empty(), "no real name, no temp");
+    }
+
+    #[test]
+    fn a_full_disk_keeps_new_files_and_leaves_old_versions_in_place() {
+        let (_on, f) = batched();
+        write_file(&f.src, "a.txt", b"new a", T0);
+        write_file(&f.src, "b.txt", b"new b", T0 + 60);
+        write_file(&f.rep, "b.txt", b"old b", T0);
+        write_file(&f.src, "c.txt", b"new c", T0);
+        write_file(&f.src, "d.txt", b"new d", T0);
+        hooks::WRITE_ERRNO.set(Some(("d.txt", libc::ENOSPC)));
+        let report = run_all(&f);
+        assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
+        let interrupted = Outcome::Failed(FailReason::Interrupted);
+        assert_eq!(
+            outcomes(&report),
+            vec![
+                ("a.txt".to_owned(), Outcome::Applied),
+                ("b.txt".to_owned(), interrupted.clone()),
+                ("c.txt".to_owned(), Outcome::Applied),
+                ("d.txt".to_owned(), interrupted),
+            ]
+        );
+        assert_eq!(fs::read(f.rep.join("b.txt")).unwrap(), b"old b");
+        assert!(report.trash_run.is_none(), "nothing was trashed");
+        assert_eq!(
+            read_tree(&f.rep).keys().collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt", "c.txt"]
+        );
+    }
+
+    #[test]
+    fn an_update_whose_trash_line_cannot_be_written_keeps_the_old_version() {
+        let (_on, f) = batched();
+        write_file(&f.src, "b.txt", b"new b", T0 + 60);
+        write_file(&f.rep, "b.txt", b"old b", T0);
+        crate::trash::MANIFEST_ERRNO.set(Some(libc::ENOSPC));
+        let report = run_all(&f);
+        assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
+        assert_eq!(
+            outcomes(&report),
+            vec![("b.txt".to_owned(), Outcome::Failed(FailReason::Interrupted))]
+        );
+        assert_eq!(fs::read(f.rep.join("b.txt")).unwrap(), b"old b");
+        assert!(no_temp_files(&f.rep));
+        let run = report.trash_run.unwrap();
+        assert!(
+            crate::trash::run_contents(&f.rep, &run)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn copies_are_flushed_and_renamed_before_the_deletes_that_follow() {
+        let (_on, f) = batched();
+        write_file(&f.src, "new/moved.bin", b"same bytes", T0);
+        write_file(&f.rep, "old/moved.bin", b"same bytes", T0);
+        write_file(&f.rep, "gone.txt", b"bye", T0);
+        sources(&f, 3);
+        let plan = plan_for(&f.src, &f.rep);
+        let kinds: Vec<_> = plan
+            .changes
+            .iter()
+            .map(|p| match &p.change {
+                Change::Move { .. } => "move",
+                Change::Create { .. } => "create",
+                Change::Delete { .. } => "delete",
+                Change::RmDir { .. } => "rmdir",
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["move", "create", "create", "create", "delete"]);
+        let before = flushes();
+        let mut copies_in_place_at_delete = false;
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if p.current.as_ref().is_some_and(|c| c.as_str() == "gone.txt") {
+                    copies_in_place_at_delete =
+                        (0..3).all(|i| f.rep.join(name(i)).exists()) && no_temp_files(&f.rep);
+                }
+            },
+        );
+        assert!(copies_in_place_at_delete);
+        assert_eq!(flushes() - before, 1);
+        let ids: Vec<_> = report.results.iter().map(|r| r.id).collect();
+        let planned: Vec<_> = plan.changes.iter().map(|p| p.id).collect();
+        assert_eq!(ids, planned);
+        assert_eq!(report.applied(), 5, "{:?}", report.results);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
     }
 }
