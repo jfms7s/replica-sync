@@ -174,6 +174,38 @@ fn run_dir(replica_root: &Path, run_id: &str) -> io::Result<PathBuf> {
     Ok(trash_base(replica_root)?.join(run_id))
 }
 
+/// A trash run's folder, its `files` folder and its manifest.
+struct RunPaths {
+    run: PathBuf,
+    files: PathBuf,
+    manifest: PathBuf,
+}
+
+/// `run_dir` plus its `files` and manifest, refused when any of the three is a
+/// link (or junction): following one would read, move into the replica,
+/// append to or delete files outside it. A missing `files` or manifest is fine.
+fn run_paths(replica_root: &Path, run_id: &str) -> io::Result<RunPaths> {
+    let run = run_dir(replica_root, run_id)?;
+    let paths = RunPaths {
+        files: run.join(FILES_DIR),
+        manifest: run.join(MANIFEST),
+        run,
+    };
+    for p in [&paths.run, &paths.files, &paths.manifest] {
+        match fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("trash run {run_id} is a link"),
+                ));
+            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(paths)
+}
+
 /// Adds every file under `dir` to `out`. Anything that vanishes mid-walk (a
 /// folder or entry removed by another program) is skipped, never the whole walk.
 fn walk_files(dir: &Path, rel: &RelPath, out: &mut Vec<(RelPath, u64)>) -> io::Result<()> {
@@ -271,8 +303,8 @@ fn read_manifest(run: &Path) -> io::Result<Vec<TrashItem>> {
 }
 
 pub fn run_contents(replica_root: &Path, run_id: &str) -> io::Result<TrashRunContents> {
-    let run = run_dir(replica_root, run_id)?;
-    let present = list_files(&run.join(FILES_DIR))?;
+    let RunPaths { run, files, .. } = run_paths(replica_root, run_id)?;
+    let present = list_files(&files)?;
     let present_paths: HashSet<&RelPath> = present.iter().map(|(p, _)| p).collect();
     let items: Vec<TrashItem> = read_manifest(&run)?
         .into_iter()
@@ -349,7 +381,11 @@ pub fn restore(
         .cloned()
         .collect();
     let paths = paths.as_slice();
-    let run = run_dir(replica_root, run_id)?;
+    let RunPaths {
+        run,
+        files,
+        manifest: manifest_path,
+    } = run_paths(replica_root, run_id)?;
     let contents = run_contents(replica_root, run_id)?;
     let known: HashSet<&RelPath> = contents.items.iter().map(|i| &i.path).collect();
     if let Some(p) = paths.iter().find(|p| !known.contains(p)) {
@@ -380,12 +416,24 @@ pub fn restore(
     let mut manifest = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(run.join(MANIFEST))?;
+        .open(&manifest_path)?;
+    // Defence in depth: every source must still resolve inside this run's own
+    // `files` folder (a link planted below it would otherwise be followed).
+    let files_root = fs::canonicalize(&files)?;
     for (p, target) in paths.iter().zip(&targets) {
+        let source = p.to_path(&files);
+        let parent = fs::canonicalize(source.parent().expect("never the root"))?;
+        if !parent.starts_with(&files_root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("trash run {run_id}: {p} resolves outside the run, which is a link"),
+            )
+            .into());
+        }
         fs::create_dir_all(target.parent().expect("never the root"))?;
         // NOTE: fs::rename replaces a file created after the conflict check above;
         // a no-replace rename is deferred.
-        fs::rename(p.to_path(&run.join(FILES_DIR)), target)?;
+        fs::rename(&source, target)?;
         let line = serde_json::to_string(&ManifestLine::Restored {
             restored: p.clone(),
         })
@@ -400,7 +448,7 @@ pub fn restore(
 
 /// Permanently deletes one trash run. The only permanent delete in replica-sync.
 pub fn empty_run(replica_root: &Path, run_id: &str) -> io::Result<()> {
-    fs::remove_dir_all(run_dir(replica_root, run_id)?)
+    fs::remove_dir_all(run_paths(replica_root, run_id)?.run)
 }
 
 pub fn runs_older_than(
@@ -675,6 +723,142 @@ mod tests {
         assert_eq!(fs::read(run.join("notes.txt")).unwrap(), b"keep me");
         assert!(run.join(MANIFEST).exists());
     }
+    fn is_run_link_err(e: &io::Error) -> bool {
+        e.kind() == io::ErrorKind::InvalidInput && e.to_string().ends_with("is a link")
+    }
+
+    /// A real trash run holding `secret.txt`, in a replica outside the one under test.
+    fn outside_run() -> tempfile::TempDir {
+        let o = tempfile::tempdir().unwrap();
+        write_file(o.path(), "secret.txt", b"abc", T0);
+        trash_one(o.path(), "secret.txt", TrashReason::Deleted);
+        fs::create_dir(
+            o.path()
+                .join(TRASH_DIR)
+                .join(STAMP)
+                .join(FILES_DIR)
+                .join("emptydir"),
+        )
+        .unwrap();
+        o
+    }
+
+    fn outside_secret(o: &Path) -> PathBuf {
+        o.join(TRASH_DIR)
+            .join(STAMP)
+            .join(FILES_DIR)
+            .join("secret.txt")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_trash_run_is_refused() {
+        let o = outside_run();
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join(TRASH_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            o.path().join(TRASH_DIR).join(STAMP),
+            d.path().join(TRASH_DIR).join(STAMP),
+        )
+        .unwrap();
+        assert!(is_run_link_err(&run_contents(d.path(), STAMP).unwrap_err()));
+        assert!(is_run_link_err(&list_runs(d.path()).unwrap_err()));
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("secret.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_run_link_err(&e)
+        ));
+        assert!(is_run_link_err(&empty_run(d.path(), STAMP).unwrap_err()));
+        assert_eq!(fs::read(outside_secret(o.path())).unwrap(), b"abc");
+        assert!(
+            o.path()
+                .join(TRASH_DIR)
+                .join(STAMP)
+                .join(FILES_DIR)
+                .join("emptydir")
+                .is_dir()
+        );
+        assert!(!d.path().join("secret.txt").exists());
+    }
+
+    /// The run folder is real but its `files` folder links outside, with a
+    /// manifest line for a file there: restore must not pull it into the replica.
+    fn replica_with_linked_files(o: &Path, link: impl Fn(&Path, &Path)) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        fs::create_dir_all(&run).unwrap();
+        fs::copy(
+            o.join(TRASH_DIR).join(STAMP).join(MANIFEST),
+            run.join(MANIFEST),
+        )
+        .unwrap();
+        link(
+            &run.join(FILES_DIR),
+            &o.join(TRASH_DIR).join(STAMP).join(FILES_DIR),
+        );
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_run_files_folder_is_refused() {
+        let o = outside_run();
+        let d = replica_with_linked_files(o.path(), |link, target| {
+            std::os::unix::fs::symlink(target, link).unwrap()
+        });
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("secret.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_run_link_err(&e)
+        ));
+        assert!(is_run_link_err(&run_contents(d.path(), STAMP).unwrap_err()));
+        assert!(is_run_link_err(&list_runs(d.path()).unwrap_err()));
+        assert_eq!(fs::read(outside_secret(o.path())).unwrap(), b"abc");
+        assert!(
+            o.path()
+                .join(TRASH_DIR)
+                .join(STAMP)
+                .join(FILES_DIR)
+                .join("emptydir")
+                .is_dir()
+        );
+        assert!(!d.path().join("secret.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junctioned_run_files_folder_is_refused() {
+        let o = outside_run();
+        let d = replica_with_linked_files(o.path(), |link, target| {
+            crate::testutil::junction(link, target)
+        });
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("secret.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_run_link_err(&e)
+        ));
+        assert_eq!(fs::read(outside_secret(o.path())).unwrap(), b"abc");
+        assert!(!d.path().join("secret.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_run_manifest_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"abc", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.jsonl");
+        fs::copy(run.join(MANIFEST), &victim).unwrap();
+        let before = fs::read(&victim).unwrap();
+        fs::remove_file(run.join(MANIFEST)).unwrap();
+        std::os::unix::fs::symlink(&victim, run.join(MANIFEST)).unwrap();
+        assert!(matches!(
+            restore(d.path(), STAMP, &[rel("x.txt")], OnConflict::Refuse),
+            Err(RestoreError::Io(e)) if is_run_link_err(&e)
+        ));
+        assert_eq!(fs::read(&victim).unwrap(), before);
+        assert!(!d.path().join("x.txt").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_linked_sync_trash_folder_is_refused() {
