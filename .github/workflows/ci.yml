@@ -67,14 +67,17 @@ jobs:
           mv "$RUNNER_TEMP/coverage-ts.lcov" ../.quality/coverage-ts.lcov
       - run: npm run i18n:check
       - name: Dead code (knip, eng-metrics-lab)
+        if: ${{ !cancelled() }}
         run: mkdir -p ../.quality && npx knip --reporter json --no-exit-code > ../.quality/deadcode-ts.json
         continue-on-error: true
       - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: coverage-fragments
           path: .quality
         continue-on-error: true
       - name: Code quality (report-only)
+        if: ${{ !cancelled() }}
         uses: jfms7s/eng-metrics-lab/action@v0
         continue-on-error: true
 
