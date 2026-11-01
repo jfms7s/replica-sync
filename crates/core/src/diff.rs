@@ -114,10 +114,14 @@ fn pinned_folders(
 pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change> {
     let mut collisions = BTreeMap::new();
     let src = index(source, case, &mut collisions);
-    let rep = index(replica, case, &mut BTreeMap::new());
+    // A replica can hold two names one case-insensitive key can't tell apart
+    // (a per-folder case-sensitive NTFS folder, a non-casefold ext4 subfolder).
+    // `index` keeps only one of them, so the key is blocked like a source collision.
+    let mut rep_collisions = BTreeMap::new();
+    let rep = index(replica, case, &mut rep_collisions);
 
     let mut blocks = Blocks::default();
-    for (k, rel) in collisions {
+    for (k, rel) in collisions.into_iter().chain(rep_collisions) {
         blocks.add(k, rel, SkipReason::CaseCollision);
     }
     for p in &source.problems {
@@ -165,12 +169,18 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
     // on the source; then it is left alone and pins its folder.
     let src_leftovers: HashSet<String> =
         source.leftovers.iter().map(|e| key(&e.rel, case)).collect();
+    // Two leftovers one key can't tell apart would collide in the trash too.
+    let mut leftover_keys: BTreeMap<String, usize> = BTreeMap::new();
+    for e in &replica.leftovers {
+        *leftover_keys.entry(key(&e.rel, case)).or_default() += 1;
+    }
     let (doomed, kept): (Vec<&Entry>, Vec<&Entry>) = replica.leftovers.iter().partition(|e| {
         let k = key(&e.rel, case);
         !blocks.covers(&k)
             && !src.contains_key(&k)
             && !rep.contains_key(&k)
             && !src_leftovers.contains(&k)
+            && leftover_keys[&k] == 1
     });
     for e in doomed {
         out.push(Change::Delete {
@@ -210,7 +220,10 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                 Kind::Dir | Kind::Link => {}
             },
             (Some(s), Some(r)) => {
-                if s.rel.name() != r.rel.name() {
+                // A capital-letters rename of a folder would carry along whatever
+                // the plan leaves alone under it (a blocked key, a hidden path).
+                let carries_pinned = s.kind == Kind::Dir && pinned.contains(k);
+                if s.rel.name() != r.rel.name() && !carries_pinned {
                     let kind = match s.kind {
                         Kind::Dir => MoveKind::Dir { files: 0, bytes: 0 },
                         _ => MoveKind::File {
@@ -535,6 +548,107 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_replica_case_collision_is_skipped_and_nothing_changes_there() {
+        let rep = snap(vec![
+            dir("Photos"),
+            file("Photos/A.jpg", 1, T0),
+            file("Photos/a.jpg", 2, T0),
+        ]);
+        let out = diff(&snap(vec![]), &rep, CaseMode::Insensitive);
+        let skipped: Vec<_> = out
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Skipped {
+                        reason: SkipReason::CaseCollision,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(skipped.len(), 1, "{out:?}");
+        assert!(deletes(&out).is_empty(), "{out:?}");
+        assert!(
+            !out.iter().any(|c| matches!(c, Change::RmDir { .. })),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_replica_case_collision_blocks_updates_at_that_key() {
+        let src = snap(vec![file("a.jpg", 9, T0 + 100)]);
+        let rep = snap(vec![file("A.jpg", 1, T0), file("a.jpg", 2, T0)]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert!(
+            out.iter().all(|c| matches!(
+                c,
+                Change::Skipped {
+                    reason: SkipReason::CaseCollision,
+                    ..
+                }
+            )),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn a_folder_holding_a_replica_case_collision_is_not_renamed() {
+        let src = snap(vec![dir("photos")]);
+        let rep = snap(vec![
+            dir("Photos"),
+            file("Photos/A.jpg", 1, T0),
+            file("Photos/a.jpg", 2, T0),
+        ]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert!(
+            !out.iter().any(|c| matches!(c, Change::Move { .. })),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn case_twin_folders_on_the_replica_block_their_subtrees() {
+        let src = snap(vec![dir("x"), file("x/f", 1, T0)]);
+        let rep = snap(vec![
+            dir("X"),
+            dir("x"),
+            file("X/g", 1, T0),
+            file("x/f", 1, T0),
+        ]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(matches!(
+            &out[0],
+            Change::Skipped {
+                reason: SkipReason::CaseCollision,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replica_case_collisions_change_nothing_in_sensitive_mode() {
+        let rep = snap(vec![file("A.jpg", 1, T0), file("a.jpg", 2, T0)]);
+        let out = diff(&snap(vec![]), &rep, CaseMode::Sensitive);
+        assert_eq!(deletes(&out), vec!["A.jpg", "a.jpg"]);
+    }
+
+    #[test]
+    fn case_twin_leftovers_are_both_kept() {
+        let mut rep = snap(vec![dir("L")]);
+        rep.leftovers.push(file("L/A.replica-sync.tmp", 1, T0));
+        rep.leftovers.push(file("L/a.replica-sync.tmp", 1, T0));
+        let out = diff(&snap(vec![]), &rep, CaseMode::Insensitive);
+        assert!(deletes(&out).is_empty(), "{out:?}");
+        assert!(
+            !out.iter().any(|c| matches!(c, Change::RmDir { .. })),
+            "{out:?}"
+        );
     }
 
     #[test]
