@@ -52,7 +52,7 @@ export interface GuardWarning { affected: number; replica_files: number }
 export interface PreviewSummary {
   pairId: string; pairName: string; totals: Totals; selected: Totals; selectedCount: number; actionableCount: number;
   isEmpty: boolean; guard: GuardWarning | null; guardConfirmed: boolean; shortfall: number | null;
-  source: ScanStats; replica: ScanStats; deleteFolders: RelPath[];
+  source: ScanStats; replica: ScanStats;
 }
 
 export type Tick = 'on' | 'off' | 'mixed' | 'none';
@@ -95,6 +95,7 @@ export const api = {
   cancelScan: () => invoke<void>('cancel_scan'),
   previewSummary: () => invoke<PreviewSummary>('preview_summary'),
   treeChildren: (path: RelPath) => invoke<ChildrenPage>('tree_children', { path }),
+  deleteFolders: (limit: number) => invoke<RelPath[]>('delete_folders', { limit }),
   toggle: (path: RelPath) => invoke<PreviewSummary>('toggle', { path }),
   selectAll: (on: boolean) => invoke<PreviewSummary>('select_all', { on }),
   confirmWrongFolder: () => invoke<PreviewSummary>('confirm_wrong_folder'),

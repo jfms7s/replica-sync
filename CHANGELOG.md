@@ -4,6 +4,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- The Preview no longer re-sends the list of folders with deletes on every checkbox click; "Show them" fetches the first 50 when clicked. Faster clicks on previews with many deleted folders.
+
 ### Fixed
 - Trash bookkeeping is sturdier when the disk fails mid-write: a torn manifest line no longer swallows the next one; a move whose manifest line fails is undone without overwriting a file that appeared at the old path (and says so if it can't be undone); a failed first move leaves no empty trash run; and restoring from the trash now records each file the same careful way, never replacing a file that appeared since the conflict check.
 - A replica holding two names that differ only by capital letters (possible in a case-sensitive NTFS folder or a non-casefold ext4 folder) is now shown as skipped, "two names differ only by capital letters", and nothing changes at that name. Before, one of the two files was silently ignored and its folder could fail to be removed on every run.

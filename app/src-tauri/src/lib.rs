@@ -72,6 +72,7 @@ pub fn run() {
             commands::cancel_scan,
             commands::preview_summary,
             commands::tree_children,
+            commands::delete_folders,
             commands::toggle,
             commands::select_all,
             commands::confirm_wrong_folder,
