@@ -1,6 +1,6 @@
 //! Windows drive identity: the filesystem serial number stored on the disk.
 
-use super::{VolumeInfo, Volumes};
+use super::{VolumeInfo, Volumes, id_matches};
 use std::ffi::c_void;
 use std::io;
 use std::mem;
@@ -76,7 +76,7 @@ fn serial_from_file_id(root: &Path) -> io::Result<u64> {
     }
 }
 
-fn serial_from_volume_info(root: &Path) -> io::Result<u64> {
+fn serial_from_volume_info(root: &Path) -> io::Result<u32> {
     let name = wide(root);
     let mut serial: u32 = 0;
     // SAFETY: `name` is NUL-terminated; `serial` is a valid out-pointer; other out-pointers are null.
@@ -95,14 +95,29 @@ fn serial_from_volume_info(root: &Path) -> io::Result<u64> {
     if ok == 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(u64::from(serial))
+        Ok(serial)
     }
+}
+
+/// `win:` plus FILE_ID_INFO's 64-bit serial.
+fn file_id_id(serial: u64) -> String {
+    format!("win:{serial:016x}")
+}
+
+/// `win32:` plus the 32-bit volume serial, the fallback's own prefix so a saved
+/// id records which derivation made it. Saved as `win:` before 0.4.0;
+/// [`id_matches`] still accepts that form.
+fn volume_serial_id(serial: u32) -> String {
+    format!("win32:{serial:08x}")
 }
 
 /// FILE_ID_INFO's 64-bit serial, or the 32-bit volume serial when a filesystem
 /// doesn't support FileIdInfo (seen on some FAT/exFAT drivers).
-fn serial_of(root: &Path) -> io::Result<u64> {
-    serial_from_file_id(root).or_else(|_| serial_from_volume_info(root))
+fn id_of(root: &Path) -> io::Result<String> {
+    match serial_from_file_id(root) {
+        Ok(serial) => Ok(file_id_id(serial)),
+        Err(_) => serial_from_volume_info(root).map(volume_serial_id),
+    }
 }
 
 /// Which source the id came from, printed by `replica-sync-cli volume` for the manual exFAT check.
@@ -143,15 +158,11 @@ fn label_of(root: &Path) -> String {
     }
 }
 
-fn id_for(serial: u64) -> String {
-    format!("win:{serial:016x}")
-}
-
 impl Volumes for WindowsVolumes {
     fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
         let root = mount_root(&dunce::canonicalize(path)?)?;
         Ok(VolumeInfo {
-            id: id_for(serial_of(&root)?),
+            id: id_of(&root)?,
             label: label_of(&root),
             mount_root: root,
         })
@@ -162,21 +173,31 @@ impl Volumes for WindowsVolumes {
         unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, ptr::null_mut()) };
         // SAFETY: no arguments.
         let mask = unsafe { GetLogicalDrives() };
-        for i in 0..26u8 {
-            if mask & (1 << i) == 0 {
-                continue;
-            }
-            let root = PathBuf::from(format!("{}:\\", (b'A' + i) as char));
-            if serial_of(&root).is_ok_and(|s| id_for(s) == id) {
-                return Ok(Some(VolumeInfo {
-                    id: id.to_owned(),
-                    label: label_of(&root),
-                    mount_root: root,
-                }));
-            }
-        }
-        Ok(None)
+        let drives = (0..26u8)
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+            .map(|root| {
+                let id = id_of(&root);
+                (root, id)
+            });
+        Ok(first_match(id, drives).map(|root| VolumeInfo {
+            id: id.to_owned(),
+            label: label_of(&root),
+            mount_root: root,
+        }))
     }
+}
+
+/// The first drive root whose current id names the drive saved as `saved`
+/// (see [`id_matches`]). Drives that can't be read are skipped.
+fn first_match(
+    saved: &str,
+    drives: impl IntoIterator<Item = (PathBuf, io::Result<String>)>,
+) -> Option<PathBuf> {
+    drives
+        .into_iter()
+        .find(|(_, current)| current.as_ref().is_ok_and(|c| id_matches(saved, c)))
+        .map(|(root, _)| root)
 }
 
 #[cfg(test)]
@@ -191,6 +212,42 @@ mod tests {
         assert!(v.id.starts_with("win:") && v.id.len() == 20, "{}", v.id);
         let found = vols.find(&v.id).unwrap().unwrap();
         assert_eq!(found.mount_root, v.mount_root);
+    }
+
+    #[test]
+    fn ids_name_their_derivation() {
+        assert_eq!(file_id_id(0x0123_4567_89ab_cdef), "win:0123456789abcdef");
+        assert_eq!(file_id_id(0x89ab_cdef), "win:0000000089abcdef");
+        assert_eq!(volume_serial_id(0x89ab_cdef), "win32:89abcdef");
+        assert_eq!(volume_serial_id(0x1), "win32:00000001");
+    }
+
+    #[test]
+    fn a_pre_0_4_fallback_id_still_matches_the_drive() {
+        let serial = 0x89ab_cdef;
+        let saved_before = format!("win:{:016x}", u64::from(serial));
+        assert!(id_matches(&saved_before, &volume_serial_id(serial)));
+        assert!(id_matches(&volume_serial_id(serial), &saved_before));
+        assert!(!id_matches(&saved_before, &volume_serial_id(serial + 1)));
+    }
+
+    #[test]
+    fn find_matches_a_pre_0_4_fallback_id_against_each_drive() {
+        let drives = || {
+            vec![
+                (PathBuf::from(r"C:\"), Ok(file_id_id(0x0123_4567_89ab_cdef))),
+                (PathBuf::from(r"D:\"), Err(io::Error::other("no disk"))),
+                (PathBuf::from(r"E:\"), Ok(volume_serial_id(0x89ab_cdef))),
+            ]
+        };
+        let e = Some(PathBuf::from(r"E:\"));
+        assert_eq!(first_match("win:0000000089abcdef", drives()), e);
+        assert_eq!(first_match("win32:89abcdef", drives()), e);
+        assert_eq!(
+            first_match("win:0123456789abcdef", drives()),
+            Some(PathBuf::from(r"C:\"))
+        );
+        assert_eq!(first_match("win:0000000089abcdee", drives()), None);
     }
 
     #[test]

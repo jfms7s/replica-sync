@@ -19,7 +19,7 @@ pub use windows::WindowsVolumes as SystemVolumes;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VolumeInfo {
-    /// `win:<serial>` or `uuid:<fs uuid>`: stored on the disk itself.
+    /// `win:<64-bit serial>`, `win32:<32-bit serial>` or `uuid:<fs uuid>`: stored on the disk itself.
     pub id: String,
     /// Drive letter root (`E:\`) or mount point.
     pub mount_root: PathBuf,
@@ -29,6 +29,26 @@ pub struct VolumeInfo {
 pub trait Volumes {
     fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo>;
     fn find(&self, id: &str) -> io::Result<Option<VolumeInfo>>;
+}
+
+/// Whether a saved drive id names the drive that now reports `current`.
+///
+/// Windows has two derivations: `win:<016x>` from `FILE_ID_INFO` and
+/// `win32:<08x>` from `GetVolumeInformationW`, used when a filesystem refuses
+/// `FileIdInfo` (some FAT/exFAT drivers). Before 0.4.0 the second was also saved
+/// as `win:`, zero-padded to 16 digits, so a `win32:` id and the `win:` id
+/// holding the same 32-bit serial are treated as the same drive, both ways.
+pub fn id_matches(saved: &str, current: &str) -> bool {
+    saved == current
+        || legacy_win_form(saved).is_some_and(|old| old == current)
+        || legacy_win_form(current).is_some_and(|old| old == saved)
+}
+
+/// `win32:<8 hex digits>` as it was saved before 0.4.0: `win:` plus 16 digits.
+fn legacy_win_form(id: &str) -> Option<String> {
+    let serial = id.strip_prefix("win32:")?;
+    (serial.len() == 8 && serial.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| format!("win:00000000{serial}"))
 }
 
 #[allow(clippy::default_constructed_unit_structs)] // a unit struct on Windows, not on Linux
@@ -123,6 +143,35 @@ pub fn free_space(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_match_exactly() {
+        assert!(id_matches("win:0123456789abcdef", "win:0123456789abcdef"));
+        assert!(id_matches("win32:89abcdef", "win32:89abcdef"));
+        assert!(id_matches("uuid:1111-AAAA", "uuid:1111-AAAA"));
+        assert!(!id_matches("win:0123456789abcdef", "win:0123456789abcdee"));
+        assert!(!id_matches("uuid:1111-AAAA", "uuid:1111-aaaa"));
+    }
+
+    #[test]
+    fn a_pre_0_4_volume_serial_id_matches_the_win32_form_both_ways() {
+        // Saved before the change, read back with the fallback now prefixed `win32:`.
+        assert!(id_matches("win:0000000089abcdef", "win32:89abcdef"));
+        // Saved with the new prefix, the drive now answering through the old form.
+        assert!(id_matches("win32:89abcdef", "win:0000000089abcdef"));
+    }
+
+    #[test]
+    fn a_win32_id_never_matches_a_different_serial_or_a_full_64_bit_one() {
+        assert!(!id_matches("win:0000000089abcdee", "win32:89abcdef"));
+        assert!(!id_matches("win:0000000189abcdef", "win32:89abcdef"));
+        assert!(!id_matches("win:89abcdef00000000", "win32:89abcdef"));
+        assert!(!id_matches("win32:89abcdef", "win32:89abcdee"));
+        // Malformed `win32:` ids fall back to exact comparison only.
+        assert!(!id_matches("win:000000000089abcd", "win32:89abcd"));
+        assert!(!id_matches("win:00000000zzzzzzzz", "win32:zzzzzzzz"));
+        assert!(!id_matches("uuid:89abcdef", "win32:89abcdef"));
+    }
 
     #[test]
     fn case_probe_on_tmp_is_sensitive_and_cleans_up() {
