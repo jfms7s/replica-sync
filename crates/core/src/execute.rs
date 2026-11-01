@@ -1921,6 +1921,131 @@ mod apply_tests {
         assert_eq!(fs::read(&taken).unwrap(), b"user data");
         assert_eq!(fs::read(f.rep.join("Photo.JPG")).unwrap(), b"x");
     }
+
+    fn file_move(from: &str, to: &str) -> Plan {
+        crate::plan::build_plan(
+            vec![Change::Move {
+                from: rel(from),
+                to: rel(to),
+                kind: MoveKind::File {
+                    size: 1,
+                    mtime_ns: ns(T0),
+                },
+            }],
+            crate::diff::CaseMode::Sensitive,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn move_refuses_when_destination_appeared_since_preview() {
+        let f = fixture();
+        write_file(&f.src, "b/x.txt", b"x", T0);
+        write_file(&f.rep, "a/x.txt", b"x", T0);
+        let plan = file_move("a/x.txt", "b/x.txt");
+        write_file(&f.rep, "b/x.txt", b"appeared later", T0);
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Failed(FailReason::TargetExists)
+        );
+        assert_eq!(fs::read(f.rep.join("a/x.txt")).unwrap(), b"x");
+        assert_eq!(fs::read(f.rep.join("b/x.txt")).unwrap(), b"appeared later");
+        assert!(!f.rep.join(crate::trash::TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn move_skips_when_source_entry_is_gone_from_the_replica() {
+        let f = fixture();
+        write_file(&f.src, "b/x.txt", b"x", T0);
+        write_file(&f.src, "c.txt", b"c", T0);
+        write_file(&f.rep, "a/x.txt", b"x", T0);
+        let mut changes = vec![Change::Create {
+            path: rel("c.txt"),
+            size: 1,
+            mtime_ns: ns(T0),
+        }];
+        changes.extend(
+            file_move("a/x.txt", "b/x.txt")
+                .changes
+                .into_iter()
+                .map(|p| p.change),
+        );
+        let plan = crate::plan::build_plan(changes, crate::diff::CaseMode::Sensitive).unwrap();
+        fs::remove_file(f.rep.join("a/x.txt")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        let outcome = |p: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == p)
+                .map(|r| r.outcome.clone())
+                .unwrap()
+        };
+        // A move's result is recorded under its destination.
+        assert_eq!(
+            outcome("b/x.txt"),
+            Outcome::Skipped(SkipReason::NoLongerInReplica)
+        );
+        assert_eq!(outcome("c.txt"), Outcome::Applied);
+        assert!(!f.rep.join("b/x.txt").exists());
+        assert_eq!(fs::read(f.rep.join("c.txt")).unwrap(), b"c");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_replica_folder_fails_with_permission_denied_and_continues() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        write_file(&f.src, "locked/a.txt", b"a", T0);
+        write_file(&f.src, "open/b.txt", b"b", T0);
+        fs::create_dir_all(f.rep.join("locked")).unwrap();
+        fs::create_dir_all(f.rep.join("open")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        let locked = f.rep.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(locked.join("probe"), b"").is_ok() {
+            fs::remove_file(locked.join("probe")).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: permissions are not enforced
+        }
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let outcome = |p: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == p)
+                .map(|r| r.outcome.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            outcome("locked/a.txt"),
+            Outcome::Failed(FailReason::PermissionDenied)
+        );
+        assert_eq!(outcome("open/b.txt"), Outcome::Applied);
+        assert!(report.stopped.is_none(), "{:?}", report.stopped);
+        assert!(!locked.join("a.txt").exists());
+        assert_eq!(fs::read(f.rep.join("open/b.txt")).unwrap(), b"b");
+    }
 }
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
