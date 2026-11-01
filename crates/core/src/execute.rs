@@ -475,10 +475,22 @@ impl Run<'_, '_> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_stop(&e, root)),
         }
+        // Until `create_new` succeeds the temp name is not ours: an error before
+        // that point must not remove whatever is there.
+        let src = File::open(&src_path).map_err(|e| io_stop(&e, root))?;
+        let out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists => Stop::Fail(FailReason::TargetExists),
+                _ => io_stop(&e, root),
+            })?;
         let synced = match write_temp(
             ctx,
             &mut self.disk,
-            &src_path,
+            src,
+            out,
             &tmp,
             &before,
             self.progress,
@@ -634,12 +646,15 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
     }
 }
 
-/// Copies the source into `tmp` and sets its mtime. True when the temp was also
-/// synced on its own (otherwise the batch flush makes it durable).
+/// Copies the source into `out`, the temp just created at `tmp`, and sets its
+/// mtime. True when the temp was also synced on its own (otherwise the batch
+/// flush makes it durable).
+#[allow(clippy::too_many_arguments)]
 fn write_temp(
     ctx: &ExecContext,
     disk: &mut durable::Replica,
-    src_path: &Path,
+    mut src: File,
+    mut out: File,
     tmp: &Path,
     before: &fs::Metadata,
     progress: &mut Progress,
@@ -647,12 +662,6 @@ fn write_temp(
 ) -> Result<bool, Stop> {
     let root = ctx.replica.path();
     let on_io = |e: io::Error| io_stop(&e, root);
-    let mut src = File::open(src_path).map_err(on_io)?;
-    let mut out = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-        .map_err(on_io)?;
     durable::write_fault(tmp).map_err(on_io)?;
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -866,8 +875,8 @@ mod durable {
             }
         }
 
-        /// Best effort: a temp that cannot be removed is a leftover the next scan
-        /// deletes.
+        /// Best effort: a temp that cannot be removed is a leftover the next
+        /// preview plans for the trash.
         pub fn remove_temp(&mut self, root: &Path, tmp: &Path) {
             let (Some(dir), Ok(rel)) = (&self.root, tmp.strip_prefix(root)) else {
                 let _ = fs::remove_file(tmp);
@@ -1026,8 +1035,8 @@ mod durable {
             !self.failed.contains(tmp)
         }
 
-        /// Best effort: a temp that cannot be removed is a leftover the next scan
-        /// deletes. Its handle, if still open, is closed first.
+        /// Best effort: a temp that cannot be removed is a leftover the next
+        /// preview plans for the trash. Its handle, if still open, is closed first.
         pub fn remove_temp(&mut self, _root: &Path, tmp: &Path) {
             self.open.retain(|(p, _)| p != tmp);
             let _ = fs::remove_file(tmp);
