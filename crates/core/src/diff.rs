@@ -114,10 +114,14 @@ fn pinned_folders(
 pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change> {
     let mut collisions = BTreeMap::new();
     let src = index(source, case, &mut collisions);
-    let rep = index(replica, case, &mut BTreeMap::new());
+    // A replica can hold two names one case-insensitive key can't tell apart
+    // (a per-folder case-sensitive NTFS folder, a non-casefold ext4 subfolder).
+    // `index` keeps only one of them, so the key is blocked like a source collision.
+    let mut rep_collisions = BTreeMap::new();
+    let rep = index(replica, case, &mut rep_collisions);
 
     let mut blocks = Blocks::default();
-    for (k, rel) in collisions {
+    for (k, rel) in collisions.into_iter().chain(rep_collisions) {
         blocks.add(k, rel, SkipReason::CaseCollision);
     }
     for p in &source.problems {
@@ -535,6 +539,52 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_replica_case_collision_is_skipped_and_nothing_changes_there() {
+        let rep = snap(vec![
+            dir("Photos"),
+            file("Photos/A.jpg", 1, T0),
+            file("Photos/a.jpg", 2, T0),
+        ]);
+        let out = diff(&snap(vec![]), &rep, CaseMode::Insensitive);
+        let skipped: Vec<_> = out
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Skipped {
+                        reason: SkipReason::CaseCollision,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(skipped.len(), 1, "{out:?}");
+        assert!(deletes(&out).is_empty(), "{out:?}");
+        assert!(
+            !out.iter().any(|c| matches!(c, Change::RmDir { .. })),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_replica_case_collision_blocks_updates_and_moves_at_that_key() {
+        let src = snap(vec![file("a.jpg", 9, T0 + 100)]);
+        let rep = snap(vec![file("A.jpg", 1, T0), file("a.jpg", 2, T0)]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert!(
+            out.iter().all(|c| matches!(
+                c,
+                Change::Skipped {
+                    reason: SkipReason::CaseCollision,
+                    ..
+                }
+            )),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
     }
 
     #[test]
