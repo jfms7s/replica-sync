@@ -1,7 +1,7 @@
 //! Saved source → replica pairs, found by drive ID rather than drive letter.
 
 use crate::rules::{RuleError, SkipRules};
-use crate::volume::Volumes;
+use crate::volume::{self, Volumes};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -201,7 +201,7 @@ fn verify_side(
     volumes: &dyn Volumes,
 ) -> Result<(), ResolveError> {
     match volumes.volume_of(root) {
-        Ok(v) if v.id == side.volume_id => Ok(()),
+        Ok(v) if volume::id_matches(&side.volume_id, &v.id) => Ok(()),
         Ok(_) => Err(ResolveError::WrongVolume(root.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ResolveError::NotConnected {
             side: kind,
@@ -397,6 +397,31 @@ mod tests {
             trash_days: DEFAULT_TRASH_DAYS,
             allow_same_volume: false,
         }
+    }
+
+    #[test]
+    fn verify_accepts_a_pre_0_4_windows_id_for_the_same_drive() {
+        let (t, v) = setup();
+        v.0.borrow_mut().retain(|x| x.id != "A");
+        v.mount("win:0000000089abcdef", &t.path().join("diskA"));
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let r = resolve(&p, &v).unwrap();
+        // The same drive now reports the fallback serial with its own prefix.
+        v.0.borrow_mut().retain(|x| x.id != "win:0000000089abcdef");
+        v.mount("win32:89abcdef", &t.path().join("diskA"));
+        verify_source(&p, &r, &v).unwrap();
+        p.source.volume_id = "win:0000000089abcdee".into();
+        assert!(matches!(
+            verify_source(&p, &r, &v),
+            Err(ResolveError::WrongVolume(_))
+        ));
     }
 
     #[test]
