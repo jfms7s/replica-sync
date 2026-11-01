@@ -130,8 +130,8 @@ fn walk<'s>(
         }
         if rel.name().ends_with(TEMP_SUFFIX) {
             // `DirEntry::metadata` does not follow links. Only a regular file is
-            // a leftover; a link is listed as a link like any other; anything
-            // else (a folder) is shown as skipped, never descended into.
+            // a leftover; a link is listed as a link like any other; a
+            // folder is shown as skipped and never descended into.
             match entry.metadata() {
                 Ok(md) if md.is_file() => leftovers.push(Entry {
                     rel,
@@ -145,9 +145,14 @@ fn walk<'s>(
                     size: 0,
                     mtime_ns: 0,
                 }),
-                Ok(_) => problems.push(Problem {
+                Ok(md) if md.is_dir() => problems.push(Problem {
                     rel,
                     kind: ProblemKind::ReservedName,
+                    detail: String::new(),
+                }),
+                Ok(_) => problems.push(Problem {
+                    rel,
+                    kind: ProblemKind::NotRegularFile,
                     detail: String::new(),
                 }),
                 Err(e) => problems.push(Problem {

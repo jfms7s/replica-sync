@@ -326,6 +326,21 @@ fn a_source_folder_with_the_temp_suffix_is_reported_not_silently_left_out() {
     assert!(!r.join("Docs/old.replica-sync.tmp").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_replica_link_with_the_temp_suffix_is_kept_and_pins_its_folder() {
+    let (_d, s, r) = dirs();
+    fs::create_dir_all(r.join("Old")).unwrap();
+    std::os::unix::fs::symlink("/nowhere", r.join("Old/x.replica-sync.tmp")).unwrap();
+    let (_, report) = sync_all(&s, &r);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert!(
+        fs::symlink_metadata(r.join("Old/x.replica-sync.tmp"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
 #[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
