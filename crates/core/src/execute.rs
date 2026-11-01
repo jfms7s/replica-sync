@@ -111,7 +111,8 @@ pub struct RunReport {
 /// How a run made its copies durable before renaming them; the run log shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Durability {
-    /// True when copies were flushed in batches (one `syncfs` per batch).
+    /// True when copies were flushed in batches: one `syncfs` per batch on
+    /// Linux, `FlushFileBuffers` on each of the batch's temps on Windows.
     pub batched: bool,
     /// The replica's filesystem when batched, otherwise why not.
     pub why: String,
@@ -266,6 +267,9 @@ pub fn execute(
         let full = run.batch.is_full(run.disk.batch_files());
         if (copy.is_none() || full) && !run.flush(Commit::All) {
             break;
+        }
+        if ctx.control.is_paused() {
+            run.disk.park();
         }
         if let Some(stop) = run.check_roots() {
             run.stop(stop);
@@ -495,7 +499,7 @@ impl Run<'_, '_> {
 
     /// Makes the batch durable with one flush, then renames its temps into place
     /// in plan order, re-checking each source first. False once the run stopped.
-    fn flush(&mut self, which: Commit) -> bool {
+    fn flush(&mut self, mut which: Commit) -> bool {
         let root = self.ctx.replica.path();
         let unsynced = self
             .batch
@@ -503,9 +507,28 @@ impl Run<'_, '_> {
             .iter()
             .any(|i| matches!(i, Pending::Written(w) if !w.synced));
         let mut sync_failed = None;
+        // A disk that filled up during the flush: temps that did reach the disk
+        // still become new files (as for a full disk while writing); the rest
+        // are interrupted and the run stops after the batch.
+        let mut full = false;
         if unsynced && let Err(e) = self.disk.flush() {
             match io_stop(&e, root) {
+                Stop::Fatal(StopReason::ReplicaFull) => {
+                    full = true;
+                    which = Commit::CreatesOnly;
+                }
                 Stop::Fatal(r) => {
+                    // Copies waiting for this flush were cut short: report them.
+                    for item in std::mem::take(&mut self.batch.items) {
+                        match item {
+                            Pending::Written(w) => {
+                                self.disk.remove_temp(root, &w.tmp);
+                                self.interrupted(w.id, &w.rel);
+                            }
+                            Pending::Done(r) => self.finish(r.id, &r.path, r.outcome),
+                        }
+                    }
+                    self.batch.bytes = 0;
                     self.stop(r);
                     return false;
                 }
@@ -513,6 +536,7 @@ impl Run<'_, '_> {
                 Stop::Skip(_) | Stop::Cancelled => unreachable!("io_stop only fails"),
             }
         }
+        let flush_failed = full || sync_failed.is_some();
         let mut items = std::mem::take(&mut self.batch.items).into_iter();
         self.batch.bytes = 0;
         while let Some(item) = items.next() {
@@ -523,15 +547,18 @@ impl Run<'_, '_> {
                 }
                 Pending::Written(w) => w,
             };
-            if which == Commit::CreatesOnly && (w.replaces || fs::symlink_metadata(&w.dest).is_ok())
+            let durable = w.synced || !flush_failed || self.disk.flushed_despite_error(&w.tmp);
+            if (full && !durable)
+                || which == Commit::CreatesOnly
+                    && (w.replaces || fs::symlink_metadata(&w.dest).is_ok())
             {
                 self.disk.remove_temp(root, &w.tmp);
                 self.interrupted(w.id, &w.rel);
                 continue;
             }
             let result = match &sync_failed {
-                Some(r) => Err(Stop::Fail(r.clone())),
-                None => match self.check_roots() {
+                Some(r) if !durable => Err(Stop::Fail(r.clone())),
+                _ => match self.check_roots() {
                     Some(stop) => {
                         self.batch.items =
                             std::iter::once(Pending::Written(w)).chain(items).collect();
@@ -558,6 +585,10 @@ impl Run<'_, '_> {
                 self.disk.remove_temp(root, &w.tmp);
             }
             self.finish(w.id, &w.rel, outcome);
+        }
+        if full {
+            self.stop(StopReason::ReplicaFull);
+            return false;
         }
         true
     }
@@ -629,13 +660,16 @@ fn write_temp(
         out.write_all(&buf[..n]).map_err(on_io)?;
         progress.bytes_done += n as u64;
         on_progress(progress);
+        if ctx.control.is_paused() {
+            disk.park();
+        }
         if !ctx.control.proceed() {
             return Err(Stop::Cancelled);
         }
     }
     let mtime = FileTime::from_system_time(before.modified().map_err(on_io)?);
     filetime::set_file_handle_times(&out, None, Some(mtime)).map_err(on_io)?;
-    disk.sync_temp(&out).map_err(on_io)
+    disk.sync_temp(tmp, out).map_err(on_io)
 }
 
 /// Durability for the replica disk.
@@ -783,7 +817,7 @@ mod durable {
 
         /// Syncs a finished temp now unless the batch's `syncfs` will cover it.
         /// True when it was synced.
-        pub fn sync_temp(&mut self, out: &File) -> io::Result<bool> {
+        pub fn sync_temp(&mut self, _tmp: &Path, out: File) -> io::Result<bool> {
             if self.mode.is_ok() {
                 #[allow(unused_mut)]
                 let mut other = out.metadata()?.dev() != self.dev;
@@ -803,13 +837,21 @@ mod durable {
             Ok(true)
         }
 
+        /// After a failed `syncfs`, no temp of the batch is known to be on disk.
+        pub fn flushed_despite_error(&self, _tmp: &Path) -> bool {
+            false
+        }
+
+        /// Nothing to do before a pause: no temp holds an open handle.
+        pub fn park(&mut self) {}
+
         /// One `syncfs` on the replica root's filesystem.
-        pub fn flush(&self) -> io::Result<()> {
+        pub fn flush(&mut self) -> io::Result<()> {
             let file = self.root.as_ref().expect("batching needs the root open");
             #[cfg(test)]
             {
                 hooks::FLUSHES.set(hooks::FLUSHES.get() + 1);
-                if let Some(errno) = hooks::SYNCFS_ERRNO.get() {
+                if let Some((_, errno)) = hooks::FLUSH_ERRNO.get() {
                     return Err(io::Error::from_raw_os_error(errno));
                 }
             }
@@ -823,7 +865,7 @@ mod durable {
 
         /// Best effort: a temp that cannot be removed is a leftover the next scan
         /// deletes.
-        pub fn remove_temp(&self, root: &Path, tmp: &Path) {
+        pub fn remove_temp(&mut self, root: &Path, tmp: &Path) {
             let (Some(dir), Ok(rel)) = (&self.root, tmp.strip_prefix(root)) else {
                 let _ = fs::remove_file(tmp);
                 return;
@@ -862,16 +904,229 @@ mod durable {
             /// Treat every temp as on another filesystem than the replica root.
             pub static OTHER_DEVICE: Cell<bool> = const { Cell::new(false) };
             /// `syncfs` fails with this errno.
-            pub static SYNCFS_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+            /// (The name prefix is ignored: one `syncfs` covers every temp.)
+            pub static FLUSH_ERRNO: Cell<Option<(&'static str, i32)>> = const { Cell::new(None) };
             /// Writing a temp whose name starts with this fails with the errno.
             pub static WRITE_ERRNO: Cell<Option<(&'static str, i32)>> = const { Cell::new(None) };
         }
     }
 }
 
-/// Durability for the replica disk: each temp is synced as it is written and a
-/// batch holds one copy (`FlushFileBuffers` batching on Windows is a follow-up).
-#[cfg(not(target_os = "linux"))]
+/// Durability for the replica disk on Windows.
+///
+/// A volume-wide flush needs admin rights, so a batch is made durable with one
+/// `FlushFileBuffers` per temp, run together from a few threads once the whole
+/// batch is written. Each temp's handle stays open (it was opened for writing,
+/// which `FlushFileBuffers` needs) until that flush, and is closed before any
+/// rename. That is a real flush on NTFS, exFAT and FAT32 alike. The batch caps
+/// (256 files, 64 MB) bound the open handles.
+///
+/// Temps are removed by path: a replica root that was moved or unplugged keeps
+/// its leftover temps, which the next scan removes.
+#[cfg(windows)]
+mod durable {
+    use super::Durability;
+    use std::collections::HashSet;
+    use std::fs::{self, File};
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::thread;
+
+    pub(super) const BATCH_FILES: usize = 256;
+
+    /// Threads that flush a batch's handles; flushes on one disk overlap in the
+    /// OS and the device, so a few in flight beat one at a time.
+    const FLUSH_THREADS: usize = 4;
+
+    pub struct Replica {
+        /// Finished temps not yet flushed, with their still-open write handles.
+        open: Vec<(PathBuf, File)>,
+        /// Temps whose flush failed in the last batch flush.
+        failed: HashSet<PathBuf>,
+        /// Flushed early by `park`: failures and the first error, handed to
+        /// the next batch flush.
+        parked_failed: HashSet<PathBuf>,
+        parked_error: Option<io::Error>,
+    }
+
+    impl Replica {
+        pub fn open(_root: &Path) -> Replica {
+            Replica {
+                open: Vec::new(),
+                failed: HashSet::new(),
+                parked_failed: HashSet::new(),
+                parked_error: None,
+            }
+        }
+
+        pub fn durability(&self) -> Durability {
+            Durability {
+                batched: true,
+                why: "Windows: FlushFileBuffers on each of its temps".into(),
+                synced_separately: 0,
+            }
+        }
+
+        pub fn batch_files(&self) -> usize {
+            BATCH_FILES
+        }
+
+        /// Keeps the temp's handle for the batch flush; never synced on its own.
+        pub fn sync_temp(&mut self, tmp: &Path, out: File) -> io::Result<bool> {
+            self.open.push((tmp.to_path_buf(), out));
+            Ok(false)
+        }
+
+        /// Flushes every waiting temp, then closes their handles (also on
+        /// failure). Returns the first error; the temps whose own flush
+        /// failed are then the ones `flushed_despite_error` refuses.
+        pub fn flush(&mut self) -> io::Result<()> {
+            #[cfg(test)]
+            hooks::FLUSHES.set(hooks::FLUSHES.get() + 1);
+            self.flush_open();
+            self.failed = std::mem::take(&mut self.parked_failed);
+            self.parked_error.take().map_or(Ok(()), Err)
+        }
+
+        /// Flushes and closes the waiting temps now, before a pause, so no
+        /// file on the drive stays open while the user may unplug it. Their
+        /// outcome is reported by the next `flush`.
+        pub fn park(&mut self) {
+            #[cfg(test)]
+            if !self.open.is_empty() {
+                hooks::PARKS.set(hooks::PARKS.get() + 1);
+            }
+            self.flush_open();
+        }
+
+        /// Flushes and closes every open temp, keeping failures for `flush`.
+        fn flush_open(&mut self) {
+            if self.open.is_empty() {
+                return;
+            }
+            let open = std::mem::take(&mut self.open);
+            // Read here: the hooks are per thread and the flush runs on others.
+            #[cfg(test)]
+            let fault = hooks::FLUSH_ERRNO.get();
+            #[cfg(not(test))]
+            let fault = None;
+            let errors = flush_all(&open, fault);
+            self.parked_failed
+                .extend(errors.iter().map(|(i, _)| open[*i].0.clone()));
+            if self.parked_error.is_none() {
+                self.parked_error = errors.into_iter().next().map(|(_, e)| e);
+            }
+        }
+
+        /// Whether `tmp` reached the disk although the batch flush failed.
+        pub fn flushed_despite_error(&self, tmp: &Path) -> bool {
+            !self.failed.contains(tmp)
+        }
+
+        /// Best effort: a temp that cannot be removed is a leftover the next scan
+        /// deletes. Its handle, if still open, is closed first.
+        pub fn remove_temp(&mut self, _root: &Path, tmp: &Path) {
+            self.open.retain(|(p, _)| p != tmp);
+            let _ = fs::remove_file(tmp);
+        }
+    }
+
+    /// `FlushFileBuffers` on each handle, spread over up to `FLUSH_THREADS`
+    /// (inline when a thread can't be started). Every handle is flushed even
+    /// after a failure; returns the index and error of each that failed.
+    ///
+    /// `fault` (tests only): temps whose name starts with it fail with the code.
+    fn flush_all(open: &[(PathBuf, File)], fault: Fault) -> Vec<(usize, io::Error)> {
+        if open.len() <= 1 {
+            return flush_chunk(0, open, fault);
+        }
+        let per_thread = open.len().div_ceil(FLUSH_THREADS);
+        thread::scope(|s| {
+            let mut errors = Vec::new();
+            let mut workers = Vec::new();
+            for (n, chunk) in open.chunks(per_thread).enumerate() {
+                let first = n * per_thread;
+                let work = move || flush_chunk(first, chunk, fault);
+                match thread::Builder::new().spawn_scoped(s, work) {
+                    Ok(handle) => workers.push((first, chunk.len(), handle)),
+                    Err(_) => errors.extend(flush_chunk(first, chunk, fault)),
+                }
+            }
+            for (first, len, handle) in workers {
+                match handle.join() {
+                    Ok(e) => errors.extend(e),
+                    Err(_) => errors.extend(
+                        (first..first + len)
+                            .map(|i| (i, io::Error::other("a flush thread panicked"))),
+                    ),
+                }
+            }
+            errors.sort_by_key(|(i, _)| *i);
+            errors
+        })
+    }
+
+    /// A test-injected flush failure: temp name prefix and OS error code.
+    type Fault = Option<(&'static str, i32)>;
+
+    fn flush_chunk(
+        first: usize,
+        chunk: &[(PathBuf, File)],
+        fault: Fault,
+    ) -> Vec<(usize, io::Error)> {
+        chunk
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (tmp, f))| {
+                if let Some((prefix, code)) = fault
+                    && name_starts_with(tmp, prefix)
+                {
+                    return Some((first + i, io::Error::from_raw_os_error(code)));
+                }
+                f.sync_all().err().map(|e| (first + i, e))
+            })
+            .collect()
+    }
+
+    fn name_starts_with(tmp: &Path, prefix: &str) -> bool {
+        tmp.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(prefix))
+    }
+
+    /// Test-only write failure (see `hooks::WRITE_ERRNO`).
+    pub fn write_fault(_tmp: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some((prefix, code)) = hooks::WRITE_ERRNO.get()
+            && name_starts_with(_tmp, prefix)
+        {
+            return Err(io::Error::from_raw_os_error(code));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub mod hooks {
+        use std::cell::Cell;
+        thread_local! {
+            /// Batch flushes run by this thread.
+            pub static FLUSHES: Cell<u64> = const { Cell::new(0) };
+            /// Early flushes before a pause (`park`) that had temps to flush.
+            pub static PARKS: Cell<u64> = const { Cell::new(0) };
+            /// Batching is always on here; kept so the tests read the same.
+            pub static FORCE_BATCH: Cell<bool> = const { Cell::new(false) };
+            /// Flushing a temp whose name starts with this fails with the code
+            /// (`""` for every temp).
+            pub static FLUSH_ERRNO: Cell<Option<(&'static str, i32)>> = const { Cell::new(None) };
+            /// Writing a temp whose name starts with this fails with the code.
+            pub static WRITE_ERRNO: Cell<Option<(&'static str, i32)>> = const { Cell::new(None) };
+        }
+    }
+}
+
+/// Durability elsewhere (not built for release): each temp is synced as it is
+/// written and a batch holds one copy.
+#[cfg(not(any(target_os = "linux", windows)))]
 mod durable {
     use super::Durability;
     use std::fs::{self, File};
@@ -897,16 +1152,22 @@ mod durable {
             1
         }
 
-        pub fn sync_temp(&mut self, out: &File) -> io::Result<bool> {
+        pub fn sync_temp(&mut self, _tmp: &Path, out: File) -> io::Result<bool> {
             out.sync_all()?;
             Ok(true)
         }
 
-        pub fn flush(&self) -> io::Result<()> {
+        pub fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
 
-        pub fn remove_temp(&self, _root: &Path, tmp: &Path) {
+        pub fn flushed_despite_error(&self, _tmp: &Path) -> bool {
+            false
+        }
+
+        pub fn park(&mut self) {}
+
+        pub fn remove_temp(&mut self, _root: &Path, tmp: &Path) {
             let _ = fs::remove_file(tmp);
         }
     }
@@ -1454,7 +1715,16 @@ mod apply_tests {
         );
         assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
         assert_eq!(report.results.len(), 1);
-        assert!(no_temp_files(&unplugged));
+        if cfg!(windows) {
+            // Windows removes temps by path, so the moved-away root keeps b's
+            // (the next scan removes it); no real name holds a partial file.
+            let left = read_tree(&unplugged);
+            let real: Vec<_> = left.keys().filter(|k| !k.ends_with(TEMP_SUFFIX)).collect();
+            assert_eq!(real, ["a.txt"], "{left:?}");
+            assert_eq!(left["a.txt"], b"1");
+        } else {
+            assert!(no_temp_files(&unplugged));
+        }
     }
 
     #[test]
@@ -1635,7 +1905,7 @@ mod apply_tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod batch_tests {
     use super::tests::{fixture, no_temp_files, run_all, run_with};
     use super::*;
@@ -1648,11 +1918,22 @@ mod batch_tests {
     /// hook is reset when it drops.
     struct Hooks;
 
+    /// An I/O error and a full disk, as the OS reports them.
+    #[cfg(unix)]
+    const EIO: i32 = libc::EIO;
+    #[cfg(windows)]
+    const EIO: i32 = 1117; // ERROR_IO_DEVICE
+    #[cfg(unix)]
+    const ENOSPC: i32 = libc::ENOSPC;
+    #[cfg(windows)]
+    const ENOSPC: i32 = 112; // ERROR_DISK_FULL
+
     impl Drop for Hooks {
         fn drop(&mut self) {
             hooks::FORCE_BATCH.set(false);
+            #[cfg(target_os = "linux")]
             hooks::OTHER_DEVICE.set(false);
-            hooks::SYNCFS_ERRNO.set(None);
+            hooks::FLUSH_ERRNO.set(None);
             hooks::WRITE_ERRNO.set(None);
             crate::trash::MANIFEST_ERRNO.set(None);
         }
@@ -1843,6 +2124,10 @@ mod batch_tests {
         assert!(no_temp_files(&f.rep));
     }
 
+    // Linux only: on Windows, files open under a folder normally stop the
+    // folder from being renamed, so this way of "unplugging" isn't reliable
+    // there; `replica_disappearing_stops_the_run` covers a moved Windows root.
+    #[cfg(target_os = "linux")]
     #[test]
     fn replica_moved_away_mid_batch_stops_and_removes_its_temps() {
         let (_on, f) = batched();
@@ -1900,6 +2185,7 @@ mod batch_tests {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn batching_only_on_filesystems_whose_syncfs_flushes_the_disk() {
         use durable::{decide, parse_kernel};
@@ -1934,6 +2220,7 @@ mod batch_tests {
         assert_eq!(parse_kernel("bogus"), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_unopenable_root_or_tmpfs_syncs_each_file() {
         let d = tempfile::tempdir().unwrap();
@@ -1949,6 +2236,7 @@ mod batch_tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_run_reports_its_durability_mode() {
         let (_on, f) = batched();
@@ -1962,6 +2250,18 @@ mod batch_tests {
         assert_eq!(run_all(&g).durability, expected);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_runs_always_batch_and_say_how() {
+        let f = fixture();
+        sources(&f, 2);
+        let d = run_all(&f).durability;
+        assert!(d.batched && d.synced_separately == 0, "{d:?}");
+        assert!(d.why.contains("FlushFileBuffers"), "{d:?}");
+        assert_eq!(durable::Replica::open(&f.rep).batch_files(), 256);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn temps_on_another_filesystem_are_synced_one_by_one() {
         let (_on, f) = batched();
@@ -1978,10 +2278,10 @@ mod batch_tests {
     }
 
     #[test]
-    fn a_failed_syncfs_fails_every_copy_in_the_batch() {
+    fn a_failed_flush_fails_every_copy_in_the_batch() {
         let (_on, f) = batched();
         sources(&f, 5);
-        hooks::SYNCFS_ERRNO.set(Some(libc::EIO));
+        hooks::FLUSH_ERRNO.set(Some(("", EIO)));
         let report = run_all(&f);
         assert_eq!(report.stopped, None, "the next batch may still work");
         assert_eq!(report.results.len(), 5);
@@ -1995,6 +2295,186 @@ mod batch_tests {
     }
 
     #[test]
+    fn a_disk_full_during_the_flush_interrupts_the_batch_and_stops() {
+        let (_on, f) = batched();
+        sources(&f, 5);
+        hooks::FLUSH_ERRNO.set(Some(("", ENOSPC)));
+        let report = run_all(&f);
+        assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
+        let interrupted = Outcome::Failed(FailReason::Interrupted);
+        assert_eq!(
+            outcomes(&report),
+            (0..5)
+                .map(|i| (name(i), interrupted.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(read_tree(&f.rep).is_empty(), "no real name, no temp");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replica_lost_during_the_flush_reports_the_batch_interrupted() {
+        let (_on, f) = batched();
+        sources(&f, 5);
+        let plan = plan_for(&f.src, &f.rep);
+        let unplugged = f.rep.with_file_name("rep-unplugged");
+        hooks::FLUSH_ERRNO.set(Some(("", EIO)));
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                // The last temp is written; the drive goes before the flush.
+                if p.bytes_done == p.bytes_total && f.rep.exists() {
+                    fs::rename(&f.rep, &unplugged).unwrap();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
+        let interrupted = Outcome::Failed(FailReason::Interrupted);
+        assert_eq!(
+            outcomes(&report),
+            (0..5)
+                .map(|i| (name(i), interrupted.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            read_tree(&unplugged).is_empty(),
+            "{:?}",
+            read_tree(&unplugged)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_flush_failure_before_a_pause_fails_only_that_copy() {
+        let (_on, f) = batched();
+        sources(&f, 10);
+        hooks::FLUSH_ERRNO.set(Some(("f01", EIO)));
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        let parks = hooks::PARKS.get();
+        let report = std::thread::scope(|s| {
+            let mut paused = false;
+            run_with(
+                &f,
+                &plan,
+                &plan.actionable_ids(),
+                &control,
+                &mut |p: &Progress| {
+                    if !paused
+                        && p.current.as_ref().is_some_and(|c| c.as_str() == name(4))
+                        && p.bytes_done > 0
+                    {
+                        paused = true;
+                        control.pause();
+                        let control = &control;
+                        s.spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            control.resume();
+                        });
+                    }
+                },
+            )
+        });
+        assert_eq!(hooks::PARKS.get() - parks, 1);
+        assert_eq!(report.stopped, None);
+        for (path, outcome) in outcomes(&report) {
+            if path == name(1) {
+                assert!(
+                    matches!(outcome, Outcome::Failed(FailReason::Io { .. })),
+                    "{outcome:?}"
+                );
+            } else {
+                assert_eq!(outcome, Outcome::Applied, "{path}");
+            }
+        }
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_keeps_the_temps_whose_own_flush_worked() {
+        let (_on, f) = batched();
+        sources(&f, 5);
+        hooks::FLUSH_ERRNO.set(Some(("f02", EIO)));
+        let report = run_all(&f);
+        assert_eq!(report.stopped, None);
+        for (path, outcome) in outcomes(&report) {
+            if path == name(2) {
+                assert!(
+                    matches!(outcome, Outcome::Failed(FailReason::Io { .. })),
+                    "{outcome:?}"
+                );
+            } else {
+                assert_eq!(outcome, Outcome::Applied, "{path}");
+            }
+        }
+        assert!(!f.rep.join(name(2)).exists());
+        assert!(no_temp_files(&f.rep));
+
+        // A full disk during the flush keeps the new files that did reach it.
+        let g = fixture();
+        sources(&g, 5);
+        hooks::FLUSH_ERRNO.set(Some(("f02", ENOSPC)));
+        let report = run_all(&g);
+        assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
+        let want: Vec<_> = (0..5)
+            .map(|i| {
+                let o = if i == 2 {
+                    Outcome::Failed(FailReason::Interrupted)
+                } else {
+                    Outcome::Applied
+                };
+                (name(i), o)
+            })
+            .collect();
+        assert_eq!(outcomes(&report), want);
+        assert_eq!(read_tree(&g.rep).len(), 4);
+        assert!(no_temp_files(&g.rep));
+    }
+
+    #[test]
+    fn a_pause_mid_batch_resumes_and_finishes_the_batch() {
+        let (_on, f) = batched();
+        sources(&f, 10);
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        #[cfg(windows)]
+        let parks = hooks::PARKS.get();
+        let report = std::thread::scope(|s| {
+            let mut paused = false;
+            run_with(
+                &f,
+                &plan,
+                &plan.actionable_ids(),
+                &control,
+                &mut |p: &Progress| {
+                    if !paused
+                        && p.current.as_ref().is_some_and(|c| c.as_str() == name(4))
+                        && p.bytes_done > 0
+                    {
+                        paused = true;
+                        control.pause();
+                        let control = &control;
+                        s.spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            control.resume();
+                        });
+                    }
+                },
+            )
+        });
+        // On Windows the waiting temps were flushed and closed before the pause.
+        #[cfg(windows)]
+        assert_eq!(hooks::PARKS.get() - parks, 1);
+        assert_eq!(report.applied(), 10, "{:?}", report.results);
+        assert_eq!(read_tree(&f.rep), read_tree(&f.src));
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[test]
     fn a_full_disk_keeps_new_files_and_leaves_old_versions_in_place() {
         let (_on, f) = batched();
         write_file(&f.src, "a.txt", b"new a", T0);
@@ -2002,7 +2482,7 @@ mod batch_tests {
         write_file(&f.rep, "b.txt", b"old b", T0);
         write_file(&f.src, "c.txt", b"new c", T0);
         write_file(&f.src, "d.txt", b"new d", T0);
-        hooks::WRITE_ERRNO.set(Some(("d.txt", libc::ENOSPC)));
+        hooks::WRITE_ERRNO.set(Some(("d.txt", ENOSPC)));
         let report = run_all(&f);
         assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
         let interrupted = Outcome::Failed(FailReason::Interrupted);
@@ -2028,7 +2508,7 @@ mod batch_tests {
         let (_on, f) = batched();
         write_file(&f.src, "b.txt", b"new b", T0 + 60);
         write_file(&f.rep, "b.txt", b"old b", T0);
-        crate::trash::MANIFEST_ERRNO.set(Some(libc::ENOSPC));
+        crate::trash::MANIFEST_ERRNO.set(Some(ENOSPC));
         let report = run_all(&f);
         assert_eq!(report.stopped, Some(StopReason::ReplicaFull));
         assert_eq!(
