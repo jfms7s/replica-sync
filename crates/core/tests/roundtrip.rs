@@ -220,6 +220,83 @@ fn locked_source_file_fails_with_in_use() {
 }
 
 #[test]
+fn a_user_file_with_the_temp_suffix_goes_to_the_trash_not_away() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "keep.txt", b"k", T0);
+    write_file(&r, "keep.txt", b"k", T0);
+    write_file(&r, "notes.replica-sync.tmp", b"my notes", T0);
+    let prepared = prepare_with(&s, &r, &[]);
+    assert_eq!(
+        fs::read(r.join("notes.replica-sync.tmp")).unwrap(),
+        b"my notes"
+    );
+    let report = apply_all(&s, &r, &prepared);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert!(!r.join("notes.replica-sync.tmp").exists());
+    let trashed: Vec<_> = files(&r, false)
+        .into_iter()
+        .filter(|(k, _)| {
+            k.starts_with(".sync-trash/") && k.ends_with("/files/notes.replica-sync.tmp")
+        })
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(trashed, vec![b"my notes".to_vec()]);
+    assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
+}
+
+#[test]
+fn a_user_file_at_a_copy_temp_name_is_trashed_before_the_copy() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "a.jpg", b"photo", T0);
+    write_file(&r, "a.jpg.replica-sync.tmp", b"mine", T0);
+    let (_, report) = sync_all(&s, &r);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert_eq!(fs::read(r.join("a.jpg")).unwrap(), b"photo");
+    let trashed: Vec<_> = files(&r, false)
+        .into_iter()
+        .filter(|(k, _)| k.ends_with("/files/a.jpg.replica-sync.tmp"))
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(trashed, vec![b"mine".to_vec()]);
+}
+
+#[test]
+fn an_unticked_leftover_at_a_copy_temp_name_is_kept_and_the_copy_fails() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "a.jpg", b"photo", T0);
+    write_file(&r, "a.jpg.replica-sync.tmp", b"mine", T0);
+    let prepared = prepare_with(&s, &r, &[]);
+    let only_copy: std::collections::HashSet<_> = prepared
+        .plan
+        .changes
+        .iter()
+        .filter(|p| matches!(p.change, Change::Create { .. }))
+        .map(|p| p.id)
+        .collect();
+    let replica = replica_sync_core::safety::ReplicaRoot::new(&r).unwrap();
+    let control = replica_sync_core::execute::Control::default();
+    let ctx = replica_sync_core::execute::ExecContext {
+        source_root: &s,
+        replica: &replica,
+        control: &control,
+        trash_stamp: trash::new_run_stamp(),
+    };
+    let report = replica_sync_core::execute::execute(&prepared.plan, &only_copy, &ctx, &mut |_| {});
+    assert!(
+        matches!(
+            report.results[0].outcome,
+            replica_sync_core::execute::Outcome::Failed(
+                replica_sync_core::reason::FailReason::TargetExists
+            )
+        ),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(fs::read(r.join("a.jpg.replica-sync.tmp")).unwrap(), b"mine");
+    assert!(!r.join("a.jpg").exists());
+}
+
+#[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
     write_file(&s, "keep.txt", b"k", T0);

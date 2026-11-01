@@ -467,10 +467,30 @@ impl Run<'_, '_> {
         fs::create_dir_all(dest.parent().expect("never the root"))
             .map_err(|e| io_stop(&e, root))?;
         let tmp = temp_path(&dest);
+        // Something already at the temp name is a leftover the user kept (its
+        // planned Delete, which runs before copies, was unticked) or something
+        // that is not a regular file. Never remove it outside the trash.
+        match fs::symlink_metadata(&tmp) {
+            Ok(_) => return Err(Stop::Fail(FailReason::TargetExists)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_stop(&e, root)),
+        }
+        // Until `create_new` succeeds the temp name is not ours: an error before
+        // that point must not remove whatever is there.
+        let src = File::open(&src_path).map_err(|e| io_stop(&e, root))?;
+        let out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists => Stop::Fail(FailReason::TargetExists),
+                _ => io_stop(&e, root),
+            })?;
         let synced = match write_temp(
             ctx,
             &mut self.disk,
-            &src_path,
+            src,
+            out,
             &tmp,
             &before,
             self.progress,
@@ -626,12 +646,15 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
     }
 }
 
-/// Copies the source into `tmp` and sets its mtime. True when the temp was also
-/// synced on its own (otherwise the batch flush makes it durable).
+/// Copies the source into `out`, the temp just created at `tmp`, and sets its
+/// mtime. True when the temp was also synced on its own (otherwise the batch
+/// flush makes it durable).
+#[allow(clippy::too_many_arguments)]
 fn write_temp(
     ctx: &ExecContext,
     disk: &mut durable::Replica,
-    src_path: &Path,
+    mut src: File,
+    mut out: File,
     tmp: &Path,
     before: &fs::Metadata,
     progress: &mut Progress,
@@ -639,17 +662,6 @@ fn write_temp(
 ) -> Result<bool, Stop> {
     let root = ctx.replica.path();
     let on_io = |e: io::Error| io_stop(&e, root);
-    let mut src = File::open(src_path).map_err(on_io)?;
-    match fs::remove_file(tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(on_io(e)),
-    }
-    let mut out = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-        .map_err(on_io)?;
     durable::write_fault(tmp).map_err(on_io)?;
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -863,8 +875,8 @@ mod durable {
             }
         }
 
-        /// Best effort: a temp that cannot be removed is a leftover the next scan
-        /// deletes.
+        /// Best effort: a temp that cannot be removed is a leftover the next
+        /// preview plans for the trash.
         pub fn remove_temp(&mut self, root: &Path, tmp: &Path) {
             let (Some(dir), Ok(rel)) = (&self.root, tmp.strip_prefix(root)) else {
                 let _ = fs::remove_file(tmp);
@@ -1023,8 +1035,8 @@ mod durable {
             !self.failed.contains(tmp)
         }
 
-        /// Best effort: a temp that cannot be removed is a leftover the next scan
-        /// deletes. Its handle, if still open, is closed first.
+        /// Best effort: a temp that cannot be removed is a leftover the next
+        /// preview plans for the trash. Its handle, if still open, is closed first.
         pub fn remove_temp(&mut self, _root: &Path, tmp: &Path) {
             self.open.retain(|(p, _)| p != tmp);
             let _ = fs::remove_file(tmp);
@@ -1502,7 +1514,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stale_temp_symlink_is_not_followed() {
+    fn stale_temp_symlink_is_neither_followed_nor_removed() {
         let f = fixture();
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim.txt");
@@ -1517,9 +1529,14 @@ mod tests {
             &Control::default(),
             &mut |_| {},
         );
-        assert_eq!(report.applied(), 1);
+        assert_eq!(report.applied(), 0);
+        assert!(matches!(
+            report.results[0].outcome,
+            Outcome::Failed(FailReason::TargetExists)
+        ));
         assert_eq!(fs::read(&victim).unwrap(), b"outside");
-        assert_eq!(fs::read(f.rep.join("a.txt")).unwrap(), b"inside");
+        let tmp = f.rep.join(format!("a.txt{TEMP_SUFFIX}"));
+        assert!(fs::symlink_metadata(&tmp).unwrap().is_symlink());
     }
 }
 
@@ -2040,7 +2057,8 @@ mod batch_tests {
         assert!(!left.is_empty(), "the crash left the batch's temps");
         assert!(left.keys().all(|k| k.ends_with(TEMP_SUFFIX)), "{left:?}");
         let report = run_all(&f);
-        assert_eq!(report.applied(), 10, "{:?}", report.results);
+        // The stranded temps are planned as deletes (to the trash), then the 10 copies.
+        assert_eq!(report.applied(), 10 + left.len(), "{:?}", report.results);
         assert_eq!(read_tree(&f.rep), read_tree(&f.src));
         assert!(no_temp_files(&f.rep));
     }

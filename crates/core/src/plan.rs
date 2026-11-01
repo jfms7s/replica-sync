@@ -2,6 +2,7 @@
 
 use crate::diff::CaseMode;
 use crate::model::{Change, MoveKind, RelPath};
+use crate::rules::TEMP_SUFFIX;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -56,6 +57,12 @@ pub enum PlanError {
     DuplicateTarget(RelPath),
 }
 
+/// A delete of a `*.replica-sync.tmp` file: it runs before any copy, because a
+/// copy writes its temp at that very name.
+fn is_leftover_delete(c: &Change) -> bool {
+    matches!(c, Change::Delete { path, .. } if path.name().ends_with(TEMP_SUFFIX))
+}
+
 fn rank(c: &Change) -> u8 {
     match c {
         Change::Move {
@@ -63,11 +70,12 @@ fn rank(c: &Change) -> u8 {
             ..
         } => 0,
         Change::Move { .. } => 1,
-        Change::MkDir { .. } => 2,
-        Change::Create { .. } | Change::Update { .. } => 3,
-        Change::Delete { .. } => 4,
-        Change::RmDir { .. } => 5,
-        Change::Skipped { .. } => 6,
+        c if is_leftover_delete(c) => 2,
+        Change::MkDir { .. } => 3,
+        Change::Create { .. } | Change::Update { .. } => 4,
+        Change::Delete { .. } => 5,
+        Change::RmDir { .. } => 6,
+        Change::Skipped { .. } => 7,
     }
 }
 
@@ -156,6 +164,7 @@ pub fn first_sync_guard(
         .iter()
         .filter(|p| {
             approved.contains(&p.id)
+                && !is_leftover_delete(&p.change)
                 && matches!(p.change, Change::Delete { .. } | Change::Update { .. })
         })
         .count() as u64;
@@ -298,6 +307,38 @@ mod tests {
         assert_eq!(first_sync_guard(&plan, &all, 12), None);
         assert_eq!(first_sync_guard(&plan, &all, 0), None);
         assert_eq!(first_sync_guard(&plan, &HashSet::new(), 10), None);
+    }
+
+    #[test]
+    fn leftover_deletes_run_before_copies_and_do_not_trip_the_guard() {
+        let plan = build_plan(
+            vec![
+                delete("x"),
+                create("a.jpg", 1),
+                delete("a.jpg.replica-sync.tmp"),
+                delete("b.replica-sync.tmp"),
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let order: Vec<&str> = plan
+            .changes
+            .iter()
+            .map(|p| p.change.path().as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["a.jpg.replica-sync.tmp", "b.replica-sync.tmp", "a.jpg", "x"]
+        );
+        let all = plan.actionable_ids();
+        assert_eq!(first_sync_guard(&plan, &all, 3), None);
+        assert_eq!(
+            first_sync_guard(&plan, &all, 1),
+            Some(GuardWarning {
+                affected: 1,
+                replica_files: 1
+            })
+        );
     }
 
     #[test]

@@ -82,16 +82,26 @@ fn has_children(map: &BTreeMap<String, &Entry>, k: &str) -> bool {
 
 /// Replica folders an RmDir could never empty, because something the plan leaves
 /// alone sits somewhere under them: a path the scan did not list (skip rule or
-/// temp suffix), a leftover temp file, or a blocked key (which covers replica
-/// links and replica problems too). Removing them would fail on every sync.
-fn pinned_folders(replica: &Snapshot, blocks: &Blocks, case: CaseMode) -> HashSet<String> {
+/// temp suffix), a leftover temp file the plan keeps, or a blocked key (which
+/// covers replica links and replica problems too). Removing them would fail on
+/// every sync.
+fn pinned_folders(
+    replica: &Snapshot,
+    kept_leftovers: &[&Entry],
+    blocks: &Blocks,
+    case: CaseMode,
+) -> HashSet<String> {
     let mut pinned = HashSet::new();
     let mut pin_ancestors = |k: &str| {
         for (i, _) in k.match_indices('/') {
             pinned.insert(k[..i].to_owned());
         }
     };
-    for r in replica.unlisted.iter().chain(&replica.leftovers) {
+    for r in replica
+        .unlisted
+        .iter()
+        .chain(kept_leftovers.iter().map(|e| &e.rel))
+    {
         pin_ancestors(&key(r, case));
     }
     for k in blocks.0.keys() {
@@ -149,7 +159,27 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
         }
     }
 
-    let pinned = pinned_folders(replica, &blocks, case);
+    // A replica leftover temp file is planned as an ordinary Delete (so it is
+    // shown and goes to the trash), unless a block covers it or the same name is
+    // on the source; then it is left alone and pins its folder.
+    let src_leftovers: HashSet<String> =
+        source.leftovers.iter().map(|e| key(&e.rel, case)).collect();
+    let (doomed, kept): (Vec<&Entry>, Vec<&Entry>) = replica.leftovers.iter().partition(|e| {
+        let k = key(&e.rel, case);
+        !blocks.covers(&k)
+            && !src.contains_key(&k)
+            && !rep.contains_key(&k)
+            && !src_leftovers.contains(&k)
+    });
+    for e in doomed {
+        out.push(Change::Delete {
+            path: e.rel.clone(),
+            size: e.size,
+            mtime_ns: e.mtime_ns,
+        });
+    }
+
+    let pinned = pinned_folders(replica, &kept, &blocks, case);
     let keys: BTreeSet<&String> = src.keys().chain(rep.keys()).collect();
     for k in keys {
         if blocks.covers(k) {
@@ -479,7 +509,7 @@ mod tests {
             dir("B/x"),
             dir("Free"),
         ]);
-        rep.leftovers.push(rel("L/a.jpg.replica-sync.tmp"));
+        rep.unlisted.push(rel("L/a.jpg.replica-sync.tmp")); // e.g. a folder with the suffix
         rep.problems.push(Problem {
             rel: rel("P/locked.bin"),
             kind: ProblemKind::Unreadable,
@@ -495,5 +525,45 @@ mod tests {
             })
             .collect();
         assert_eq!(rmdirs, vec!["Free"]);
+    }
+
+    fn deletes(out: &[Change]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|c| match c {
+                Change::Delete { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_leftover_is_planned_as_a_delete_and_frees_its_folder() {
+        let mut rep = snap(vec![dir("Trip")]);
+        rep.leftovers
+            .push(file("Trip/b.jpg.replica-sync.tmp", 7, T0));
+        let out = diff(&snap(vec![]), &rep, CaseMode::Sensitive);
+        assert!(out.contains(&Change::Delete {
+            path: rel("Trip/b.jpg.replica-sync.tmp"),
+            size: 7,
+            mtime_ns: ns(T0),
+        }));
+        assert!(out.contains(&Change::RmDir { path: rel("Trip") }));
+    }
+
+    #[test]
+    fn a_blocked_or_source_side_leftover_is_left_alone_and_pins_its_folder() {
+        // S is a link on the source (blocked); O holds a temp-named file on both sides.
+        let mut rep = snap(vec![dir("S"), dir("O")]);
+        rep.leftovers.push(file("S/t.replica-sync.tmp", 1, T0));
+        rep.leftovers.push(file("O/t.replica-sync.tmp", 1, T0));
+        let mut src = snap(vec![link("S")]);
+        src.leftovers.push(file("O/t.replica-sync.tmp", 1, T0));
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert!(deletes(&out).is_empty(), "{out:?}");
+        assert!(
+            !out.iter()
+                .any(|c| matches!(c, Change::RmDir { path } if path.as_str() == "O")),
+            "{out:?}"
+        );
     }
 }

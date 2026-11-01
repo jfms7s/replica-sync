@@ -176,10 +176,12 @@ pub struct Snapshot {
     /// Sorted by `rel`.
     pub entries: Vec<Entry>,
     pub problems: Vec<Problem>,
-    /// `*.replica-sync.tmp` files left by an interrupted run.
-    pub leftovers: Vec<RelPath>,
+    /// Regular files named `*.replica-sync.tmp`: usually left by an interrupted
+    /// run, but possibly a user's own file. Never entries; on the replica the
+    /// diff plans each as an ordinary `Delete` (so it goes to the trash).
+    pub leftovers: Vec<Entry>,
     /// Paths present on disk but not listed as entries because a skip rule or
-    /// the temp suffix matched them (leftovers appear here too). Unsorted.
+    /// the temp suffix matched them (leftovers are not repeated here). Unsorted.
     pub unlisted: Vec<RelPath>,
 }
 

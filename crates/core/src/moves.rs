@@ -150,7 +150,7 @@ fn collapse_folder_moves(
         .iter()
         .map(|p| &p.rel)
         .chain(&replica.unlisted)
-        .chain(&replica.leftovers)
+        .chain(replica.leftovers.iter().map(|e| &e.rel))
         .map(k)
         .collect();
     let has_problem = |x: &RelPath| {
