@@ -245,6 +245,58 @@ fn a_user_file_with_the_temp_suffix_goes_to_the_trash_not_away() {
 }
 
 #[test]
+fn a_user_file_at_a_copy_temp_name_is_trashed_before_the_copy() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "a.jpg", b"photo", T0);
+    write_file(&r, "a.jpg.replica-sync.tmp", b"mine", T0);
+    let (_, report) = sync_all(&s, &r);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert_eq!(fs::read(r.join("a.jpg")).unwrap(), b"photo");
+    let trashed: Vec<_> = files(&r, false)
+        .into_iter()
+        .filter(|(k, _)| k.ends_with("/files/a.jpg.replica-sync.tmp"))
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(trashed, vec![b"mine".to_vec()]);
+}
+
+#[test]
+fn an_unticked_leftover_at_a_copy_temp_name_is_kept_and_the_copy_fails() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "a.jpg", b"photo", T0);
+    write_file(&r, "a.jpg.replica-sync.tmp", b"mine", T0);
+    let prepared = prepare_with(&s, &r, &[]);
+    let only_copy: std::collections::HashSet<_> = prepared
+        .plan
+        .changes
+        .iter()
+        .filter(|p| matches!(p.change, Change::Create { .. }))
+        .map(|p| p.id)
+        .collect();
+    let replica = replica_sync_core::safety::ReplicaRoot::new(&r).unwrap();
+    let control = replica_sync_core::execute::Control::default();
+    let ctx = replica_sync_core::execute::ExecContext {
+        source_root: &s,
+        replica: &replica,
+        control: &control,
+        trash_stamp: trash::new_run_stamp(),
+    };
+    let report = replica_sync_core::execute::execute(&prepared.plan, &only_copy, &ctx, &mut |_| {});
+    assert!(
+        matches!(
+            report.results[0].outcome,
+            replica_sync_core::execute::Outcome::Failed(
+                replica_sync_core::reason::FailReason::TargetExists
+            )
+        ),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(fs::read(r.join("a.jpg.replica-sync.tmp")).unwrap(), b"mine");
+    assert!(!r.join("a.jpg").exists());
+}
+
+#[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
     write_file(&s, "keep.txt", b"k", T0);
