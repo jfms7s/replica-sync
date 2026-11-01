@@ -5,7 +5,7 @@ import { I18nProvider } from '../i18n';
 import type { PreviewSummary } from '../api';
 
 vi.mock('../api', () => ({
-  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
+  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), deleteFolders: vi.fn(), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
   pickSaveFile: vi.fn(),
 }));
 import { api } from '../api';
@@ -16,7 +16,6 @@ const base: PreviewSummary = {
   pairId: 'p1', pairName: 'Photos', totals, selected: totals, selectedCount: 5, actionableCount: 5,
   isEmpty: false, guard: null, guardConfirmed: false, shortfall: null,
   source: { files: 10, bytes: 100, elapsed_ms: 1500 }, replica: { files: 8, bytes: 80, elapsed_ms: 1200 },
-  deleteFolders: ['old'],
 };
 
 describe('Preview', () => {
@@ -101,9 +100,11 @@ describe('Preview', () => {
 
   it('show_them_opens_at_most_50_folders', async () => {
     const many = Array.from({ length: 120 }, (_, i) => `d${String(i).padStart(3, '0')}`);
-    render(<I18nProvider lang="en"><Preview summary={{ ...base, deleteFolders: many }} navigate={vi.fn()} /></I18nProvider>);
+    vi.mocked(api.deleteFolders).mockResolvedValue(many.slice(0, 50));
+    render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole('button', { name: 'Show them' }));
+    expect(api.deleteFolders).toHaveBeenCalledWith(50);
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(51));
     const asked = vi.mocked(api.treeChildren).mock.calls.slice(1).map(([p]) => p);
     expect(asked).toEqual(many.slice(0, 50));

@@ -66,7 +66,6 @@ pub struct PreviewSummary {
     pub shortfall: Option<u64>,
     pub source: ScanStats,
     pub replica: ScanStats,
-    pub delete_folders: Vec<RelPath>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -424,8 +423,20 @@ impl Session {
             shortfall,
             source: c.prepared.source.clone(),
             replica: c.prepared.replica.clone(),
-            delete_folders: c.delete_folders.clone(),
         })
+    }
+
+    /// The first `limit` folders holding a planned delete (every ancestor of
+    /// every `Delete`, sorted), for the Preview's "Show them". Kept out of
+    /// [`PreviewSummary`] so a huge delete is not re-sent on every click.
+    pub fn delete_folders(&self, limit: usize) -> Result<Vec<RelPath>, AppError> {
+        Ok(self
+            .current()?
+            .delete_folders
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     /// A folder's children for the Preview, at most [`CHILDREN_LIMIT`] of them.
@@ -734,6 +745,20 @@ mod tests {
         assert!(run.log_path.as_ref().is_some_and(|p| p.exists()));
         assert!(w.s.pair_views(&w.v)[0].pair.last_sync.is_some());
         assert!(w.scan().is_empty);
+    }
+
+    #[test]
+    fn delete_folders_returns_at_most_the_limit_in_order() {
+        let mut w = world();
+        for i in 0..120 {
+            write(&w.rep(), &format!("d{i:03}/x.txt"), b"x");
+        }
+        w.scan();
+        let got = w.s.delete_folders(50).unwrap();
+        assert_eq!(got.len(), 50);
+        assert_eq!(got[0].as_str(), "d000");
+        assert_eq!(got[49].as_str(), "d049");
+        assert_eq!(w.s.delete_folders(500).unwrap().len(), 120);
     }
 
     #[test]

@@ -190,6 +190,11 @@ pub fn tree_children(state: State<'_, AppState>, path: String) -> Res<ChildrenPa
 }
 
 #[tauri::command]
+pub fn delete_folders(state: State<'_, AppState>, limit: usize) -> Res<Vec<RelPath>> {
+    with_session(&state, |s| s.delete_folders(limit))
+}
+
+#[tauri::command]
 pub fn toggle(state: State<'_, AppState>, path: String) -> Res<PreviewSummary> {
     let p = rel(&path)?;
     with_session(&state, |s| s.toggle(&p))

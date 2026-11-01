@@ -69,7 +69,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
           {s.totals.deletes > 0 && (
             <p className="warn">
               {t('preview.deleteBanner', { count: formatCount(lang, s.totals.deletes) })}{' '}
-              <button className="link" onClick={() => setExpandRequest(s.deleteFolders.slice(0, SHOW_FOLDERS_LIMIT))}>{t('preview.showThem')}</button>
+              <button className="link" onClick={() => { api.deleteFolders(SHOW_FOLDERS_LIMIT).then(setExpandRequest).catch((e) => setMessage(errorText(tx, lang, e))); }}>{t('preview.showThem')}</button>
             </p>
           )}
           {s.shortfall !== null && (
