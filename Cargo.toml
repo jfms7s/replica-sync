@@ -6,4 +6,5 @@ exclude = ["app/src-tauri"]
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
