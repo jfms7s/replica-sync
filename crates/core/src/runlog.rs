@@ -175,10 +175,10 @@ pub fn render_run(
     out
 }
 
-/// How the run made copies durable, e.g. `durability: one flush per batch (btrfs)`.
+/// How the run made copies durable, e.g. `durability: flushed in batches before renaming (btrfs)`.
 pub fn durability_text(d: &Durability) -> String {
     let mut line = if d.batched {
-        format!("durability: one flush per batch ({})", d.why)
+        format!("durability: flushed in batches before renaming ({})", d.why)
     } else {
         format!("durability: one flush per file ({})", d.why)
     };
@@ -301,12 +301,12 @@ mod tests {
         };
         assert_eq!(
             durability_text(&d),
-            "durability: one flush per batch (btrfs)"
+            "durability: flushed in batches before renaming (btrfs)"
         );
         d.synced_separately = 3;
         assert_eq!(
             durability_text(&d),
-            "durability: one flush per batch (btrfs); 3 copies on another filesystem flushed one by one"
+            "durability: flushed in batches before renaming (btrfs); 3 copies on another filesystem flushed one by one"
         );
         let d = Durability {
             batched: false,

@@ -518,6 +518,17 @@ impl Run<'_, '_> {
                     which = Commit::CreatesOnly;
                 }
                 Stop::Fatal(r) => {
+                    // Copies waiting for this flush were cut short: report them.
+                    for item in std::mem::take(&mut self.batch.items) {
+                        match item {
+                            Pending::Written(w) => {
+                                self.disk.remove_temp(root, &w.tmp);
+                                self.interrupted(w.id, &w.rel);
+                            }
+                            Pending::Done(r) => self.finish(r.id, &r.path, r.outcome),
+                        }
+                    }
+                    self.batch.bytes = 0;
                     self.stop(r);
                     return false;
                 }
@@ -994,7 +1005,12 @@ mod durable {
                 return;
             }
             let open = std::mem::take(&mut self.open);
-            let errors = flush_all(&open);
+            // Read here: the hooks are per thread and the flush runs on others.
+            #[cfg(test)]
+            let fault = hooks::FLUSH_ERRNO.get();
+            #[cfg(not(test))]
+            let fault = None;
+            let errors = flush_all(&open, fault);
             self.parked_failed
                 .extend(errors.iter().map(|(i, _)| open[*i].0.clone()));
             if self.parked_error.is_none() {
@@ -1018,17 +1034,22 @@ mod durable {
     /// `FlushFileBuffers` on each handle, spread over up to `FLUSH_THREADS`
     /// (inline when a thread can't be started). Every handle is flushed even
     /// after a failure; returns the index and error of each that failed.
-    fn flush_all(open: &[(PathBuf, File)]) -> Vec<(usize, io::Error)> {
-        let per_thread = open.len().div_ceil(FLUSH_THREADS).max(1);
+    ///
+    /// `fault` (tests only): temps whose name starts with it fail with the code.
+    fn flush_all(open: &[(PathBuf, File)], fault: Fault) -> Vec<(usize, io::Error)> {
+        if open.len() <= 1 {
+            return flush_chunk(0, open, fault);
+        }
+        let per_thread = open.len().div_ceil(FLUSH_THREADS);
         thread::scope(|s| {
             let mut errors = Vec::new();
             let mut workers = Vec::new();
             for (n, chunk) in open.chunks(per_thread).enumerate() {
                 let first = n * per_thread;
-                let work = move || flush_chunk(first, chunk);
+                let work = move || flush_chunk(first, chunk, fault);
                 match thread::Builder::new().spawn_scoped(s, work) {
                     Ok(handle) => workers.push((first, chunk.len(), handle)),
-                    Err(_) => errors.extend(flush_chunk(first, chunk)),
+                    Err(_) => errors.extend(flush_chunk(first, chunk, fault)),
                 }
             }
             for (first, len, handle) in workers {
@@ -1045,14 +1066,20 @@ mod durable {
         })
     }
 
-    fn flush_chunk(first: usize, chunk: &[(PathBuf, File)]) -> Vec<(usize, io::Error)> {
+    /// A test-injected flush failure: temp name prefix and OS error code.
+    type Fault = Option<(&'static str, i32)>;
+
+    fn flush_chunk(
+        first: usize,
+        chunk: &[(PathBuf, File)],
+        fault: Fault,
+    ) -> Vec<(usize, io::Error)> {
         chunk
             .iter()
             .enumerate()
-            .filter_map(|(i, (_tmp, f))| {
-                #[cfg(test)]
-                if let Some((prefix, code)) = hooks::FLUSH_ERRNO.get()
-                    && name_starts_with(_tmp, prefix)
+            .filter_map(|(i, (tmp, f))| {
+                if let Some((prefix, code)) = fault
+                    && name_starts_with(tmp, prefix)
                 {
                     return Some((first + i, io::Error::from_raw_os_error(code)));
                 }
@@ -1061,7 +1088,6 @@ mod durable {
             .collect()
     }
 
-    #[cfg(test)]
     fn name_starts_with(tmp: &Path, prefix: &str) -> bool {
         tmp.file_name()
             .and_then(|n| n.to_str())
@@ -2283,6 +2309,88 @@ mod batch_tests {
                 .collect::<Vec<_>>()
         );
         assert!(read_tree(&f.rep).is_empty(), "no real name, no temp");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replica_lost_during_the_flush_reports_the_batch_interrupted() {
+        let (_on, f) = batched();
+        sources(&f, 5);
+        let plan = plan_for(&f.src, &f.rep);
+        let unplugged = f.rep.with_file_name("rep-unplugged");
+        hooks::FLUSH_ERRNO.set(Some(("", EIO)));
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                // The last temp is written; the drive goes before the flush.
+                if p.bytes_done == p.bytes_total && f.rep.exists() {
+                    fs::rename(&f.rep, &unplugged).unwrap();
+                }
+            },
+        );
+        assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
+        let interrupted = Outcome::Failed(FailReason::Interrupted);
+        assert_eq!(
+            outcomes(&report),
+            (0..5)
+                .map(|i| (name(i), interrupted.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            read_tree(&unplugged).is_empty(),
+            "{:?}",
+            read_tree(&unplugged)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_flush_failure_before_a_pause_fails_only_that_copy() {
+        let (_on, f) = batched();
+        sources(&f, 10);
+        hooks::FLUSH_ERRNO.set(Some(("f01", EIO)));
+        let plan = plan_for(&f.src, &f.rep);
+        let control = Control::default();
+        let parks = hooks::PARKS.get();
+        let report = std::thread::scope(|s| {
+            let mut paused = false;
+            run_with(
+                &f,
+                &plan,
+                &plan.actionable_ids(),
+                &control,
+                &mut |p: &Progress| {
+                    if !paused
+                        && p.current.as_ref().is_some_and(|c| c.as_str() == name(4))
+                        && p.bytes_done > 0
+                    {
+                        paused = true;
+                        control.pause();
+                        let control = &control;
+                        s.spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            control.resume();
+                        });
+                    }
+                },
+            )
+        });
+        assert_eq!(hooks::PARKS.get() - parks, 1);
+        assert_eq!(report.stopped, None);
+        for (path, outcome) in outcomes(&report) {
+            if path == name(1) {
+                assert!(
+                    matches!(outcome, Outcome::Failed(FailReason::Io { .. })),
+                    "{outcome:?}"
+                );
+            } else {
+                assert_eq!(outcome, Outcome::Applied, "{path}");
+            }
+        }
+        assert!(no_temp_files(&f.rep));
     }
 
     #[cfg(windows)]
