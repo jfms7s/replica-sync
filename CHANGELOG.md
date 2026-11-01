@@ -4,7 +4,12 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+## 0.4.1 — 2026-11-01
+
+Supersedes the unpublished 0.4.0 draft and includes all of its changes (below). Like 0.4.0, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
+
 ### Changed
+- Builds use a pinned Rust toolchain (1.98.1, `rust-toolchain.toml`); the minimum supported Rust is declared (1.88, the desktop app 1.90) (#25).
 - The Preview no longer re-sends the list of folders with deletes on every checkbox click; "Show them" fetches the first 50 when clicked. Faster clicks on previews with many deleted folders.
 
 ### Fixed
