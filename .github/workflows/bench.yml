@@ -12,8 +12,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - name: Rust toolchain (pinned in rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p replica-sync-cli
       - name: 1M files, both sides identical (target < 120 s on SSD; runner disks vary)
