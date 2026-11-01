@@ -4,6 +4,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- The Preview no longer re-sends the list of folders with deletes on every checkbox click; "Show them" fetches the first 50 when clicked. Faster clicks on previews with many deleted folders.
+
 ### Fixed
 - A replica holding two names that differ only by capital letters (possible in a case-sensitive NTFS folder or a non-casefold ext4 folder) is now shown as skipped, "two names differ only by capital letters", and nothing changes at that name. Before, one of the two files was silently ignored and its folder could fail to be removed on every run.
 - A folder named `*.replica-sync.tmp` is no longer silently left out of the backup (on the source) or left alone with no explanation (on the replica). It now shows in the Preview as skipped, "uses a name replica-sync reserves for its temporary files", and nothing under it changes. A link with that name is reported as a link.
