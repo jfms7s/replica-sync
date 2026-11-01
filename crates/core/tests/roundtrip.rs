@@ -341,6 +341,48 @@ fn a_replica_link_with_the_temp_suffix_is_kept_and_pins_its_folder() {
     );
 }
 
+/// Spec §9 rule 4: an Update trashes the old file, then renames the finished temp
+/// into place. A crash between the two leaves the old version in `.sync-trash`
+/// and the new one as a temp, with nothing under the real name. One sync recovers.
+#[test]
+fn crash_between_trash_and_rename_converges() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "x.txt", b"new version", T0 + 100);
+    // The state the crash leaves: old x.txt trashed (with its manifest line)...
+    write_file(&r, "x.txt", b"old", T0);
+    let mut writer = trash::TrashWriter::new(&r, trash::new_run_stamp());
+    writer
+        .move_in(
+            &RelPath::new("x.txt").unwrap(),
+            3,
+            T0 * 1_000_000_000,
+            trash::TrashReason::Replaced,
+        )
+        .unwrap();
+    let crashed_run = writer.run_id().unwrap().to_owned();
+    drop(writer);
+    // ...and the finished temp not yet renamed.
+    write_file(&r, "x.txt.replica-sync.tmp", b"new version", T0 + 100);
+    assert!(!r.join("x.txt").exists());
+
+    let (_, report) = sync_all(&s, &r);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert_eq!(fs::read(r.join("x.txt")).unwrap(), b"new version");
+    let kept = files(&r, false);
+    let old_in_trash = format!(".sync-trash/{crashed_run}/files/x.txt");
+    assert_eq!(
+        kept.get(&old_in_trash).map(Vec::as_slice),
+        Some(&b"old"[..])
+    );
+    assert!(
+        files(&r, true)
+            .keys()
+            .all(|k| !k.ends_with(".replica-sync.tmp")),
+        "{kept:?}"
+    );
+    assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
+}
+
 #[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
