@@ -39,6 +39,7 @@
     "skip.alreadyGone",
     "skip.noLongerInReplica",
     "skip.folderNotEmpty",
+    "skip.reservedName",
     "fail.inUse",
     "fail.permissionDenied",
     "fail.changedDuringCopy",

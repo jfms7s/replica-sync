@@ -18,6 +18,7 @@ pub enum SkipReason {
     AlreadyGone,
     NoLongerInReplica,
     FolderNotEmpty,
+    ReservedName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -58,6 +59,7 @@ impl SkipReason {
             SkipReason::AlreadyGone => "alreadyGone",
             SkipReason::NoLongerInReplica => "noLongerInReplica",
             SkipReason::FolderNotEmpty => "folderNotEmpty",
+            SkipReason::ReservedName => "reservedName",
         }
     }
 }
@@ -107,6 +109,7 @@ fn all_skip() -> Vec<SkipReason> {
         SkipReason::AlreadyGone,
         SkipReason::NoLongerInReplica,
         SkipReason::FolderNotEmpty,
+        SkipReason::ReservedName,
     ]
 }
 
@@ -163,9 +166,10 @@ mod tests {
             SkipReason::AlreadyGone => 8,
             SkipReason::NoLongerInReplica => 9,
             SkipReason::FolderNotEmpty => 10,
+            SkipReason::ReservedName => 11,
         }
     }
-    const SKIP_VARIANTS: usize = 11;
+    const SKIP_VARIANTS: usize = 12;
 
     fn fail_sample_index(r: &FailReason) -> usize {
         match r {
@@ -236,7 +240,7 @@ mod tests {
     #[test]
     fn reason_codes_list_every_code_once_with_its_family() {
         let codes = reason_codes();
-        assert_eq!(codes.len(), 11 + 7 + 4);
+        assert_eq!(codes.len(), 12 + 7 + 4);
         assert!(codes.contains(&"skip.changedSincePreview".to_string()));
         assert!(codes.contains(&"fail.interrupted".to_string()));
         assert!(codes.contains(&"stop.sourceDisconnected".to_string()));

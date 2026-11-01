@@ -141,6 +141,7 @@
   "reason.skip.fileVsFolder": "a file on one side and a folder on the other",
   "reason.skip.caseCollision": "two names differ only by capital letters; the backup drive can't hold both",
   "reason.skip.notRegularFile": "not a regular file",
+  "reason.skip.reservedName": "uses a name replica-sync reserves for its temporary files",
   "reason.skip.unreadable": "couldn't read it: {detail}",
   "reason.skip.deletedSinceScan": "deleted since the scan",
   "reason.skip.changedSincePreview": "changed since the preview",

@@ -35,6 +35,9 @@ pub fn skip_text(r: &SkipReason) -> String {
             "two names differ only by capital letters; the backup drive can't hold both".into()
         }
         SkipReason::NotRegularFile => "not a regular file".into(),
+        SkipReason::ReservedName => {
+            "uses a name replica-sync reserves for its temporary files".into()
+        }
         SkipReason::Unreadable {
             side: SideKind::Source,
             detail,

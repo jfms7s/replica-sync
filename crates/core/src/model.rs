@@ -168,6 +168,9 @@ pub enum SideKind {
 pub enum ProblemKind {
     Unreadable,
     NotRegularFile,
+    /// A folder (or other non-file) named `*.replica-sync.tmp`, a name the app
+    /// reserves for its temp files. Never descended into.
+    ReservedName,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -130,7 +130,8 @@ fn walk<'s>(
         }
         if rel.name().ends_with(TEMP_SUFFIX) {
             // `DirEntry::metadata` does not follow links. Only a regular file is
-            // a leftover; anything else with the suffix stays hidden.
+            // a leftover; a link is listed as a link like any other; a
+            // folder is shown as skipped and never descended into.
             match entry.metadata() {
                 Ok(md) if md.is_file() => leftovers.push(Entry {
                     rel,
@@ -138,7 +139,27 @@ fn walk<'s>(
                     size: md.len(),
                     mtime_ns: modified_ns(&md),
                 }),
-                _ => unlisted.push(rel),
+                Ok(md) if md.is_symlink() => entries.push(Entry {
+                    rel,
+                    kind: Kind::Link,
+                    size: 0,
+                    mtime_ns: 0,
+                }),
+                Ok(md) if md.is_dir() => problems.push(Problem {
+                    rel,
+                    kind: ProblemKind::ReservedName,
+                    detail: String::new(),
+                }),
+                Ok(_) => problems.push(Problem {
+                    rel,
+                    kind: ProblemKind::NotRegularFile,
+                    detail: String::new(),
+                }),
+                Err(e) => problems.push(Problem {
+                    rel,
+                    kind: ProblemKind::Unreadable,
+                    detail: e.to_string(),
+                }),
             }
             continue;
         }
@@ -257,6 +278,29 @@ mod tests {
         let mut unlisted: Vec<_> = s.unlisted.iter().map(|r| r.as_str()).collect();
         unlisted.sort();
         assert_eq!(unlisted, vec!["Temp", "Thumbs.db"]);
+    }
+
+    #[test]
+    fn a_folder_with_the_temp_suffix_is_a_reserved_name_problem() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "old.replica-sync.tmp/a.txt", b"a", T0);
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        assert_eq!(s.problems.len(), 1, "{:?}", s.problems);
+        assert_eq!(s.problems[0].rel.as_str(), "old.replica-sync.tmp");
+        assert_eq!(s.problems[0].kind, ProblemKind::ReservedName);
+        assert!(s.leftovers.is_empty() && s.unlisted.is_empty());
+        assert!(s.entries.is_empty(), "{:?}", s.entries);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_with_the_temp_suffix_is_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/nowhere", d.path().join("x.replica-sync.tmp")).unwrap();
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        assert_eq!(s.entries.len(), 1);
+        assert_eq!(s.entries[0].kind, Kind::Link);
+        assert!(s.leftovers.is_empty() && s.unlisted.is_empty() && s.problems.is_empty());
     }
 
     #[test]

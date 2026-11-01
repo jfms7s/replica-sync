@@ -141,6 +141,7 @@
   "reason.skip.fileVsFolder": "um ficheiro de um lado e uma pasta do outro",
   "reason.skip.caseCollision": "dois nomes só diferem em maiúsculas; o disco da cópia não consegue guardar os dois",
   "reason.skip.notRegularFile": "não é um ficheiro normal",
+  "reason.skip.reservedName": "usa um nome que o replica-sync reserva para ficheiros temporários",
   "reason.skip.unreadable": "não foi possível ler: {detail}",
   "reason.skip.deletedSinceScan": "apagado depois da análise",
   "reason.skip.changedSincePreview": "alterado depois da pré-visualização",
