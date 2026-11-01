@@ -116,8 +116,9 @@ pub struct Durability {
     pub batched: bool,
     /// The replica's filesystem when batched, otherwise why not.
     pub why: String,
-    /// Batched-run copies on another filesystem than the replica root (a mount
-    /// inside it), each synced on its own.
+    /// Batched-run copies on another device than the replica root (a mount or a
+    /// btrfs subvolume inside it, which reports its own `st_dev`), each synced
+    /// on its own.
     pub synced_separately: usize,
 }
 
@@ -2535,13 +2536,9 @@ mod batch_tests {
         );
         assert_eq!(fs::read(f.rep.join("b.txt")).unwrap(), b"old b");
         assert!(no_temp_files(&f.rep));
-        let run = report.trash_run.unwrap();
-        assert!(
-            crate::trash::run_contents(&f.rep, &run)
-                .unwrap()
-                .items
-                .is_empty()
-        );
+        // The rolled-back move opened the run, so no empty run is left behind.
+        assert!(report.trash_run.is_none(), "{:?}", report.trash_run);
+        assert!(crate::trash::list_runs(&f.rep).unwrap().is_empty());
     }
 
     #[test]

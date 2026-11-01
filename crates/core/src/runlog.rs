@@ -187,7 +187,7 @@ pub fn durability_text(d: &Durability) -> String {
     };
     if d.synced_separately > 0 {
         line += &format!(
-            "; {} copies on another filesystem flushed one by one",
+            "; {} copies on another device (a mount or btrfs subvolume inside the replica) flushed one by one",
             d.synced_separately
         );
     }
@@ -309,7 +309,7 @@ mod tests {
         d.synced_separately = 3;
         assert_eq!(
             durability_text(&d),
-            "durability: flushed in batches before renaming (btrfs); 3 copies on another filesystem flushed one by one"
+            "durability: flushed in batches before renaming (btrfs); 3 copies on another device (a mount or btrfs subvolume inside the replica) flushed one by one"
         );
         let d = Durability {
             batched: false,

@@ -6,7 +6,7 @@ use crate::safety::{ReplicaRoot, SafetyError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const TRASH_DIR: &str = ".sync-trash";
@@ -81,10 +81,35 @@ impl TrashWriter {
         mtime_ns: i64,
         reason: TrashReason,
     ) -> io::Result<()> {
-        if self.run.is_none() {
+        let opened_here = self.run.is_none();
+        if opened_here {
             self.run = Some(self.open_run()?);
         }
-        let (_, run_dir, manifest) = self.run.as_mut().expect("opened above");
+        let result = self.move_in_open(rel, size, mtime_ns, reason);
+        if result.is_err() && opened_here {
+            // The run this call opened holds nothing: drop it, so no empty run is
+            // listed. (A file whose rename-back failed keeps it.)
+            let (id, run_dir, manifest) = self.run.take().expect("opened above");
+            drop(manifest);
+            tidy_run(&run_dir);
+            if run_dir.exists()
+                && let Ok(manifest) = open_manifest(&run_dir.join(MANIFEST))
+            {
+                self.run = Some((id, run_dir, manifest));
+            }
+        }
+        result
+    }
+
+    fn move_in_open(
+        &mut self,
+        rel: &RelPath,
+        size: u64,
+        mtime_ns: i64,
+        reason: TrashReason,
+    ) -> io::Result<()> {
+        let (_, run_dir, manifest) = self.run.as_mut().expect("opened by move_in");
+        let manifest_path = run_dir.join(MANIFEST);
         let dest = rel.to_path(&run_dir.join(FILES_DIR));
         fs::create_dir_all(dest.parent().expect("a trashed path is never the root"))?;
         if fs::symlink_metadata(&dest).is_ok() {
@@ -103,16 +128,10 @@ impl TrashWriter {
         let recorded = manifest.metadata()?.len();
         let from = rel.to_path(&self.replica_root);
         fs::rename(&from, &dest)?;
-        if let Err(e) = append_line(manifest, &line) {
+        if let Err(e) = append_line(manifest, &manifest_path, &line) {
             // Undo, so a full or failing disk never leaves a trashed file the
             // manifest does not list (or a torn line that hides later ones).
-            if manifest.set_len(recorded).is_err() {
-                // (Windows append handles cannot truncate.) End the torn line so
-                // the next one still parses; replay skips the torn one.
-                let _ = manifest.write_all(b"\n");
-            }
-            let _ = fs::rename(&dest, &from);
-            return Err(e);
+            return Err(undo_move(&manifest_path, recorded, &dest, &from, e));
         }
         Ok(())
     }
@@ -126,10 +145,7 @@ impl TrashWriter {
             let dir = base.join(&id);
             match fs::create_dir(&dir) {
                 Ok(()) => {
-                    let manifest = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(dir.join(MANIFEST))?;
+                    let manifest = open_manifest(&dir.join(MANIFEST))?;
                     return Ok((id, dir, manifest));
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -149,14 +165,137 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-fn append_line(manifest: &mut File, line: &str) -> io::Result<()> {
+#[cfg(test)]
+thread_local! {
+    /// Runs on the original path just before a failed move is rolled back (tests).
+    pub(crate) static BEFORE_ROLLBACK: std::cell::Cell<Option<fn(&Path)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// An append handle: each line is one `write`, which `O_APPEND` (and
+/// `FILE_APPEND_DATA`) keeps whole even with another writer on the same run.
+fn open_manifest(path: &Path) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+/// Undoes a rename whose manifest line failed: truncates the manifest back to
+/// `recorded` and renames `dest` back to `from`, never over something that
+/// appeared at `from` in the meantime. Returns the error to report.
+fn undo_move(
+    manifest_path: &Path,
+    recorded: u64,
+    dest: &Path,
+    from: &Path,
+    e: io::Error,
+) -> io::Error {
+    // A separate, non-append handle: a Windows append handle cannot truncate.
+    let _ = OpenOptions::new()
+        .write(true)
+        .open(manifest_path)
+        .and_then(|m| m.set_len(recorded));
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_ROLLBACK.get() {
+        hook(from);
+    }
+    match rename_noreplace(dest, from) {
+        Ok(()) => e,
+        Err(back) => io::Error::new(
+            e.kind(),
+            format!(
+                "{e}; and {} could not be moved back to {} ({back}), so it stays at {}",
+                dest.display(),
+                from.display(),
+                dest.display()
+            ),
+        ),
+    }
+}
+
+/// `rename` that fails with `AlreadyExists` instead of replacing `to`.
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| {
+            CString::new(p.as_os_str().as_bytes())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        };
+        let (f, t) = (c(from)?, c(to)?);
+        // SAFETY: both paths are NUL-terminated and outlive the call.
+        let r = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if r == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            // The filesystem (e.g. some FUSE drivers) has no no-replace rename.
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP) => {}
+            _ => return Err(err),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let w = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+        let (f, t) = (w(from), w(to));
+        // SAFETY: both names are NUL-terminated and outlive the call. Without
+        // MOVEFILE_REPLACE_EXISTING the move fails when `to` exists.
+        if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), 0) } != 0 {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error())
+    }
+    #[cfg(not(windows))]
+    {
+        // Best effort where the kernel can't do it atomically.
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists", to.display()),
+            ));
+        }
+        fs::rename(from, to)
+    }
+}
+
+/// Whether the manifest's last byte ends a line (an empty manifest does).
+fn ends_with_newline(path: &Path) -> io::Result<bool> {
+    let mut f = File::open(path)?;
+    if f.seek(SeekFrom::End(0))? == 0 {
+        return Ok(true);
+    }
+    f.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8];
+    f.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
+}
+
+fn append_line(manifest: &mut File, path: &Path, line: &str) -> io::Result<()> {
+    // End a torn last line (a crash mid-write) so this one is not glued onto
+    // it, in the same single write as the line itself.
+    let mut buf = String::with_capacity(line.len() + 2);
+    if !ends_with_newline(path)? {
+        buf.push('\n');
+    }
+    buf.push_str(line);
+    buf.push('\n');
     #[cfg(test)]
     if let Some(errno) = MANIFEST_ERRNO.get() {
         // Like a disk that fills up mid-line: part of it lands, then the error.
-        let _ = manifest.write_all(&line.as_bytes()[..line.len() / 2]);
+        let _ = manifest.write_all(&buf.as_bytes()[..buf.len() / 2]);
         return Err(io::Error::from_raw_os_error(errno));
     }
-    writeln!(manifest, "{line}")?;
+    manifest.write_all(buf.as_bytes())?;
     manifest.sync_data()
 }
 
@@ -451,10 +590,7 @@ pub fn restore(
         let md = fs::symlink_metadata(&targets[i])?;
         displaced.move_in(&paths[i], md.len(), modified_ns(&md), TrashReason::Replaced)?;
     }
-    let mut manifest = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&manifest_path)?;
+    let mut manifest = open_manifest(&manifest_path)?;
     // Defence in depth: every source must still resolve inside this run's own
     // `files` folder (a link planted below it would otherwise be followed).
     let files_root = fs::canonicalize(&files)?;
@@ -469,15 +605,17 @@ pub fn restore(
             .into());
         }
         fs::create_dir_all(target.parent().expect("never the root"))?;
-        // NOTE: fs::rename replaces a file created after the conflict check above;
-        // a no-replace rename is deferred.
-        fs::rename(&source, target)?;
         let line = serde_json::to_string(&ManifestLine::Restored {
             restored: p.clone(),
         })
         .map_err(io::Error::other)?;
-        writeln!(manifest, "{line}")?;
-        manifest.sync_data()?;
+        // Never over a file created after the conflict check above.
+        let recorded = manifest.metadata()?.len();
+        rename_noreplace(&source, target)?;
+        if let Err(e) = append_line(&mut manifest, &manifest_path, &line) {
+            // Same as `move_in`: no restored file the manifest still lists as trashed.
+            return Err(undo_move(&manifest_path, recorded, target, &source, e).into());
+        }
     }
     drop(manifest);
     tidy_run(&run);
@@ -562,9 +700,7 @@ mod tests {
         assert_eq!(err.unwrap_err().raw_os_error(), Some(28));
         assert_eq!(fs::read(d.path().join("a/x.txt")).unwrap(), b"abc");
         assert!(!run.join(FILES_DIR).join("a").join("x.txt").exists());
-        #[cfg(unix)]
         assert_eq!(fs::read(run.join(MANIFEST)).unwrap(), manifest_before);
-        let _ = manifest_before;
         let listed = |w: &TrashWriter| -> Vec<RelPath> {
             run_contents(d.path(), w.run_id().unwrap())
                 .unwrap()
@@ -714,6 +850,113 @@ mod tests {
         let mut text = fs::read_to_string(&m).unwrap();
         text.push_str("{\"path\":\"y.t");
         fs::write(&m, text).unwrap();
+        assert_eq!(run_contents(d.path(), STAMP).unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn an_append_after_a_torn_manifest_line_is_not_glued_onto_it() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a.txt", b"abc", T0);
+        write_file(d.path(), "b.txt", b"abc", T0);
+        let mut w = trash_one(d.path(), "a.txt", TrashReason::Deleted);
+        let m = d.path().join(TRASH_DIR).join(STAMP).join(MANIFEST);
+        let mut f = OpenOptions::new().append(true).open(&m).unwrap();
+        f.write_all(b"{\"path\":\"to").unwrap(); // a crash mid-line
+        drop(f);
+        w.move_in(&rel("b.txt"), 3, ns(T0), TrashReason::Deleted)
+            .unwrap();
+        let items: Vec<String> = run_contents(d.path(), STAMP)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.path.as_str().to_owned())
+            .collect();
+        assert_eq!(items, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_rolled_back_first_move_leaves_no_empty_run() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a/x.txt", b"abc", T0);
+        let mut w = TrashWriter::new(d.path(), STAMP.into());
+        MANIFEST_ERRNO.set(Some(28));
+        let err = w.move_in(&rel("a/x.txt"), 3, ns(T0), TrashReason::Deleted);
+        MANIFEST_ERRNO.set(None);
+        assert!(err.is_err());
+        assert_eq!(fs::read(d.path().join("a/x.txt")).unwrap(), b"abc");
+        assert!(w.run_id().is_none());
+        assert!(!d.path().join(TRASH_DIR).join(STAMP).exists());
+        assert!(list_runs(d.path()).unwrap().is_empty());
+        w.move_in(&rel("a/x.txt"), 3, ns(T0), TrashReason::Deleted)
+            .unwrap();
+        assert_eq!(w.run_id(), Some(STAMP));
+    }
+
+    #[test]
+    fn a_failed_first_rename_leaves_no_empty_run() {
+        let d = tempfile::tempdir().unwrap();
+        let mut w = TrashWriter::new(d.path(), STAMP.into());
+        // Nothing at a/missing.txt: the rename into the run fails.
+        assert!(
+            w.move_in(&rel("a/missing.txt"), 3, ns(T0), TrashReason::Deleted)
+                .is_err()
+        );
+        assert!(w.run_id().is_none());
+        assert!(list_runs(d.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rollback_never_overwrites_a_file_that_appeared_at_the_old_path() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a.txt", b"one", T0);
+        write_file(d.path(), "x.txt", b"old", T0);
+        let mut w = trash_one(d.path(), "a.txt", TrashReason::Deleted);
+        MANIFEST_ERRNO.set(Some(28));
+        BEFORE_ROLLBACK.set(Some(|from: &Path| fs::write(from, b"newcomer").unwrap()));
+        let err = w.move_in(&rel("x.txt"), 3, ns(T0), TrashReason::Replaced);
+        MANIFEST_ERRNO.set(None);
+        BEFORE_ROLLBACK.set(None);
+        assert!(err.is_err());
+        assert_eq!(fs::read(d.path().join("x.txt")).unwrap(), b"newcomer");
+        let kept = d
+            .path()
+            .join(TRASH_DIR)
+            .join(STAMP)
+            .join(FILES_DIR)
+            .join("x.txt");
+        assert_eq!(fs::read(kept).unwrap(), b"old");
+    }
+
+    #[test]
+    fn rename_noreplace_refuses_an_existing_target() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("a"), b"a").unwrap();
+        fs::write(d.path().join("b"), b"b").unwrap();
+        let err = rename_noreplace(&d.path().join("a"), &d.path().join("b")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(d.path().join("a")).unwrap(), b"a");
+        assert_eq!(fs::read(d.path().join("b")).unwrap(), b"b");
+        rename_noreplace(&d.path().join("a"), &d.path().join("c")).unwrap();
+        assert_eq!(fs::read(d.path().join("c")).unwrap(), b"a");
+    }
+
+    #[test]
+    fn a_failed_restore_line_puts_the_file_back_in_the_run() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a/x.txt", b"abc", T0);
+        trash_one(d.path(), "a/x.txt", TrashReason::Deleted);
+        let run = d.path().join(TRASH_DIR).join(STAMP);
+        let manifest_before = fs::read(run.join(MANIFEST)).unwrap();
+        MANIFEST_ERRNO.set(Some(28));
+        let err = restore(d.path(), STAMP, &[rel("a/x.txt")], OnConflict::Refuse);
+        MANIFEST_ERRNO.set(None);
+        assert!(err.is_err());
+        assert!(!d.path().join("a/x.txt").exists());
+        assert_eq!(
+            fs::read(run.join(FILES_DIR).join("a").join("x.txt")).unwrap(),
+            b"abc"
+        );
+        assert_eq!(fs::read(run.join(MANIFEST)).unwrap(), manifest_before);
         assert_eq!(run_contents(d.path(), STAMP).unwrap().items.len(), 1);
     }
 
