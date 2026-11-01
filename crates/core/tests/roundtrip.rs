@@ -297,6 +297,36 @@ fn an_unticked_leftover_at_a_copy_temp_name_is_kept_and_the_copy_fails() {
 }
 
 #[test]
+fn a_source_folder_with_the_temp_suffix_is_reported_not_silently_left_out() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "Docs/old.replica-sync.tmp/a.txt", b"a", T0);
+    write_file(&r, "Gone/d.replica-sync.tmp/b.txt", b"b", T0);
+    let (prepared, report) = sync_all(&s, &r);
+    let skipped: Vec<_> = prepared
+        .plan
+        .changes
+        .iter()
+        .filter_map(|p| match &p.change {
+            Change::Skipped { path, reason } => Some((path.as_str().to_owned(), reason.code())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![
+            ("Docs/old.replica-sync.tmp".to_owned(), "reservedName"),
+            ("Gone/d.replica-sync.tmp".to_owned(), "reservedName"),
+        ]
+    );
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert_eq!(
+        fs::read(r.join("Gone/d.replica-sync.tmp/b.txt")).unwrap(),
+        b"b"
+    );
+    assert!(!r.join("Docs/old.replica-sync.tmp").exists());
+}
+
+#[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
     write_file(&s, "keep.txt", b"k", T0);

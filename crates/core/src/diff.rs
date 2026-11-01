@@ -46,6 +46,7 @@ fn index<'a>(
 fn problem_reason(p: &Problem, side: SideKind) -> SkipReason {
     match p.kind {
         ProblemKind::NotRegularFile => SkipReason::NotRegularFile,
+        ProblemKind::ReservedName => SkipReason::ReservedName,
         ProblemKind::Unreadable => SkipReason::Unreadable {
             side,
             detail: p.detail.clone(),
@@ -534,6 +535,33 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_reserved_name_folder_is_skipped_and_nothing_under_it_changes() {
+        let reserved = |p: &str| Problem {
+            rel: rel(p),
+            kind: ProblemKind::ReservedName,
+            detail: String::new(),
+        };
+        let mut src = snap(vec![dir("Docs")]);
+        src.problems.push(reserved("Docs/old.replica-sync.tmp"));
+        let mut rep = snap(vec![dir("Gone")]);
+        rep.problems.push(reserved("Gone/d.replica-sync.tmp"));
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert!(out.contains(&Change::Skipped {
+            path: rel("Docs/old.replica-sync.tmp"),
+            reason: SkipReason::ReservedName,
+        }));
+        assert!(out.contains(&Change::Skipped {
+            path: rel("Gone/d.replica-sync.tmp"),
+            reason: SkipReason::ReservedName,
+        }));
+        assert!(
+            !out.iter()
+                .any(|c| matches!(c, Change::RmDir { .. } | Change::Delete { .. })),
+            "{out:?}"
+        );
     }
 
     #[test]
