@@ -220,6 +220,31 @@ fn locked_source_file_fails_with_in_use() {
 }
 
 #[test]
+fn a_user_file_with_the_temp_suffix_goes_to_the_trash_not_away() {
+    let (_d, s, r) = dirs();
+    write_file(&s, "keep.txt", b"k", T0);
+    write_file(&r, "keep.txt", b"k", T0);
+    write_file(&r, "notes.replica-sync.tmp", b"my notes", T0);
+    let prepared = prepare_with(&s, &r, &[]);
+    assert_eq!(
+        fs::read(r.join("notes.replica-sync.tmp")).unwrap(),
+        b"my notes"
+    );
+    let report = apply_all(&s, &r, &prepared);
+    assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert!(!r.join("notes.replica-sync.tmp").exists());
+    let trashed: Vec<_> = files(&r, false)
+        .into_iter()
+        .filter(|(k, _)| {
+            k.starts_with(".sync-trash/") && k.ends_with("/files/notes.replica-sync.tmp")
+        })
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(trashed, vec![b"my notes".to_vec()]);
+    assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
+}
+
+#[test]
 fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     let (_d, s, r) = dirs();
     write_file(&s, "keep.txt", b"k", T0);

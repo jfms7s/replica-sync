@@ -48,7 +48,7 @@ pub enum ScanError {
 struct Collected {
     entries: Mutex<Vec<Entry>>,
     problems: Mutex<Vec<Problem>>,
-    leftovers: Mutex<Vec<RelPath>>,
+    leftovers: Mutex<Vec<Entry>>,
     unlisted: Mutex<Vec<RelPath>>,
 }
 
@@ -129,8 +129,17 @@ fn walk<'s>(
             continue;
         }
         if rel.name().ends_with(TEMP_SUFFIX) {
-            unlisted.push(rel.clone());
-            leftovers.push(rel);
+            // `DirEntry::metadata` does not follow links. Only a regular file is
+            // a leftover; anything else with the suffix stays hidden.
+            match entry.metadata() {
+                Ok(md) if md.is_file() => leftovers.push(Entry {
+                    rel,
+                    kind: Kind::File,
+                    size: md.len(),
+                    mtime_ns: modified_ns(&md),
+                }),
+                _ => unlisted.push(rel),
+            }
             continue;
         }
         let file_type = match entry.file_type() {
@@ -256,10 +265,13 @@ mod tests {
         write_file(d.path(), "a/x.jpg.replica-sync.tmp", b"partial", T0);
         let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
         assert_eq!(
-            s.leftovers.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
-            vec!["a/x.jpg.replica-sync.tmp"]
+            s.leftovers
+                .iter()
+                .map(|e| (e.rel.as_str(), e.size, e.mtime_ns))
+                .collect::<Vec<_>>(),
+            vec![("a/x.jpg.replica-sync.tmp", 7, ns(T0))]
         );
-        assert_eq!(s.unlisted, s.leftovers);
+        assert!(s.unlisted.is_empty(), "{:?}", s.unlisted);
         assert!(
             s.entries
                 .iter()

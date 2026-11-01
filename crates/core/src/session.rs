@@ -37,7 +37,6 @@ pub struct Prepared {
     pub source: ScanStats,
     pub replica: ScanStats,
     pub replica_files: u64,
-    pub leftovers_removed: usize,
     pub elapsed_ms: u64,
 }
 
@@ -102,25 +101,15 @@ pub fn prepare(
         || timed(replica_root, &counters.replica),
     );
     let (src, src_t) = src.map_err(PrepareError::Source)?;
-    let (mut rep, rep_t) = rep.map_err(PrepareError::Replica)?;
-    // Temp files from an interrupted run: never user data, safe to delete.
-    // Only leftovers that could not be removed still pin their folder.
-    let removed: std::collections::HashSet<_> = rep
-        .leftovers
-        .iter()
-        .filter(|r| fs::remove_file(r.to_path(replica_root)).is_ok())
-        .cloned()
-        .collect();
-    let leftovers_removed = removed.len();
-    rep.leftovers.retain(|r| !removed.contains(r));
-    rep.unlisted.retain(|r| !removed.contains(r));
+    let (rep, rep_t) = rep.map_err(PrepareError::Replica)?;
+    // Nothing is written here (spec §5.1): leftover temp files are planned by
+    // `diff` as ordinary deletes, so they are shown and trashed on Apply (§9.5).
     let plan = build_plan(detect_moves(diff(&src, &rep, case), &src, &rep, case), case)?;
     Ok(Prepared {
         plan,
         source: stats(&src, src_t),
         replica: stats(&rep, rep_t),
         replica_files: rep.file_count(),
-        leftovers_removed,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -131,11 +120,12 @@ mod tests {
     use crate::testutil::{T0, write_file};
 
     #[test]
-    fn prepare_plans_and_removes_leftover_temp_files() {
+    fn prepare_plans_leftover_temp_files_as_deletes_and_writes_nothing() {
         let d = tempfile::tempdir().unwrap();
         let (s, r) = (d.path().join("s"), d.path().join("r"));
         write_file(&s, "a.txt", b"1", T0);
         write_file(&r, "b.jpg.replica-sync.tmp", b"partial", T0);
+        write_file(&r, "Docs/notes.replica-sync.tmp", b"user notes", T0);
         let p = prepare(
             &s,
             &r,
@@ -144,9 +134,34 @@ mod tests {
             &SessionCounters::default(),
         )
         .unwrap();
+        assert_eq!(
+            fs::read(r.join("b.jpg.replica-sync.tmp")).unwrap(),
+            b"partial"
+        );
+        assert_eq!(
+            fs::read(r.join("Docs/notes.replica-sync.tmp")).unwrap(),
+            b"user notes"
+        );
+        let deletes: Vec<_> = p
+            .plan
+            .changes
+            .iter()
+            .filter_map(|c| match &c.change {
+                crate::model::Change::Delete { path, size, .. } => {
+                    Some((path.as_str().to_owned(), *size))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deletes,
+            vec![
+                ("Docs/notes.replica-sync.tmp".to_owned(), 10),
+                ("b.jpg.replica-sync.tmp".to_owned(), 7),
+            ]
+        );
         assert_eq!(p.plan.totals.creates, 1);
-        assert_eq!(p.leftovers_removed, 1);
-        assert!(!r.join("b.jpg.replica-sync.tmp").exists());
+        assert_eq!(p.plan.totals.deletes, 2);
         assert_eq!((p.source.files, p.replica_files), (1, 0));
     }
 
