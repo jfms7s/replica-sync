@@ -42,15 +42,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NOTES: "Installers for Windows (.msi, setup .exe) and Linux (.AppImage, .deb). The Windows installers are unsigned: in SmartScreen choose More info → Run anyway. See the README."
         run: |
-          find_id() {
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
-              --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -n 1
-          }
-          id="$(find_id)"
+          # A draft has no tag yet, so look it up in the list (a re-run reuses it).
+          existing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id")"
+          id="${existing%%$'\n'*}"
           if [ -z "$id" ]; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-              --title "replica-sync $GITHUB_REF_NAME" --notes "$NOTES"
-            id="$(find_id)"
+            # Take the id from the create call itself: a new draft can take a
+            # moment to show up in the list.
+            id="$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$GITHUB_REF_NAME" -f name="replica-sync $GITHUB_REF_NAME" \
+              -f body="$NOTES" -F draft=true -F prerelease=false --jq .id)"
           fi
           test -n "$id"
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
