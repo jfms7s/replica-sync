@@ -3,12 +3,60 @@ on:
   push:
     tags: ["v*"]
 
-# Nothing by default; only the build job, which creates the draft release,
-# gets a write token.
+# Nothing by default; only the jobs that create or fill the draft release get
+# a write token.
 permissions: {}
 
 jobs:
+  # One job creates the draft, so the two build jobs never race to create two.
+  draft:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: The tag matches the version in every manifest
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          fail=0
+          check() {
+            if [ "$2" != "$want" ]; then
+              echo "::error file=$1::$1 says version '$2' but the tag is $GITHUB_REF_NAME"
+              fail=1
+            fi
+          }
+          check Cargo.toml "$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          check app/package.json "$(jq -r .version app/package.json)"
+          check app/src-tauri/tauri.conf.json "$(jq -r .version app/src-tauri/tauri.conf.json)"
+          if ! grep -qx 'version.workspace = true' app/src-tauri/Cargo.toml; then
+            check app/src-tauri/Cargo.toml "$(sed -n 's/^version = "\(.*\)"/\1/p' app/src-tauri/Cargo.toml | head -n 1)"
+          fi
+          exit "$fail"
+      - name: Create the draft release (or reuse one a re-run made)
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: "Installers for Windows (.msi, setup .exe) and Linux (.AppImage, .deb). The Windows installers are unsigned: in SmartScreen choose More info → Run anyway. See the README."
+        run: |
+          find_id() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+              --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -n 1
+          }
+          id="$(find_id)"
+          if [ -z "$id" ]; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "replica-sync $GITHUB_REF_NAME" --notes "$NOTES"
+            id="$(find_id)"
+          fi
+          test -n "$id"
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: draft
     permissions:
       contents: write
     strategy:
@@ -42,11 +90,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: "replica-sync ${{ github.ref_name }}"
-          releaseBody: "Installers for Windows (.msi, setup .exe) and Linux (.AppImage, .deb). The Windows installers are unsigned: in SmartScreen choose More info → Run anyway. See the README."
-          releaseDraft: true
-          prerelease: false
+          # Upload into the draft the `draft` job made; never create one here.
+          releaseId: ${{ needs.draft.outputs.release_id }}
       # The test CLI, for the manual exFAT drive-id check (`replica-sync-cli volume E:\`).
       - name: Attach the CLI (Windows)
         if: runner.os == 'Windows'
