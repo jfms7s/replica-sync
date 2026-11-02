@@ -9,17 +9,71 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, GetLogicalDrives,
-    GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetDiskFreeSpaceExW,
+    GetFileInformationByHandleEx, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
+    OPEN_EXISTING, SetFileAttributesW,
 };
-use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SEM_FAILCRITICALERRORS, SetThreadErrorMode, THREAD_ERROR_MODE,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowsVolumes;
 
 fn wide(p: &Path) -> Vec<u16> {
     p.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+/// Bytes free for the calling user on the drive holding `path`.
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    let name = wide(path);
+    let mut free = 0u64;
+    // SAFETY: `name` is NUL-terminated; `free` is a valid out-pointer; the others may be null.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            name.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(free)
+    }
+}
+
+/// Marks `path` hidden (the trash folder). Best effort: a drive that refuses
+/// the attribute still works, the folder is only visible in Explorer.
+pub(crate) fn hide(path: &Path) {
+    let name = wide(path);
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    let _ = unsafe { SetFileAttributesW(name.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+}
+
+/// Sets this thread's error mode and puts the previous one back when dropped,
+/// so `find` never leaves the caller's thread (a Tauri worker, or the main
+/// thread for sync commands) changed.
+struct ThreadErrorMode(Option<THREAD_ERROR_MODE>);
+
+impl ThreadErrorMode {
+    fn set(mode: THREAD_ERROR_MODE) -> ThreadErrorMode {
+        let mut old: THREAD_ERROR_MODE = 0;
+        // SAFETY: `old` is a valid out-pointer; only this thread's mode changes.
+        let ok = unsafe { SetThreadErrorMode(mode, &mut old) };
+        ThreadErrorMode((ok != 0).then_some(old))
+    }
+}
+
+impl Drop for ThreadErrorMode {
+    fn drop(&mut self) {
+        if let Some(old) = self.0 {
+            // SAFETY: restores the mode saved by `set`; the old-mode pointer may be null.
+            unsafe { SetThreadErrorMode(old, ptr::null_mut()) };
+        }
+    }
 }
 
 fn from_wide(buf: &[u16]) -> String {
@@ -171,8 +225,8 @@ impl Volumes for WindowsVolumes {
     }
 
     fn find(&self, id: &str) -> io::Result<Option<VolumeInfo>> {
-        // SAFETY: only changes this thread's error mode (no "insert a disk" dialogs).
-        unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, ptr::null_mut()) };
+        // No "insert a disk" dialogs while probing drives; restored on return.
+        let _mode = ThreadErrorMode::set(SEM_FAILCRITICALERRORS);
         // SAFETY: no arguments.
         let mask = unsafe { GetLogicalDrives() };
         let drives = (0..26u8)
