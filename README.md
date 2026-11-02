@@ -2,14 +2,14 @@
 
 One-way folder mirror for Windows and Linux. One folder is the source of truth; the other (the replica) is brought up to date by copying, moving and removing only what changed — after the user approves every change in a preview. Removed and replaced files go to a `.sync-trash` folder on the replica and can be restored.
 
-Status: desktop app (v0.5.1) for Windows and Linux, in English and Portuguese.
+Status: desktop app (v0.6.0) for Windows and Linux, in English and Portuguese.
 
 ## Install
 
 Download the installer for your system from the [latest release](https://github.com/jfms7s/replica-sync/releases):
 
-- **Windows:** `replica-sync_0.5.1_x64_en-US.msi` or `replica-sync_0.5.1_x64-setup.exe`. The installers are not code-signed yet, so Windows SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**.
-- **Linux:** `replica-sync_0.5.1_amd64.AppImage` (make it executable and run it) or the `.deb`. If the window doesn't open, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` (already the app's default) or `GDK_BACKEND=x11`.
+- **Windows:** `replica-sync_0.6.0_x64_en-US.msi` or `replica-sync_0.6.0_x64-setup.exe`. The installers are not code-signed yet, so Windows SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**.
+- **Linux:** `replica-sync_0.6.0_amd64.AppImage` (make it executable and run it) or the `.deb`. If the window doesn't open, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` (already the app's default) or `GDK_BACKEND=x11`.
 
 ## Use
 

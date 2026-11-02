@@ -4,6 +4,29 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+## 0.6.0 — 2026-11-02
+
+Supersedes the unpublished 0.5.1 draft (and through it 0.5.0, 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
+
+### Added
+- **Spot check after every sync.** When a sync finishes without stopping, replica-sync reads back up to 50 of the files it just copied (at most 1 GB) and compares their bytes with the source. The Applying screen shows "Checking copies", the Result screen says how many were checked, and a copy whose bytes differ is listed as failed ("the copy, read back, differs from the source") so **Retry failed** copies it again (the bad copy goes to the trash). Pause and Cancel work during the check. On Linux the copy is read from the drive, not from memory; on Windows the read may come from the cache, which is why it is called a spot check. `replica-sync-cli apply` does the same and prints it in its log.
+- Release drafts carry `SHA256SUMS.txt` for every file.
+
+### Changed
+- Copying many small files is about three times faster (5,000 files: 0.95 s → 0.33 s on a RAM disk): the copy buffer is allocated once per sync and each backup folder is made once.
+- Release builds are smaller (link-time optimisation, stripped): the CLI shrinks from 3.6 MB to 2.3 MB.
+- The Preview's folder tree draws only the rows on screen, so a big first sync with many open folders stays responsive; ticking a box reloads only the folders it changes.
+- The built-in "Always skipped" list no longer shows `*.replica-sync.tmp`: those names were never skipped by that rule (a leftover temp on the backup is offered as a delete).
+- One Cargo workspace and lockfile for the whole project (developers: engine commands now pass `--exclude replica-sync-app`, see the README).
+
+### Fixed
+- A source folder that holds only links (or other skipped entries) is now created on the backup; before, it was missing.
+- Run logs never overwrite each other (two syncs of one pair in the same second, or two pair names that differ only in non-ASCII letters); the second gets `-2` in its name.
+- The Trash screen orders more than nine trash runs from the same second correctly (`-10` after `-9`).
+- On Windows, looking for a saved drive no longer leaves the "no insert-a-disk dialogs" error mode switched on for the rest of that thread.
+- `replica-sync-cli` errors name the file or folder they failed on.
+- A release tag that does not match the version in the project files now fails before anything is built, and a release makes exactly one draft.
+
 ## 0.5.1 — 2026-11-02
 
 Supersedes the unpublished 0.5.0 draft (and through it 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
