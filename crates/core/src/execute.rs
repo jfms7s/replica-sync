@@ -773,14 +773,14 @@ fn keep_attributes(out: &File, _tmp: &Path, before: &fs::Metadata) -> io::Result
 }
 
 #[cfg(windows)]
-fn keep_attributes(out: &File, tmp: &Path, before: &fs::Metadata) -> io::Result<()> {
+fn keep_attributes(out: &File, _tmp: &Path, before: &fs::Metadata) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY};
     let wanted = before.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY);
     if wanted == 0 {
         return Ok(());
     }
-    win_attrs::set(tmp, out.metadata()?.file_attributes() | wanted)
+    win_attrs::set_on_handle(out, out.metadata()?.file_attributes() | wanted)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -802,6 +802,36 @@ mod win_attrs {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
 
+    /// Sets `attrs` through our own open handle (no second open that could
+    /// meet a sharing violation). Times are left as they are.
+    pub fn set_on_handle(file: &std::fs::File, attrs: u32) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_BASIC_INFO, FileBasicInfo, SetFileInformationByHandle,
+        };
+        let info = FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: attrs & !FILE_ATTRIBUTE_NORMAL,
+        };
+        // SAFETY: the handle is open for writing and `info` outlives the call.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as _,
+                FileBasicInfo,
+                &info as *const FILE_BASIC_INFO as *const _,
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn set(path: &Path, attrs: u32) -> io::Result<()> {
         let name = wide(path);
         // SAFETY: `name` is NUL-terminated and outlives the call.
@@ -1865,8 +1895,7 @@ mod apply_tests {
         assert_eq!((report.applied(), report.failed()), (1, 0), "{report:?}");
         assert_eq!(fs::read(f.rep.join("ro.txt")).unwrap(), b"new");
         assert_eq!(attrs(&f.rep.join("ro.txt")) & FILE_ATTRIBUTE_READONLY, 0);
-        // The trashed read-only file can be restored over the new one and the
-        // run emptied.
+        // The trashed read-only file can be restored over the new one.
         let run = report.trash_run.unwrap();
         crate::trash::restore(
             &f.rep,
@@ -1876,9 +1905,17 @@ mod apply_tests {
         )
         .unwrap();
         assert_eq!(fs::read(f.rep.join("ro.txt")).unwrap(), b"x");
-        for r in crate::trash::list_runs(&f.rep).unwrap() {
+        assert_ne!(attrs(&f.rep.join("ro.txt")) & FILE_ATTRIBUTE_READONLY, 0);
+        // Replacing it again puts a read-only file in the trash; its run can
+        // still be emptied.
+        write_file(&f.src, "ro.txt", b"newer", T0 + 120);
+        assert_eq!(run_all(&f).failed(), 0);
+        let runs = crate::trash::list_runs(&f.rep).unwrap();
+        assert!(!runs.is_empty());
+        for r in runs {
             crate::trash::empty_run(&f.rep, &r.id).unwrap();
         }
+        assert!(crate::trash::list_runs(&f.rep).unwrap().is_empty());
         assert!(no_temp_files(&f.rep));
     }
 
