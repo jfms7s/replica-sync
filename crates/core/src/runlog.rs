@@ -8,7 +8,7 @@ use crate::session::Prepared;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -207,9 +207,9 @@ fn sanitise(name: &str) -> String {
 }
 
 pub fn write_log(dir: &Path, pair_name: &str, stamp: &str, text: &str) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
+    crate::private::create_dir_all(dir)?;
     let path = dir.join(format!("{}-{stamp}.log", sanitise(pair_name)));
-    fs::write(&path, text)?;
+    crate::private::create_file(&path)?.write_all(text.as_bytes())?;
     Ok(path)
 }
 
@@ -353,5 +353,16 @@ mod tests {
             stop_text(&StopReason::ReplicaDisconnected),
             "the backup drive was disconnected"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_log_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let logs = d.path().join("logs");
+        let path = write_log(&logs, "Photos", "2026-11-02_120000", "x").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&path), mode(&logs)), (0o600, 0o700));
     }
 }

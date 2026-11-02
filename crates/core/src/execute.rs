@@ -218,6 +218,46 @@ fn source_stop(e: &io::Error, ctx: &ExecContext) -> Stop {
     })
 }
 
+/// Opens a source file for reading without following a link at its own name.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    // Opens a link or junction itself; its metadata then is not a file.
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// `O_NOFOLLOW` met a link (Linux `ELOOP`, BSD/macOS `EMLINK`/`ELOOP`).
+fn is_link_refused(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error()
+            .is_some_and(|c| c == libc::ELOOP || c == libc::EMLINK)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// A source root that vanished is fatal, whatever the change found.
 fn source_gone_or(stop: Stop, ctx: &ExecContext) -> Stop {
     if ctx.source_root.is_dir() {
@@ -569,15 +609,18 @@ impl Run<'_, '_> {
         let ctx = self.ctx;
         let root = ctx.replica.path();
         let src_path = rel.to_path(ctx.source_root);
-        let before = match fs::metadata(&src_path) {
-            Ok(m) => m,
+        // Links are never followed on the source (the scan reports them): a
+        // file swapped for a link since the preview is "changed". A link in a
+        // parent folder is still followed (closing that needs `openat`).
+        let unchanged =
+            |m: &fs::Metadata| m.is_file() && m.len() == size && modified_ns(m) == mtime_ns;
+        match fs::symlink_metadata(&src_path) {
+            Ok(m) if unchanged(&m) => {}
+            Ok(_) => return Err(Stop::Skip(SkipReason::ChangedSincePreview)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Stop::Skip(SkipReason::DeletedSinceScan));
             }
             Err(e) => return Err(source_stop(&e, ctx)),
-        };
-        if before.len() != size || modified_ns(&before) != mtime_ns {
-            return Err(Stop::Skip(SkipReason::ChangedSincePreview));
         }
         let dest = act(ctx, ctx.replica.create_parent(rel))?;
         let tmp = temp_path(&dest);
@@ -591,7 +634,21 @@ impl Run<'_, '_> {
         }
         // Until `create_new` succeeds the temp name is not ours: an error before
         // that point must not remove whatever is there.
-        let src = File::open(&src_path).map_err(|e| source_stop(&e, ctx))?;
+        let src = match open_no_follow(&src_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Stop::Skip(SkipReason::DeletedSinceScan));
+            }
+            Err(e) if is_link_refused(&e) => {
+                return Err(Stop::Skip(SkipReason::ChangedSincePreview));
+            }
+            Err(e) => return Err(source_stop(&e, ctx)),
+        };
+        // What the handle opened, not the path: it is what gets copied.
+        let before = src.metadata().map_err(|e| source_stop(&e, ctx))?;
+        if !unchanged(&before) {
+            return Err(Stop::Skip(SkipReason::ChangedSincePreview));
+        }
         let out = match ctx
             .replica
             .create_new(&safety::with_suffix(rel, TEMP_SUFFIX))
@@ -745,7 +802,8 @@ impl Run<'_, '_> {
     /// Renames one durable temp into place, unless its source changed since it
     /// was first read.
     fn commit(&mut self, w: &Written) -> Result<(), Stop> {
-        let after = match fs::metadata(&w.src_path) {
+        let after = match fs::symlink_metadata(&w.src_path) {
+            Ok(m) if !m.is_file() => return Err(Stop::Fail(FailReason::ChangedDuringCopy)),
             Ok(m) => m,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Stop::Skip(SkipReason::DeletedSinceScan));
@@ -1467,7 +1525,7 @@ fn move_entry(
     kind: &MoveKind,
 ) -> Result<(), Stop> {
     let root = ctx.replica.path();
-    let still_planned = match (kind, fs::metadata(to.to_path(ctx.source_root))) {
+    let still_planned = match (kind, fs::symlink_metadata(to.to_path(ctx.source_root))) {
         (MoveKind::File { size, mtime_ns }, Ok(m)) => {
             m.is_file() && m.len() == *size && modified_ns(&m) == *mtime_ns
         }
@@ -2449,6 +2507,44 @@ mod apply_tests {
             stranded_detail(&e, &rel("Photos/a.jpg.replica-sync-rename")),
             "disk said no; the file was left at Photos/a.jpg.replica-sync-rename"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_file_swapped_for_a_link_is_not_followed() {
+        let f = fixture();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_file(&f.src, "a.txt", b"mine", T0);
+        write_file(elsewhere.path(), "secret.txt", b"THEM", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        // Same size and mtime: only the link check can tell.
+        fs::remove_file(f.src.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("secret.txt"), f.src.join("a.txt"))
+            .unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Skipped(SkipReason::ChangedSincePreview)
+        );
+        assert!(!f.rep.join("a.txt").exists());
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_no_follow_refuses_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("real"), b"x").unwrap();
+        std::os::unix::fs::symlink(d.path().join("real"), d.path().join("link")).unwrap();
+        assert!(open_no_follow(&d.path().join("real")).is_ok());
+        let e = open_no_follow(&d.path().join("link")).unwrap_err();
+        assert!(is_link_refused(&e), "{e:?}");
     }
 
     #[test]
