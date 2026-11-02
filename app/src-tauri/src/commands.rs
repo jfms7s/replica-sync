@@ -66,11 +66,6 @@ pub fn startup_status(state: State<'_, AppState>) -> Res<()> {
 }
 
 #[tauri::command]
-pub fn data_folder(state: State<'_, AppState>) -> String {
-    state.data_dir.display().to_string()
-}
-
-#[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Res<SettingsView> {
     // Settings are readable even when the pairs store is damaged (the
     // blocking screen still needs a language).

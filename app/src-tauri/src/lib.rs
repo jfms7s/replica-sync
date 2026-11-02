@@ -60,7 +60,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::startup_status,
-            commands::data_folder,
             commands::get_settings,
             commands::set_settings,
             commands::builtin_rules,
