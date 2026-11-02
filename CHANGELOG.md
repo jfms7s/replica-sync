@@ -4,6 +4,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+## 0.5.1 — 2026-11-02
+
+Supersedes the unpublished 0.5.0 draft (and through it 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
+
 ### Fixed
 - Opening a log from the app no longer refuses a log whose full path is longer than 260 characters on Windows (the logs folder and the file were compared in two different path forms).
 
