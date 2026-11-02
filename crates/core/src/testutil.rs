@@ -67,7 +67,7 @@ pub fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
         for e in fs::read_dir(dir).unwrap() {
             let e = e.unwrap();
             let p = e.path();
-            if e.file_name() == ".sync-trash" {
+            if e.file_name() == crate::trash::TRASH_DIR {
                 continue;
             }
             if e.file_type().unwrap().is_dir() {
@@ -87,28 +87,25 @@ pub fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-use crate::diff::{CaseMode, diff};
-use crate::moves::detect_moves;
-use crate::plan::{Plan, build_plan};
+use crate::diff::CaseMode;
+use crate::plan::Plan;
 use crate::rules::SkipRules;
-use crate::scan::{ScanCounters, scan};
+use crate::session::{SessionCounters, prepare};
 
-/// Scan → diff → moves → plan for two real folders (case-sensitive).
+/// The production planning pipeline (`session::prepare`: root checks, scan,
+/// diff, moves, plan) for two real folders, case-sensitive. Unit tests use
+/// these helpers; `tests/common` has its own set because integration tests
+/// can't see `#[cfg(test)]` modules.
 pub fn plan_for(source: &Path, replica: &Path) -> Plan {
-    let rules = SkipRules::new(&[]).unwrap();
-    let c = ScanCounters::default();
-    let s = scan(source, &rules, &c).unwrap();
-    let r = scan(replica, &rules, &c).unwrap();
-    build_plan(
-        detect_moves(
-            diff(&s, &r, CaseMode::Sensitive),
-            &s,
-            &r,
-            CaseMode::Sensitive,
-        ),
+    prepare(
+        source,
+        replica,
+        &SkipRules::new(&[]).unwrap(),
         CaseMode::Sensitive,
+        &SessionCounters::default(),
     )
     .unwrap()
+    .plan
 }
 
 /// Makes `link` a directory junction to `target`. Junctions need no admin

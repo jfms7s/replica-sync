@@ -359,9 +359,9 @@ mod tests {
     #[test]
     fn unreadable_folder_is_a_problem_and_scan_continues() {
         use std::os::unix::fs::PermissionsExt;
-        if unsafe { libc::geteuid() } == 0 {
-            return; // root can read anything
-        }
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        assert!(euid != 0, "permission tests must not run as root");
         let d = tempfile::tempdir().unwrap();
         write_file(d.path(), "locked/a.txt", b"1", T0);
         write_file(d.path(), "ok.txt", b"1", T0);

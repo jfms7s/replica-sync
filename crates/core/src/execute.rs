@@ -2335,7 +2335,7 @@ mod apply_tests {
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::symlink_metadata(hidden.join("x.txt")).is_ok() {
             fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
-            return; // running as root: permissions are not enforced
+            panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let plan = crate::plan::build_plan(
             vec![Change::Delete {
@@ -2376,8 +2376,7 @@ mod apply_tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::metadata(locked.join("a.jpg")).is_ok() {
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-            eprintln!("SKIPPED: running as root, permissions are not enforced");
-            return;
+            panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
             &f,
@@ -2743,7 +2742,7 @@ mod apply_tests {
         if fs::write(locked.join("probe"), b"").is_ok() {
             fs::remove_file(locked.join("probe")).unwrap();
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-            return; // running as root: permissions are not enforced
+            panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
             &f,
