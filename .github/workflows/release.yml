@@ -101,3 +101,22 @@ jobs:
         run: |
           cargo build --release --locked -p replica-sync-cli
           gh release upload "${{ github.ref_name }}" target/release/replica-sync-cli.exe --clobber
+
+  # SHA256SUMS.txt over every file in the draft, once all of them are there.
+  checksums:
+    needs: [draft, build]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attach SHA256SUMS.txt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
