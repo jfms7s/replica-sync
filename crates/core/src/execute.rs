@@ -754,7 +754,82 @@ fn write_temp(
     }
     let mtime = FileTime::from_system_time(before.modified().map_err(on_io)?);
     filetime::set_file_handle_times(&out, None, Some(mtime)).map_err(on_io)?;
+    // After the mtime: a read-only file may refuse new times on some systems.
+    // Best effort: a drive that can't hold them (vfat or exFAT on Linux
+    // refuse most modes with EPERM) still gets the content.
+    let _ = keep_attributes(&out, tmp, before);
     disk.sync_temp(tmp, out).map_err(on_io)
+}
+
+/// What a replica keeps besides content and mtime (spec §5.5): the Unix
+/// permission bits (`rwx` for owner, group and others; not setuid, setgid or
+/// sticky), and on Windows the read-only and hidden attributes. Not ACLs,
+/// owners, alternate data streams or creation time. Only where the replica's
+/// filesystem can hold them: the caller ignores an error.
+#[cfg(unix)]
+fn keep_attributes(out: &File, _tmp: &Path, before: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    out.set_permissions(fs::Permissions::from_mode(before.mode() & 0o777))
+}
+
+#[cfg(windows)]
+fn keep_attributes(out: &File, tmp: &Path, before: &fs::Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY};
+    let wanted = before.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY);
+    if wanted == 0 {
+        return Ok(());
+    }
+    win_attrs::set(tmp, out.metadata()?.file_attributes() | wanted)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn keep_attributes(_: &File, _: &Path, _: &fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+mod win_attrs {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, GetFileAttributesW,
+        INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    pub fn set(path: &Path, attrs: u32) -> io::Result<()> {
+        let name = wide(path);
+        // SAFETY: `name` is NUL-terminated and outlives the call.
+        if unsafe { SetFileAttributesW(name.as_ptr(), attrs) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Clears read-only so a temp of a read-only source can be removed.
+    pub fn clear_read_only(path: &Path) {
+        let name = wide(path);
+        // SAFETY: `name` is NUL-terminated and outlives both calls.
+        unsafe {
+            let a = GetFileAttributesW(name.as_ptr());
+            if a != INVALID_FILE_ATTRIBUTES && a & FILE_ATTRIBUTE_READONLY != 0 {
+                let rest = a & !FILE_ATTRIBUTE_READONLY;
+                SetFileAttributesW(
+                    name.as_ptr(),
+                    if rest == 0 {
+                        FILE_ATTRIBUTE_NORMAL
+                    } else {
+                        rest
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Durability for the replica disk.
@@ -1112,6 +1187,8 @@ mod durable {
         /// preview plans for the trash. Its handle, if still open, is closed first.
         pub fn remove_temp(&mut self, _root: &Path, tmp: &Path) {
             self.open.retain(|(p, _)| p != tmp);
+            // A copy of a read-only source is read-only already.
+            super::win_attrs::clear_read_only(tmp);
             let _ = fs::remove_file(tmp);
         }
     }
@@ -1725,6 +1802,85 @@ mod apply_tests {
     use super::*;
     use crate::testutil::{T0, ns, plan_for, read_tree, rel, write_file};
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_keep_the_unix_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        for (name, m) in [("run.sh", 0o755), ("secret", 0o600), ("ro.txt", 0o444)] {
+            write_file(&f.src, name, b"x", T0);
+            fs::set_permissions(f.src.join(name), fs::Permissions::from_mode(m)).unwrap();
+        }
+        // setuid is not copied.
+        write_file(&f.src, "suid", b"x", T0);
+        fs::set_permissions(f.src.join("suid"), fs::Permissions::from_mode(0o4755)).unwrap();
+        let report = run_all(&f);
+        assert_eq!((report.applied(), report.failed()), (4, 0));
+        assert_eq!(mode(&f.rep.join("run.sh")), 0o755);
+        assert_eq!(mode(&f.rep.join("secret")), 0o600);
+        assert_eq!(mode(&f.rep.join("ro.txt")), 0o444);
+        assert_eq!(mode(&f.rep.join("suid")), 0o755);
+        // A read-only replica file is replaced (the old one trashed) on update.
+        fs::set_permissions(f.src.join("ro.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+        write_file(&f.src, "ro.txt", b"new", T0 + 60);
+        fs::set_permissions(f.src.join("ro.txt"), fs::Permissions::from_mode(0o444)).unwrap();
+        let report = run_all(&f);
+        assert_eq!((report.applied(), report.failed()), (1, 0));
+        assert_eq!(fs::read(f.rep.join("ro.txt")).unwrap(), b"new");
+        assert_eq!(mode(&f.rep.join("ro.txt")), 0o444);
+        assert!(no_temp_files(&f.rep));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copies_keep_read_only_and_hidden_and_update_over_them() {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+        };
+        let attrs = |p: &Path| fs::metadata(p).unwrap().file_attributes();
+        let f = fixture();
+        write_file(&f.src, "ro.txt", b"x", T0);
+        write_file(&f.src, "hidden.txt", b"x", T0);
+        write_file(&f.src, "plain.txt", b"x", T0);
+        let mut ro = fs::metadata(f.src.join("ro.txt")).unwrap().permissions();
+        ro.set_readonly(true);
+        fs::set_permissions(f.src.join("ro.txt"), ro).unwrap();
+        let hidden = f.src.join("hidden.txt");
+        win_attrs::set(&hidden, attrs(&hidden) | FILE_ATTRIBUTE_HIDDEN).unwrap();
+        let report = run_all(&f);
+        assert_eq!((report.applied(), report.failed()), (3, 0), "{report:?}");
+        assert_ne!(attrs(&f.rep.join("ro.txt")) & FILE_ATTRIBUTE_READONLY, 0);
+        assert_ne!(attrs(&f.rep.join("hidden.txt")) & FILE_ATTRIBUTE_HIDDEN, 0);
+        assert_eq!(
+            attrs(&f.rep.join("plain.txt")) & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+            0
+        );
+        // Updating a read-only replica file: the old one goes to the trash.
+        win_attrs::clear_read_only(&f.src.join("ro.txt"));
+        write_file(&f.src, "ro.txt", b"new", T0 + 60);
+        let report = run_all(&f);
+        assert_eq!((report.applied(), report.failed()), (1, 0), "{report:?}");
+        assert_eq!(fs::read(f.rep.join("ro.txt")).unwrap(), b"new");
+        assert_eq!(attrs(&f.rep.join("ro.txt")) & FILE_ATTRIBUTE_READONLY, 0);
+        // The trashed read-only file can be restored over the new one and the
+        // run emptied.
+        let run = report.trash_run.unwrap();
+        crate::trash::restore(
+            &f.rep,
+            &run,
+            &[rel("ro.txt")],
+            crate::trash::OnConflict::TrashExisting,
+        )
+        .unwrap();
+        assert_eq!(fs::read(f.rep.join("ro.txt")).unwrap(), b"x");
+        for r in crate::trash::list_runs(&f.rep).unwrap() {
+            crate::trash::empty_run(&f.rep, &r.id).unwrap();
+        }
+        assert!(no_temp_files(&f.rep));
+    }
 
     #[test]
     fn file_and_folder_moves_rename_without_copying() {
