@@ -218,6 +218,15 @@ fn source_stop(e: &io::Error, ctx: &ExecContext) -> Stop {
     })
 }
 
+/// A source root that vanished is fatal, whatever the change found.
+fn source_gone_or(stop: Stop, ctx: &ExecContext) -> Stop {
+    if ctx.source_root.is_dir() {
+        stop
+    } else {
+        Stop::Fatal(StopReason::SourceDisconnected)
+    }
+}
+
 /// The error for a capital-letters-only rename whose roll-back also failed:
 /// it says where the file now is.
 fn stranded_detail(e: &io::Error, aside: &RelPath) -> String {
@@ -756,11 +765,15 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
             unreachable!("copies go through Run::write_copy")
         }
         Change::MkDir { path } => {
-            match fs::metadata(path.to_path(ctx.source_root)) {
+            // Not following links: the scan never plans a link as a folder.
+            match fs::symlink_metadata(path.to_path(ctx.source_root)) {
                 Ok(m) if m.is_dir() => {}
                 Ok(_) => return Err(Stop::Skip(SkipReason::ChangedSincePreview)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return Err(Stop::Skip(SkipReason::DeletedSinceScan));
+                    return Err(source_gone_or(
+                        Stop::Skip(SkipReason::DeletedSinceScan),
+                        ctx,
+                    ));
                 }
                 Err(e) => return Err(source_stop(&e, ctx)),
             }
@@ -789,6 +802,7 @@ fn write_temp(
 ) -> Result<bool, Stop> {
     let root = ctx.replica.path();
     let on_io = |e: io::Error| io_stop(&e, root);
+    let (start, mut written) = (progress.bytes_done, 0u64);
     durable::write_fault(tmp).map_err(on_io)?;
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -797,7 +811,9 @@ fn write_temp(
             break;
         }
         out.write_all(&buf[..n]).map_err(on_io)?;
-        progress.bytes_done += n as u64;
+        // Never past the planned size (a source growing mid-copy fails at commit).
+        written += n as u64;
+        progress.bytes_done = start + written.min(before.len());
         on_progress(progress);
         if ctx.control.is_paused() {
             disk.park();
@@ -1527,20 +1543,25 @@ fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Res
 fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
     // By exact name: on a source that ignores capital letters, `foo` would
     // otherwise "exist" while only `Foo` does.
-    let parent = rel
-        .parent()
-        .expect("never the root")
-        .to_path(ctx.source_root);
-    match fs::read_dir(&parent) {
-        Ok(entries) => {
-            for e in entries {
+    // The listing only when the name resolves at all, which is rare.
+    match fs::symlink_metadata(rel.to_path(ctx.source_root)) {
+        Ok(_) => {
+            let parent = rel
+                .parent()
+                .expect("never the root")
+                .to_path(ctx.source_root);
+            for e in fs::read_dir(&parent).map_err(|e| source_stop(&e, ctx))? {
                 let e = e.map_err(|e| source_stop(&e, ctx))?;
                 if e.file_name().to_str() == Some(rel.name()) {
                     return Err(Stop::Skip(SkipReason::BackOnSource));
                 }
             }
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if !ctx.source_root.is_dir() {
+                return Err(Stop::Fatal(StopReason::SourceDisconnected));
+            }
+        }
         Err(e) => return Err(source_stop(&e, ctx)),
     }
     match ctx.replica.remove_dir(rel) {
@@ -2352,6 +2373,29 @@ mod apply_tests {
         );
         assert!(!f.rep.join("empty").exists());
         assert!(f.rep.join("gone").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_skips_a_source_folder_replaced_by_a_link() {
+        let f = fixture();
+        fs::create_dir_all(f.src.join("empty")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        fs::remove_dir(f.src.join("empty")).unwrap();
+        fs::create_dir_all(f.src.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(f.src.join("elsewhere"), f.src.join("empty")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Skipped(SkipReason::ChangedSincePreview)
+        );
+        assert!(!f.rep.join("empty").exists());
     }
 
     #[test]
