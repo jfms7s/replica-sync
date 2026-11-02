@@ -83,7 +83,6 @@ export interface TrashRunContents { items: TrashItem[]; unrecorded: RelPath[]; b
 
 export const api = {
   startupStatus: () => invoke<void>('startup_status'),
-  dataFolder: () => invoke<string>('data_folder'),
   getSettings: () => invoke<SettingsView>('get_settings'),
   setSettings: (settings: Settings) => invoke<SettingsView>('set_settings', { settings }),
   builtinRules: () => invoke<string[]>('builtin_rules'),
