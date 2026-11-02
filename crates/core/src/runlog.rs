@@ -225,11 +225,29 @@ fn sanitise(name: &str) -> String {
         .collect()
 }
 
+/// Writes a new log and returns its path. Never overwrites another log: two
+/// runs in the same second, or two pair names `sanitise` maps to the same
+/// text, get `-2`, `-3`, … before `.log` (as trash runs do).
 pub fn write_log(dir: &Path, pair_name: &str, stamp: &str, text: &str) -> io::Result<PathBuf> {
     crate::private::create_dir_all(dir)?;
-    let path = dir.join(format!("{}-{stamp}.log", sanitise(pair_name)));
-    crate::private::create_file(&path)?.write_all(text.as_bytes())?;
-    Ok(path)
+    let base = format!("{}-{stamp}", sanitise(pair_name));
+    let mut n = 1;
+    loop {
+        let name = if n == 1 {
+            format!("{base}.log")
+        } else {
+            format!("{base}-{n}.log")
+        };
+        let path = dir.join(name);
+        match crate::private::create_new_file(&path) {
+            Ok(mut f) => {
+                f.write_all(text.as_bytes())?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub fn prune(dir: &Path, max_age: Duration, now: SystemTime) -> io::Result<usize> {
@@ -355,6 +373,21 @@ mod tests {
         );
         assert!(p.exists() && !old.exists());
         assert_eq!(fs::read_to_string(p).unwrap(), "hello");
+    }
+
+    #[test]
+    fn write_log_never_overwrites_another_log() {
+        let d = tempfile::tempdir().unwrap();
+        let a = write_log(d.path(), "Photos", "2026-10-07_120000", "first").unwrap();
+        let b = write_log(d.path(), "Photos", "2026-10-07_120000", "second").unwrap();
+        // Two names `sanitise` maps to the same text.
+        let c = write_log(d.path(), "Fotos ä", "2026-10-07_120000", "third").unwrap();
+        let e = write_log(d.path(), "Fotos ö", "2026-10-07_120000", "fourth").unwrap();
+        assert_eq!(b.file_name().unwrap(), "Photos-2026-10-07_120000-2.log");
+        assert_ne!(c, e);
+        for (p, text) in [(a, "first"), (b, "second"), (c, "third"), (e, "fourth")] {
+            assert_eq!(fs::read_to_string(p).unwrap(), text);
+        }
     }
 
     #[test]

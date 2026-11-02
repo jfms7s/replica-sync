@@ -13,6 +13,21 @@ pub use crate::reserved::TRASH_DIR;
 pub const FILES_DIR: &str = "files";
 pub const MANIFEST: &str = "manifest.jsonl";
 const STAMP_FORMAT: &str = "%Y-%m-%d_%H%M%S";
+/// The length of a run stamp, e.g. `2026-10-07_120000`; a run id is a stamp,
+/// optionally followed by `-<n>` (see `open_run`).
+const STAMP_LEN: usize = "2026-10-07_120000".len();
+
+/// Orders run ids by time: the stamp, then the `-<n>` suffix as a number (a
+/// bare stamp is run 1), so `…-10` comes after `…-9`, not after `…-1`.
+fn run_order(id: &str) -> (&str, u32) {
+    let stamp = id.get(..STAMP_LEN).unwrap_or(id);
+    let n = id
+        .get(STAMP_LEN..)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
+    (stamp, n)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -487,7 +502,11 @@ fn read_manifest(run: &Path) -> io::Result<Vec<TrashItem>> {
             Ok(ManifestLine::Restored { restored }) => {
                 live.remove(&restored);
             }
-            Err(_) => {} // torn last line after a crash
+            // A damaged line (a crash mid-write tears the last one) is
+            // skipped: its file shows as Unrecorded, listed but not
+            // restorable. `append_line` ends a torn line first, so a later
+            // record is never glued onto it.
+            Err(_) => {}
         }
     }
     let mut items: Vec<(usize, TrashItem)> = live.into_values().collect();
@@ -541,7 +560,7 @@ pub fn list_runs(replica_root: &Path) -> io::Result<Vec<TrashRunInfo>> {
             id,
         });
     }
-    runs.sort_by(|a, b| b.id.cmp(&a.id));
+    runs.sort_by(|a, b| run_order(&b.id).cmp(&run_order(&a.id)));
     Ok(runs)
 }
 
@@ -592,22 +611,19 @@ pub fn restore(
     for p in paths {
         targets.push(replica.target(p)?);
     }
-    let conflicts: Vec<usize> = (0..paths.len())
-        .filter(|&i| fs::symlink_metadata(&targets[i]).is_ok())
+    // One `symlink_metadata` per target, reused for every check below.
+    let conflicts: Vec<(usize, fs::Metadata)> = (0..paths.len())
+        .filter_map(|i| fs::symlink_metadata(&targets[i]).ok().map(|m| (i, m)))
         .collect();
-    if let Some(&i) = conflicts
-        .iter()
-        .find(|&&i| fs::symlink_metadata(&targets[i]).is_ok_and(|m| m.is_dir()))
-    {
-        return Err(RestoreError::Conflict(paths[i].clone()));
+    if let Some((i, _)) = conflicts.iter().find(|(_, m)| m.is_dir()) {
+        return Err(RestoreError::Conflict(paths[*i].clone()));
     }
-    if let (Some(&i), OnConflict::Refuse) = (conflicts.first(), on_conflict) {
-        return Err(RestoreError::Conflict(paths[i].clone()));
+    if let (Some((i, _)), OnConflict::Refuse) = (conflicts.first(), on_conflict) {
+        return Err(RestoreError::Conflict(paths[*i].clone()));
     }
     let mut displaced = TrashWriter::for_replica(&replica, new_run_stamp());
-    for &i in &conflicts {
-        let md = fs::symlink_metadata(&targets[i])?;
-        displaced.move_in(&paths[i], md.len(), modified_ns(&md), TrashReason::Replaced)?;
+    for (i, md) in &conflicts {
+        displaced.move_in(&paths[*i], md.len(), modified_ns(md), TrashReason::Replaced)?;
     }
     let mut manifest = open_manifest(&manifest_path)?;
     // Defence in depth: every source must still resolve inside this run's own
@@ -688,14 +704,14 @@ pub fn runs_older_than(
     let mut old = Vec::new();
     for e in entries {
         let id = e?.file_name().to_string_lossy().into_owned();
-        let stamp = id.get(..17).unwrap_or("");
+        let stamp = id.get(..STAMP_LEN).unwrap_or("");
         if valid_run_id(&id)
             && chrono::NaiveDateTime::parse_from_str(stamp, STAMP_FORMAT).is_ok_and(|t| t < cutoff)
         {
             old.push(id);
         }
     }
-    old.sort();
+    old.sort_by(|a, b| run_order(a).cmp(&run_order(b)));
     Ok(old)
 }
 #[cfg(test)]
@@ -1072,6 +1088,75 @@ mod tests {
         assert!(empty_run(d.path(), "../..").is_err());
         empty_run(d.path(), STAMP).unwrap();
         assert!(list_runs(d.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_restore_after_a_torn_last_manifest_line_is_still_recorded() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "a.txt", b"abc", T0);
+        write_file(d.path(), "b.txt", b"abc", T0);
+        let mut w = trash_one(d.path(), "a.txt", TrashReason::Deleted);
+        w.move_in(&rel("b.txt"), 3, ns(T0), TrashReason::Deleted)
+            .unwrap();
+        drop(w);
+        // A crash mid-write: half a line, no newline.
+        let manifest = d.path().join(TRASH_DIR).join(STAMP).join(MANIFEST);
+        let mut f = OpenOptions::new().append(true).open(&manifest).unwrap();
+        f.write_all(br#"{"path":"c.t"#).unwrap();
+        drop(f);
+        restore(d.path(), STAMP, &[rel("a.txt")], OnConflict::Refuse).unwrap();
+        let left = run_contents(d.path(), STAMP).unwrap();
+        let paths: Vec<&str> = left.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["b.txt"]);
+        assert!(left.unrecorded.is_empty());
+        assert_eq!(fs::read(d.path().join("a.txt")).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn the_stamp_length_matches_new_run_stamps() {
+        assert_eq!(new_run_stamp().len(), STAMP_LEN);
+        assert_eq!(STAMP.len(), STAMP_LEN);
+    }
+
+    #[test]
+    fn runs_sort_by_time_with_the_suffix_as_a_number() {
+        let d = tempfile::tempdir().unwrap();
+        let ids = [
+            "2026-08-01_090000",
+            "2026-10-07_120000",
+            "2026-10-07_120000-2",
+            "2026-10-07_120000-10",
+            "2026-10-07_120000-9",
+        ];
+        for id in ids {
+            fs::create_dir_all(d.path().join(TRASH_DIR).join(id)).unwrap();
+        }
+        let listed: Vec<String> = list_runs(d.path())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                "2026-10-07_120000-10",
+                "2026-10-07_120000-9",
+                "2026-10-07_120000-2",
+                "2026-10-07_120000",
+                "2026-08-01_090000",
+            ]
+        );
+        let now = chrono::NaiveDateTime::parse_from_str("2027-01-01_000000", STAMP_FORMAT).unwrap();
+        assert_eq!(
+            runs_older_than(d.path(), 30, now).unwrap(),
+            [
+                "2026-08-01_090000",
+                "2026-10-07_120000",
+                "2026-10-07_120000-2",
+                "2026-10-07_120000-9",
+                "2026-10-07_120000-10",
+            ]
+        );
     }
 
     #[test]
