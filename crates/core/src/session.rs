@@ -1,6 +1,7 @@
 //! One call that turns two folders into a plan: the entry point for the app and the CLI.
 
-use crate::diff::{CaseMode, diff};
+use crate::diff::diff;
+use crate::model::CaseMode;
 use crate::model::Snapshot;
 use crate::moves::detect_moves;
 use crate::plan::{Plan, PlanError, build_plan};

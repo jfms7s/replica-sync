@@ -239,7 +239,7 @@ pub fn prune(dir: &Path, max_age: Duration, now: SystemTime) -> io::Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::CaseMode;
+    use crate::model::CaseMode;
     use crate::model::Change;
     use crate::plan::build_plan;
     use crate::testutil::rel;

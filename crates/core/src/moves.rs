@@ -1,6 +1,6 @@
 //! Turn Delete+Create pairs into renames, and whole moved folders into one rename.
 
-use crate::diff::CaseMode;
+use crate::model::CaseMode;
 use crate::model::{Change, Kind, MTIME_TOLERANCE_NS, MoveKind, RelPath, Snapshot};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -107,10 +107,7 @@ fn collapse_folder_moves(
     replica: &Snapshot,
     case: CaseMode,
 ) -> Vec<Change> {
-    let k = |r: &RelPath| match case {
-        CaseMode::Sensitive => r.as_str().to_owned(),
-        CaseMode::Insensitive => r.fold(),
-    };
+    let k = |r: &RelPath| case.key(r);
     let mut move_to: HashMap<String, String> = HashMap::new();
     let mut candidates: BTreeSet<(usize, RelPath, RelPath)> = BTreeSet::new();
     for c in &changes {

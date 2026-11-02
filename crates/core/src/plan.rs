@@ -1,6 +1,6 @@
 //! The ordered, numbered list of changes the user approves.
 
-use crate::diff::CaseMode;
+use crate::model::CaseMode;
 use crate::model::{Change, MoveKind, RelPath};
 use crate::rules::TEMP_SUFFIX;
 use serde::{Deserialize, Serialize};
@@ -96,10 +96,7 @@ pub fn build_plan(mut changes: Vec<Change>, case: CaseMode) -> Result<Plan, Plan
             Change::Move { to, .. } => to,
             _ => continue,
         };
-        let k = match case {
-            CaseMode::Sensitive => target.as_str().to_owned(),
-            CaseMode::Insensitive => target.fold(),
-        };
+        let k = case.key(target);
         if !targets.insert(k) {
             return Err(PlanError::DuplicateTarget(target.clone()));
         }
