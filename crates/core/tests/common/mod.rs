@@ -2,12 +2,14 @@
 //! Helpers for the integration tests. `src/testutil.rs` has a twin set for the
 //! unit tests: integration tests can't see `#[cfg(test)]` modules.
 
-use replica_sync_core::execute::{Control, ExecContext, RunReport, execute};
+use replica_sync_core::execute::{Control, ExecContext, Progress, RunReport, execute};
+use replica_sync_core::model::CaseMode;
+use replica_sync_core::plan::ChangeId;
 use replica_sync_core::rules::SkipRules;
 use replica_sync_core::safety::ReplicaRoot;
 use replica_sync_core::session::{Prepared, SessionCounters, check_roots, prepare};
 use replica_sync_core::{trash, volume};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -47,29 +49,48 @@ pub fn files(root: &Path, skip_trash: bool) -> BTreeMap<String, Vec<u8>> {
 }
 
 pub fn prepare_with(src: &Path, rep: &Path, rules: &[&str]) -> Prepared {
-    let rules = SkipRules::new(&rules.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
     // As the app does: refuse nested roots before the case probe writes.
     check_roots(src, rep).unwrap();
     let case = volume::case_mode(rep).unwrap();
+    prepare_with_case(src, rep, rules, case)
+}
+
+/// `prepare_with` with the case mode forced, e.g. `Insensitive` on a Linux
+/// tmpfs to exercise the case-folding paths.
+pub fn prepare_with_case(src: &Path, rep: &Path, rules: &[&str], case: CaseMode) -> Prepared {
+    let rules = SkipRules::new(&rules.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
     prepare(src, rep, &rules, case, &SessionCounters::default()).unwrap()
 }
 
 pub fn apply_all(src: &Path, rep: &Path, prepared: &Prepared) -> RunReport {
+    apply_some(
+        src,
+        rep,
+        prepared,
+        &prepared.plan.actionable_ids(),
+        &Control::default(),
+        &mut |_| {},
+    )
+}
+
+/// Applies only `approved`, with the caller's `control` and progress callback.
+pub fn apply_some(
+    src: &Path,
+    rep: &Path,
+    prepared: &Prepared,
+    approved: &HashSet<ChangeId>,
+    control: &Control,
+    on_progress: &mut dyn FnMut(&Progress),
+) -> RunReport {
     let replica = ReplicaRoot::new(rep).unwrap();
-    let control = Control::default();
     let ctx = ExecContext {
         source_root: src,
         replica: &replica,
-        control: &control,
+        control,
         trash_stamp: trash::new_run_stamp(),
         drive_check: None,
     };
-    execute(
-        &prepared.plan,
-        &prepared.plan.actionable_ids(),
-        &ctx,
-        &mut |_| {},
-    )
+    execute(&prepared.plan, approved, &ctx, on_progress)
 }
 
 pub fn sync_all(src: &Path, rep: &Path) -> (Prepared, RunReport) {
