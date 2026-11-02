@@ -61,11 +61,14 @@ impl Blocks {
     }
 }
 
-fn has_children(map: &BTreeMap<String, &Entry>, k: &str) -> bool {
+/// True when something under `k` will be planned (a Create or MkDir), which
+/// makes the folder on its own. Blocked entries (links, collisions, problems)
+/// are not planned, so a folder holding only those needs its own MkDir.
+fn has_planned_children(map: &BTreeMap<String, &Entry>, k: &str, blocks: &Blocks) -> bool {
     let prefix = format!("{k}/");
     map.range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-        .next()
-        .is_some_and(|(c, _)| c.starts_with(&prefix))
+        .take_while(|(c, _)| c.starts_with(&prefix))
+        .any(|(c, _)| !blocks.covers(c))
 }
 
 /// Replica folders an RmDir could never empty, because something the plan leaves
@@ -190,7 +193,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                     size: s.size,
                     mtime_ns: s.mtime_ns,
                 }),
-                Kind::Dir if !has_children(&src, k) => out.push(Change::MkDir {
+                Kind::Dir if !has_planned_children(&src, k, &blocks) => out.push(Change::MkDir {
                     path: s.rel.clone(),
                 }),
                 _ => {}
@@ -427,6 +430,26 @@ mod tests {
                 reason: SkipReason::Link
             }]
         );
+    }
+
+    #[test]
+    fn a_source_folder_holding_only_a_link_is_still_made() {
+        let out = d(vec![dir("D"), link("D/alias")], vec![]);
+        assert_eq!(
+            out,
+            vec![
+                Change::MkDir { path: rel("D") },
+                Change::Skipped {
+                    path: rel("D/alias"),
+                    reason: SkipReason::Link
+                },
+            ]
+        );
+        // A folder whose only child is a folder holding a link: the inner MkDir
+        // makes both.
+        let out = d(vec![dir("E"), dir("E/F"), link("E/F/alias")], vec![]);
+        assert!(out.contains(&Change::MkDir { path: rel("E/F") }));
+        assert!(!out.contains(&Change::MkDir { path: rel("E") }));
     }
 
     #[test]
