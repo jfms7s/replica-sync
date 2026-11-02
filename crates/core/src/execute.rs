@@ -2529,6 +2529,9 @@ mod apply_tests {
         assert_eq!(r.outcome, Outcome::Applied);
     }
 
+    // Unix only: on Windows the batch keeps the first copy's temp open until
+    // the flush, so its folder can't be renamed away mid-run.
+    #[cfg(unix)]
     #[test]
     fn a_folder_made_earlier_in_the_run_and_then_removed_is_made_again() {
         let f = fixture();
