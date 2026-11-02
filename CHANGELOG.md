@@ -17,6 +17,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - If a capital-letters-only rename fails half-way and can't be undone, the error now says where the file was left.
 
 ### Security
+- Copies never follow a link on the source: a source file replaced by a link since the Preview is skipped as "changed since preview" instead of copying what the link points to (Linux `O_NOFOLLOW`, Windows opens the link itself). A link in a parent folder is still followed.
+- A saved pair's folder path is now checked like every other path when the pairs file loads (`..`, empty parts, and on Windows `\` or `:`, are refused). Pairs saved by earlier versions load unchanged.
+- On Linux the app's data folder, its `logs` folder, the pairs file, the settings file and new run logs are private to your user (folders 0700, files 0600).
 - Every change to your files in the backup folder (copying, the rename of a finished copy into place, moving, creating and removing folders, trashing and restoring) now goes through one checked path, which checks right before the write that the folder still resolves inside the backup folder. A path under a link pointing outside is refused instead of followed. (The trash's own bookkeeping inside `.sync-trash` and the drive's case probe keep their own checks.)
 
 ## 0.4.1 — 2026-11-01

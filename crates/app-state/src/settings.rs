@@ -49,10 +49,11 @@ impl Settings {
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+            replica_sync_core::private::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let mut f = fs::File::create(&tmp)?;
+        let _ = fs::remove_file(&tmp);
+        let mut f = replica_sync_core::private::create_file(&tmp)?;
         f.write_all(
             serde_json::to_string_pretty(self)
                 .map_err(io::Error::other)?

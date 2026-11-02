@@ -1,5 +1,6 @@
 //! Saved source → replica pairs, found by drive ID rather than drive letter.
 
+use crate::model::RelPath;
 use crate::rules::{RuleError, SkipRules};
 use crate::volume::{self, Volumes};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,8 @@ pub const DEFAULT_TRASH_DAYS: u32 = 30;
 pub struct Side {
     pub volume_id: String,
     /// `/`-separated path from the drive's mount root; empty for the root itself.
-    pub rel_path: String,
+    /// Validated like any [`RelPath`] on load (same JSON string as before).
+    pub rel_path: RelPath,
     pub label: String,
 }
 
@@ -91,11 +93,13 @@ fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairE
     let rest = canonical
         .strip_prefix(&mount_root)
         .map_err(|_| io::Error::other("folder is not under its drive's mount point"))?;
-    let rel_path = rest
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
+    let rel_path = RelPath::try_from(
+        rest.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+    .map_err(io::Error::other)?;
     Ok((
         Side {
             volume_id: vol.id,
@@ -173,13 +177,7 @@ fn resolve_side(
             side: kind,
             label: side.label.clone(),
         })?;
-    let mut root = vol.mount_root;
-    for part in side.rel_path.split('/').filter(|p| !p.is_empty()) {
-        if part == ".." || part == "." {
-            return Err(ResolveError::FolderMissing(root));
-        }
-        root.push(part);
-    }
+    let root = side.rel_path.to_path(&vol.mount_root);
     if !root.is_dir() {
         return Err(ResolveError::FolderMissing(root));
     }
@@ -303,7 +301,7 @@ impl PairStore {
 
     pub fn save(&self) -> io::Result<()> {
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            crate::private::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(&StoreOut {
@@ -311,7 +309,9 @@ impl PairStore {
             pairs: &self.pairs,
         })
         .map_err(io::Error::other)?;
-        let mut file = fs::File::create(&tmp)?;
+        // A leftover temp keeps its mode; start from a fresh 0600 file.
+        let _ = fs::remove_file(&tmp);
+        let mut file = crate::private::create_file(&tmp)?;
         file.write_all(text.as_bytes())?;
         // On disk before the rename, so a crash never leaves an empty or torn store.
         file.sync_all()?;
@@ -340,6 +340,7 @@ impl PairStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::rel;
     use crate::volume::VolumeInfo;
     use std::cell::RefCell;
     use std::fs;
@@ -476,11 +477,11 @@ mod tests {
             p.source,
             Side {
                 volume_id: "A".into(),
-                rel_path: "Photos".into(),
+                rel_path: rel("Photos"),
                 label: "Disk A".into()
             }
         );
-        assert_eq!(p.replica.rel_path, "Backup/Photos");
+        assert_eq!(p.replica.rel_path.as_str(), "Backup/Photos");
         assert!(p.is_first_sync());
     }
 
@@ -648,5 +649,71 @@ mod tests {
         let mut again = again;
         assert!(again.remove(&p.id));
         assert!(again.get(&p.id).is_none());
+    }
+
+    /// A store as 0.4 wrote it: loads, and saves back byte for byte.
+    const STORE_0_4: &str = r#"{
+  "version": 1,
+  "pairs": [
+    {
+      "id": "18a2b3c4d5e6f708",
+      "name": "Photos",
+      "source": {
+        "volume_id": "uuid:1111-AAAA",
+        "rel_path": "Users/me/Photos",
+        "label": "Disk A"
+      },
+      "replica": {
+        "volume_id": "win32:0a1b2c3d",
+        "rel_path": "",
+        "label": "STICK"
+      },
+      "user_rules": [
+        "*.tmp"
+      ],
+      "trash_days": 30,
+      "last_sync": {
+        "at": "2026-10-17T15:53:45Z",
+        "applied": 3,
+        "failed": 0,
+        "stopped": false
+      },
+      "last_scan_files": 120
+    }
+  ]
+}"#;
+
+    #[test]
+    fn a_0_4_store_round_trips_byte_for_byte() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pairs.json");
+        fs::write(&path, STORE_0_4).unwrap();
+        let store = PairStore::load(&path).unwrap();
+        assert_eq!(store.pairs[0].source.rel_path, rel("Users/me/Photos"));
+        assert!(store.pairs[0].replica.rel_path.is_root());
+        store.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), STORE_0_4);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_stored_path_that_leaves_its_folder_fails_to_load() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pairs.json");
+        for bad in ["a/../b", "..", "a//b", "./a"] {
+            fs::write(&path, STORE_0_4.replace("Users/me/Photos", bad)).unwrap();
+            let Err(e) = PairStore::load(&path) else {
+                panic!("{bad} loaded");
+            };
+            assert!(
+                e.to_string().contains("invalid relative path"),
+                "{bad}: {e}"
+            );
+        }
     }
 }
