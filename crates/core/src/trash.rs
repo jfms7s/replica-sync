@@ -158,7 +158,7 @@ impl TrashWriter {
     fn open_run(&self) -> io::Result<(String, PathBuf, File)> {
         let base = trash_base(&self.replica_root)?;
         fs::create_dir_all(&base)?;
-        hide(&base);
+        crate::volume::hide(&base);
         let (mut id, mut n) = (self.stamp.clone(), 1);
         loop {
             let dir = base.join(&id);
@@ -317,18 +317,6 @@ fn append_line(manifest: &mut File, path: &Path, line: &str) -> io::Result<()> {
     manifest.write_all(buf.as_bytes())?;
     manifest.sync_data()
 }
-
-#[cfg(windows)]
-fn hide(path: &Path) {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
-    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: `name` is NUL-terminated and outlives the call.
-    unsafe { SetFileAttributesW(name.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
-}
-
-#[cfg(not(windows))]
-fn hide(_: &Path) {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TrashRunInfo {

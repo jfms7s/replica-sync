@@ -16,6 +16,29 @@ pub use linux::LinuxVolumes as SystemVolumes;
 pub mod windows;
 #[cfg(windows)]
 pub use windows::WindowsVolumes as SystemVolumes;
+#[cfg(windows)]
+pub use windows::free_space;
+#[cfg(windows)]
+pub(crate) use windows::hide;
+
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub use unix::free_space;
+
+/// Every other system (macOS, the BSDs): builds, and reports "unsupported"
+/// when asked about a drive instead of failing to compile.
+#[cfg(not(any(target_os = "linux", windows)))]
+mod other;
+#[cfg(not(any(target_os = "linux", windows)))]
+pub use other::UnsupportedVolumes as SystemVolumes;
+#[cfg(not(any(unix, windows)))]
+pub use other::free_space;
+
+/// Marks a folder hidden where the system has such a flag (Windows); elsewhere
+/// a dot name already hides it.
+#[cfg(not(windows))]
+pub(crate) fn hide(_: &std::path::Path) {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VolumeInfo {
@@ -100,43 +123,6 @@ fn create_probe(probe: &Path) -> io::Result<()> {
             create().map(|_| ())
         }
         Err(e) => Err(e),
-    }
-}
-
-#[cfg(unix)]
-#[allow(clippy::unnecessary_cast)] // statvfs field widths differ between platforms
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `c` is NUL-terminated and `st` is a valid out-pointer.
-    if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: statvfs returned 0, so it filled `st`.
-    let st = unsafe { st.assume_init() };
-    Ok(st.f_bavail as u64 * st.f_frsize as u64)
-}
-
-#[cfg(windows)]
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut free = 0u64;
-    // SAFETY: `name` is NUL-terminated; `free` is a valid out-pointer; the others may be null.
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            name.as_ptr(),
-            &mut free,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(free)
     }
 }
 
