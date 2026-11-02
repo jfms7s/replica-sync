@@ -79,6 +79,7 @@ export default function Applying({ mode, pairName, navigate }: { mode: 'apply' |
             bytes: formatBytes(lang, p.bytes_done), totalBytes: formatBytes(lang, p.bytes_total),
           })}</p>
           {p.current && <p className="muted">{t('apply.current', { path: p.current })}</p>}
+          {p.checking && <p className="muted">{t('apply.checking', { done: formatCount(lang, p.checking.done), total: formatCount(lang, p.checking.total) })}</p>}
           {speed > 0 && <p className="muted">{t('apply.speed', { speed: formatBytes(lang, speed), eta: formatDuration(eta) })}</p>}
         </>
       )}

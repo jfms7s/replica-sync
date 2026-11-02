@@ -10,6 +10,14 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
   const { report } = run;
   const count = (k: 'applied' | 'skipped' | 'failed') => report.results.filter((r) => r.outcome.kind === k).length;
   const failed = report.results.flatMap((r) => (r.outcome.kind === 'failed' ? [{ path: r.path, reason: r.outcome.reason }] : []));
+  const spot = report.spot_check;
+  const spotCheckLine = !spot || (spot.checked === 0 && !spot.cancelled)
+    ? null
+    : spot.cancelled
+      ? t('result.spotCheckCancelled', { checked: spot.checked })
+      : spot.mismatched > 0
+        ? t('result.spotCheckMismatch', { checked: spot.checked, mismatched: spot.mismatched })
+        : t('result.spotCheck', { checked: spot.checked });
   const [oldRuns, setOldRuns] = useState(run.oldTrashRuns);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -32,6 +40,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
       <p>{t('result.summary', { applied: count('applied'), skipped: count('skipped'), failed: count('failed') })}</p>
       {report.stopped && <p className="warn">{t('result.stopped', { reason: stopText(tx, report.stopped) })}</p>}
       {report.stopped && run.notDone > 0 && <p className="warn">{t('result.notDone', { count: run.notDone })}</p>}
+      {spotCheckLine && <p className={spot!.mismatched > 0 ? 'warn' : 'muted'}>{spotCheckLine}</p>}
       {run.warnings.map((w, i) => <p key={i} className="warn">{t('result.warning', { text: errorText(tx, lang, w) })}</p>)}
       {failed.length > 0 && (
         <section className="panel">

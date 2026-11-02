@@ -30,7 +30,7 @@ export type SkipReason =
       | 'backOnSource' | 'alreadyGone' | 'noLongerInReplica' | 'folderNotEmpty' }
   | { code: 'unreadable'; side: SideKind; detail: string };
 export type FailReason =
-  | { code: 'inUse' | 'permissionDenied' | 'changedDuringCopy' | 'targetExists' | 'outsideReplica' | 'interrupted' }
+  | { code: 'inUse' | 'permissionDenied' | 'changedDuringCopy' | 'targetExists' | 'outsideReplica' | 'interrupted' | 'verifyMismatch' }
   | { code: 'io'; detail: string };
 export interface StopReason { code: 'cancelled' | 'replicaDisconnected' | 'sourceDisconnected' | 'replicaFull' }
 
@@ -68,10 +68,14 @@ export interface SideProgress { files: number; bytes: number; current: string }
 export interface ScanProgress { source: SideProgress; replica: SideProgress; approxFiles: number | null }
 export interface ApplyProgress {
   bytes_done: number; bytes_total: number; changes_done: number; changes_total: number; current: RelPath | null;
+  /** Set while the run reads back its spot-check sample. */
+  checking: { done: number; total: number } | null;
 }
 export type Outcome = { kind: 'applied' } | { kind: 'skipped'; reason: SkipReason } | { kind: 'failed'; reason: FailReason };
 export interface ChangeResult { id: number; path: RelPath; outcome: Outcome }
-export interface RunReport { results: ChangeResult[]; stopped: StopReason | null; trash_run: string | null }
+/** The post-apply read-back of a sample of the copies. */
+export interface SpotCheck { checked: number; mismatched: number; cancelled: boolean }
+export interface RunReport { results: ChangeResult[]; stopped: StopReason | null; trash_run: string | null; spot_check: SpotCheck | null }
 export interface RunView {
   pairId: string; trashDays: number; report: RunReport; notDone: number; logPath: string | null; oldTrashRuns: string[]; warnings: AppError[];
 }

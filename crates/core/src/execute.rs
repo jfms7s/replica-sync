@@ -13,6 +13,7 @@ use crate::reason::{FailReason, SkipReason};
 use crate::rules::{CASE_RENAME_SUFFIX, TEMP_SUFFIX};
 use crate::safety::{self, ReplicaRoot, SafetyError};
 use crate::trash::{TrashReason, TrashWriter};
+use crate::verify::{CheckProgress, SpotCheck, SpotCheckLimits, spot_check};
 use filetime::FileTime;
 use serde::Serialize;
 use std::cell::Cell;
@@ -66,7 +67,7 @@ impl Control {
     }
 
     /// Blocks while paused; false once cancelled.
-    fn proceed(&self) -> bool {
+    pub(crate) fn proceed(&self) -> bool {
         loop {
             match self.state.load(Ordering::SeqCst) {
                 RUN => return true,
@@ -84,6 +85,8 @@ pub struct Progress {
     pub changes_done: usize,
     pub changes_total: usize,
     pub current: Option<RelPath>,
+    /// Set while the run reads back its spot-check sample, after the last change.
+    pub checking: Option<CheckProgress>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -107,6 +110,8 @@ pub struct RunReport {
     pub stopped: Option<StopReason>,
     pub trash_run: Option<String>,
     pub durability: Durability,
+    /// The read-back of a sample of the copies; `None` when the run stopped.
+    pub spot_check: Option<SpotCheck>,
 }
 
 /// How a run made its copies durable before renaming them; the run log shows it.
@@ -416,9 +421,31 @@ pub fn execute(
     if run.report.stopped.is_none() {
         run.flush(Commit::All);
     }
-    let mut report = run.report;
-    report.trash_run = run.trash.run_id().map(str::to_owned);
-    report.durability = run.disk.durability();
+    let Run {
+        mut report,
+        trash,
+        disk,
+        progress,
+        on_progress,
+        ..
+    } = run;
+    report.trash_run = trash.run_id().map(str::to_owned);
+    report.durability = disk.durability();
+    // Every copy is durable and renamed into place by now: read some back.
+    if report.stopped.is_none() {
+        progress.current = None;
+        let found = spot_check(
+            plan,
+            &mut report,
+            ctx,
+            SpotCheckLimits::default(),
+            &mut |p| {
+                progress.checking = Some(p);
+                on_progress(progress);
+            },
+        );
+        report.spot_check = Some(found);
+    }
     report
 }
 

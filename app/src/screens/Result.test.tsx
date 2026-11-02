@@ -14,6 +14,7 @@ const run: RunView = {
   report: {
     trash_run: null,
     stopped: null,
+    spot_check: { checked: 1, mismatched: 0, cancelled: false },
     results: [
       { id: 0, path: 'a.txt', outcome: { kind: 'applied' } },
       { id: 1, path: 'b.txt', outcome: { kind: 'failed', reason: { code: 'inUse' } } },
@@ -60,5 +61,24 @@ describe('Result', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!);
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(screen.getByText('Trash runs older than 30 days: 1.')).toBeInTheDocument();
+  });
+
+  it('reports the spot check: all match, mismatches, cancelled, or nothing to check', () => {
+    const withCheck = (spot_check: RunView['report']['spot_check']): RunView => ({ ...run, report: { ...run.report, spot_check } });
+    const { rerender } = render(<I18nProvider lang="en"><Result run={run} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText('Spot check: read back 1 copied files, all match the source.')).toBeInTheDocument();
+    const mismatch = withCheck({ checked: 50, mismatched: 2, cancelled: false });
+    rerender(<I18nProvider lang="pt-PT"><Result run={mismatch} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText(/50 ficheiros copiados relidos, 2 diferentes da origem/)).toBeInTheDocument();
+    rerender(<I18nProvider lang="en"><Result run={withCheck({ checked: 3, mismatched: 0, cancelled: true })} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText('Spot check cancelled after 3 copied files.')).toBeInTheDocument();
+    rerender(<I18nProvider lang="en"><Result run={withCheck({ checked: 0, mismatched: 0, cancelled: false })} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.queryByText(/Spot check/)).not.toBeInTheDocument();
+  });
+
+  it('a mismatched copy is listed as failed in the user language', () => {
+    const bad: RunView = { ...run, report: { ...run.report, results: [{ id: 0, path: 'a.txt', outcome: { kind: 'failed', reason: { code: 'verifyMismatch' } } }] } };
+    render(<I18nProvider lang="en"><Result run={bad} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText('a.txt: the copy, read back, differs from the source')).toBeInTheDocument();
   });
 });

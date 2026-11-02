@@ -16,6 +16,7 @@ pub mod safety;
 pub mod scan;
 pub mod session;
 pub mod trash;
+pub mod verify;
 pub mod volume;
 
 #[cfg(test)]
