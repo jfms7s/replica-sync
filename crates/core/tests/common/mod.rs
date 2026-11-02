@@ -58,6 +58,7 @@ pub fn apply_all(src: &Path, rep: &Path, prepared: &Prepared) -> RunReport {
         replica: &replica,
         control: &control,
         trash_stamp: trash::new_run_stamp(),
+        drive_check: None,
     };
     execute(
         &prepared.plan,

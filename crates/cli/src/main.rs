@@ -191,6 +191,7 @@ fn main() -> Result<ExitCode> {
                 replica: &replica_root,
                 control: &control,
                 trash_stamp: trash::new_run_stamp(),
+                drive_check: None,
             };
             let report = execute(&p.plan, &approved, &ctx, &mut |_| {});
             print!("{}", render_run("cli", &p, &approved, &report));

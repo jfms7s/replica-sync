@@ -280,6 +280,7 @@ fn an_unticked_leftover_at_a_copy_temp_name_is_kept_and_the_copy_fails() {
         replica: &replica,
         control: &control,
         trash_stamp: trash::new_run_stamp(),
+        drive_check: None,
     };
     let report = replica_sync_core::execute::execute(&prepared.plan, &only_copy, &ctx, &mut |_| {});
     assert!(
