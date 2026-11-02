@@ -10,6 +10,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - `replica-sync-cli apply --yes` refuses (exit code 3) when more than half of the replica would be removed or replaced, or the replica drive looks too small, unless `--force` is also given.
 
 ### Fixed
+- Planning after renaming many folders is fast again: 8,000 renamed folders plan in 0.1 s instead of 2.3 s (move detection was quadratic in the number of renamed folders and in same-named files such as `cover.jpg`).
 - An Apply now stops as "backup drive disconnected" (or "source drive disconnected") when the saved drive is no longer the one at that folder, checked during the run before each batch of copies is put in place and at least every 2 seconds (on Linux, a drive unmounted from under its folder is caught at the next change). Before, only a missing folder stopped it, so on Linux a backup drive unmounted from a fixed mount point (`/mnt/backup`) left an empty folder and the remaining copies went to the system disk.
 - A move, delete or copy whose source can't be read (permission denied, in use) now fails with that reason and is offered by **Retry failed**; a move used to be skipped as "changed since preview". A new empty folder whose source folder was removed since the preview is skipped ("deleted since scan"), and a folder removal is skipped when the source has that folder again ("back on source").
 - The Apply progress bar ends at 100 %: a copy that is skipped or fails is taken out of the total instead of leaving the bar short (or past the end).
