@@ -73,4 +73,32 @@ mod tests {
             );
         }
     }
+
+    /// The logs folder below 260 characters and the log file above: on Windows
+    /// `dunce` gave one a `\\?\` prefix and not the other, so a real log was
+    /// refused. Both sides now come from `safety::canonical`.
+    #[test]
+    fn a_log_past_the_long_path_limit_is_still_a_log_file() {
+        let t = tempfile::tempdir().unwrap();
+        let mut data = t.path().to_path_buf();
+        while canonical(&data).unwrap().join("logs").as_os_str().len() < 225 {
+            data.push("0123456789");
+            fs::create_dir_all(&data).unwrap();
+        }
+        let paths = AppPaths::new(data);
+        fs::create_dir_all(paths.logs_dir()).unwrap();
+        assert!(
+            dunce::simplified(&canonical(&paths.logs_dir()).unwrap())
+                .as_os_str()
+                .len()
+                < 260
+        );
+        let log = paths.logs_dir().join(format!("{}.log", "r".repeat(50)));
+        fs::write(&log, "x").unwrap();
+        assert!(log.as_os_str().len() > 260);
+        assert_eq!(
+            canonical(&paths.log_file(&log).unwrap()).unwrap(),
+            canonical(&log).unwrap()
+        );
+    }
 }

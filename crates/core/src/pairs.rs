@@ -88,10 +88,10 @@ pub struct NewPair<'a> {
 /// other side. Both canonical paths come from [`canonical`] (always verbatim
 /// on Windows), so a long path still strips and compares correctly.
 fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairError> {
-    let canonical = canonical(path)?;
-    let vol = volumes.volume_of(&canonical)?;
-    let mount_root = crate::safety::canonical(&vol.mount_root)?;
-    let rest = canonical
+    let canonical_path = canonical(path)?;
+    let vol = volumes.volume_of(&canonical_path)?;
+    let mount_root = canonical(&vol.mount_root)?;
+    let rest = canonical_path
         .strip_prefix(&mount_root)
         .map_err(|_| io::Error::other("folder is not under its drive's mount point"))?;
     let rel_path = RelPath::try_from(
@@ -107,7 +107,7 @@ fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairE
             rel_path,
             label: vol.label,
         },
-        canonical,
+        canonical_path,
     ))
 }
 
@@ -351,10 +351,8 @@ mod tests {
     struct FakeVolumes(RefCell<Vec<VolumeInfo>>);
 
     impl FakeVolumes {
-        #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
-        #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
         fn mount(&self, id: &str, root: &Path) {
-            let root = dunce::canonicalize(root).unwrap();
+            let root = crate::safety::canonical(root).unwrap();
             self.0.borrow_mut().retain(|v| v.id != id);
             self.0.borrow_mut().push(VolumeInfo {
                 id: id.into(),
@@ -365,10 +363,8 @@ mod tests {
     }
 
     impl Volumes for FakeVolumes {
-        #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
-        #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
         fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
-            let path = dunce::canonicalize(path)?;
+            let path = crate::safety::canonical(path)?;
             self.0
                 .borrow()
                 .iter()

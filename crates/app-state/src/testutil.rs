@@ -12,10 +12,8 @@ use std::path::Path;
 pub struct FakeVolumes(pub RefCell<Vec<VolumeInfo>>);
 
 impl FakeVolumes {
-    #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
-    #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
     pub fn mount(&self, id: &str, root: &Path) {
-        let root = dunce::canonicalize(root).unwrap();
+        let root = replica_sync_core::safety::canonical(root).unwrap();
         self.0.borrow_mut().retain(|v| v.id != id);
         self.0.borrow_mut().push(VolumeInfo {
             id: id.into(),
@@ -29,10 +27,8 @@ impl FakeVolumes {
 }
 
 impl Volumes for FakeVolumes {
-    #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
-    #[allow(clippy::disallowed_methods)] // test fake: its paths only compare with each other
     fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
-        let path = dunce::canonicalize(path)?;
+        let path = replica_sync_core::safety::canonical(path)?;
         self.0
             .borrow()
             .iter()

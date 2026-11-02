@@ -32,8 +32,9 @@ pub fn nesting(a: &Path, b: &Path) -> Option<Nesting> {
 /// The canonical form every path comparison in replica-sync uses: a thin
 /// wrapper over `std::fs::canonicalize`, which is always `\\?\` verbatim on
 /// Windows. Never compare with `dunce::canonicalize`: it drops the verbatim
-/// prefix below 260 characters and keeps it above, so two of its results (or
-/// one of its and one of these) stop comparing once a path gets long. `dunce`
+/// prefix only when it can (below 260 characters, and not for reserved names,
+/// trailing dots or spaces), so two of its results (or one of its and one of
+/// these) stop comparing once a path gets long or unusual. `dunce`
 /// is for display and Win32 calls only (clippy's `disallowed-methods` enforces
 /// this; see `clippy.toml`).
 pub fn canonical(path: &Path) -> io::Result<PathBuf> {
