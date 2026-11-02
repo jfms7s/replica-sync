@@ -107,13 +107,11 @@ fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairE
 }
 
 fn check_folders(a: &Path, b: &Path) -> Result<(), PairError> {
-    if a == b {
-        return Err(PairError::SameFolder);
+    match crate::safety::nesting(a, b) {
+        Some(crate::safety::Nesting::Same) => Err(PairError::SameFolder),
+        Some(crate::safety::Nesting::Nested) => Err(PairError::Nested),
+        None => Ok(()),
     }
-    if a.starts_with(b) || b.starts_with(a) {
-        return Err(PairError::Nested);
-    }
-    Ok(())
 }
 
 fn new_id() -> String {

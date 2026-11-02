@@ -56,6 +56,8 @@ pub fn new_run_stamp() -> String {
 
 pub struct TrashWriter {
     replica_root: PathBuf,
+    /// Checks each trashed path's containment; made with the first move.
+    replica: Option<ReplicaRoot>,
     stamp: String,
     run: Option<(String, PathBuf, File)>,
 }
@@ -64,6 +66,7 @@ impl TrashWriter {
     pub fn new(replica_root: &Path, stamp: String) -> TrashWriter {
         TrashWriter {
             replica_root: replica_root.to_path_buf(),
+            replica: None,
             stamp,
             run: None,
         }
@@ -81,6 +84,9 @@ impl TrashWriter {
         mtime_ns: i64,
         reason: TrashReason,
     ) -> io::Result<()> {
+        if self.replica.is_none() {
+            self.replica = Some(ReplicaRoot::new(&self.replica_root)?);
+        }
         let opened_here = self.run.is_none();
         if opened_here {
             self.run = Some(self.open_run()?);
@@ -108,6 +114,11 @@ impl TrashWriter {
         mtime_ns: i64,
         reason: TrashReason,
     ) -> io::Result<()> {
+        let replica = self.replica.as_ref().expect("made by move_in");
+        let from = replica.target(rel).map_err(|e| match e {
+            SafetyError::Io(e) => e,
+            e @ SafetyError::Escapes(_) => io::Error::new(io::ErrorKind::InvalidInput, e),
+        })?;
         let (_, run_dir, manifest) = self.run.as_mut().expect("opened by move_in");
         let manifest_path = run_dir.join(MANIFEST);
         let dest = rel.to_path(&run_dir.join(FILES_DIR));
@@ -126,7 +137,6 @@ impl TrashWriter {
         }))
         .map_err(io::Error::other)?;
         let recorded = manifest.metadata()?.len();
-        let from = rel.to_path(&self.replica_root);
         fs::rename(&from, &dest)?;
         if let Err(e) = append_line(manifest, &manifest_path, &line) {
             // Undo, so a full or failing disk never leaves a trashed file the
@@ -664,6 +674,22 @@ mod tests {
         let mut w = TrashWriter::new(root, STAMP.into());
         w.move_in(&rel(p), 3, ns(T0), reason).unwrap();
         w
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_in_refuses_a_path_under_a_link_pointing_outside() {
+        let outside = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        write_file(outside.path(), "x.txt", b"keep", T0);
+        std::os::unix::fs::symlink(outside.path(), d.path().join("Docs")).unwrap();
+        let mut w = TrashWriter::new(d.path(), STAMP.into());
+        let err = w
+            .move_in(&rel("Docs/x.txt"), 4, ns(T0), TrashReason::Deleted)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(outside.path().join("x.txt")).unwrap(), b"keep");
+        assert!(w.run_id().is_none());
     }
 
     #[test]
