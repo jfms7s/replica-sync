@@ -145,22 +145,34 @@ impl ApplyJob {
 
     /// [`run`](Self::run) against the given drives (tests pass fakes).
     fn run_on(&self, volumes: &dyn Volumes, on_progress: &mut dyn FnMut(&Progress)) -> RunReport {
-        // A one-off lookup error is let through; a second one in a row stops
-        // the run as if the drive were gone.
+        // A different or missing drive stops the run. A one-off lookup error
+        // is let through; a second one in a row stops it like a missing drive.
         let io_errors = Cell::new(0u32);
         let check = || {
-            let side = pairs::verify_source(&self.pair, &self.resolved, volumes)
-                .map_err(|e| (e, StopReason::SourceDisconnected))
-                .and_then(|()| {
-                    pairs::verify_replica(&self.pair, &self.resolved, volumes)
-                        .map_err(|e| (e, StopReason::ReplicaDisconnected))
-                });
-            match side {
-                Ok(()) => {
+            let sides = [
+                (
+                    pairs::verify_source(&self.pair, &self.resolved, volumes),
+                    StopReason::SourceDisconnected,
+                ),
+                (
+                    pairs::verify_replica(&self.pair, &self.resolved, volumes),
+                    StopReason::ReplicaDisconnected,
+                ),
+            ];
+            let mut lookup_failed = None;
+            for (result, stop) in sides {
+                match result {
+                    Ok(()) => {}
+                    Err(ResolveError::Io(_)) => lookup_failed = lookup_failed.or(Some(stop)),
+                    Err(_) => return Err(stop),
+                }
+            }
+            match lookup_failed {
+                None => {
                     io_errors.set(0);
                     Ok(())
                 }
-                Err((ResolveError::Io(_), stop)) => {
+                Some(stop) => {
                     io_errors.set(io_errors.get() + 1);
                     if io_errors.get() >= 2 {
                         Err(stop)
@@ -168,7 +180,6 @@ impl ApplyJob {
                         Ok(())
                     }
                 }
-                Err((_, stop)) => Err(stop),
             }
         };
         let ctx = ExecContext {
@@ -1151,6 +1162,56 @@ mod tests {
             assert!(report.applied() < 5);
             let run = w.s.finish_apply(job, report).unwrap();
             assert_eq!(run.report.stopped, Some(stop));
+        }
+    }
+
+    /// Drives whose lookup fails with an I/O error on the calls in `fail`.
+    struct FlakyVolumes<'a> {
+        inner: &'a FakeVolumes,
+        calls: Cell<usize>,
+        fail: Vec<usize>,
+    }
+
+    impl Volumes for FlakyVolumes<'_> {
+        fn volume_of(&self, path: &Path) -> std::io::Result<volume::VolumeInfo> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if self.fail.contains(&n) {
+                return Err(std::io::Error::other("lookup failed"));
+            }
+            self.inner.volume_of(path)
+        }
+        fn find(&self, id: &str) -> std::io::Result<Option<volume::VolumeInfo>> {
+            self.inner.find(id)
+        }
+    }
+
+    #[test]
+    fn one_failed_drive_lookup_is_tolerated_two_in_a_row_stop_the_run() {
+        // Each check makes two lookups (source, then replica).
+        for (fail, stopped) in [
+            (vec![1], None),
+            (vec![1, 3], Some(StopReason::ReplicaDisconnected)),
+            (vec![0, 2], Some(StopReason::SourceDisconnected)),
+            (vec![1, 5], None),
+        ] {
+            let mut w = world();
+            for i in 0..5 {
+                write(&w.rep(), &format!("old{i}.txt"), b"x");
+            }
+            write(&w.src(), "keep.txt", b"k");
+            w.scan();
+            w.s.confirm_guard().unwrap();
+            let mut job = w.s.begin_apply(&w.v).unwrap();
+            job.drive_check_every = Duration::ZERO;
+            let flaky = FlakyVolumes {
+                inner: &w.v,
+                calls: Cell::new(0),
+                fail: fail.clone(),
+            };
+            let report = job.run_on(&flaky, &mut |_| {});
+            assert_eq!(report.stopped, stopped, "{fail:?}");
+            w.s.finish_apply(job, report).unwrap();
         }
     }
 
