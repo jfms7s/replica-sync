@@ -3,11 +3,14 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+# Nothing by default; only the build job, which creates the draft release,
+# gets a write token.
+permissions: {}
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -15,25 +18,27 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
       - name: Rust toolchain (pinned in rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: app/src-tauri -> target
+          # Its own cache space: a release never restores a cache another run wrote.
+          prefix-key: v0-release
       - run: npm ci
         working-directory: app
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -50,5 +55,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cargo build --release -p replica-sync-cli
+          cargo build --release --locked -p replica-sync-cli
           gh release upload "${{ github.ref_name }}" target/release/replica-sync-cli.exe --clobber

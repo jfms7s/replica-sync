@@ -4,6 +4,9 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   scan-diff-1m:
     strategy:
@@ -12,11 +15,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Rust toolchain (pinned in rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p replica-sync-cli
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --release --locked -p replica-sync-cli
       - name: 1M files, both sides identical (target < 120 s on SSD; runner disks vary)
         shell: bash
         run: |

@@ -4,6 +4,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -12,27 +15,30 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Rust toolchain (pinned in rust-toolchain.toml)
         run: rustup toolchain install
       - run: rustup component add llvm-tools-preview
         if: runner.os == 'Linux'
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Only pushes to main write the cache, so a PR cannot poison it.
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --no-fail-fast
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --no-fail-fast --locked
         if: runner.os != 'Linux'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         if: runner.os == 'Linux'
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Test with coverage (eng-metrics-lab)
         if: runner.os == 'Linux'
         run: |
-          cargo llvm-cov --workspace --no-fail-fast --lcov --output-path "$RUNNER_TEMP/coverage-rust.lcov"
+          cargo llvm-cov --workspace --no-fail-fast --locked --lcov --output-path "$RUNNER_TEMP/coverage-rust.lcov"
           mkdir -p .quality
           mv "$RUNNER_TEMP/coverage-rust.lcov" .quality/coverage-rust.lcov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: runner.os == 'Linux'
         with:
           name: coverage-fragments
@@ -51,8 +57,8 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -71,7 +77,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: mkdir -p ../.quality && npx knip --reporter json --no-exit-code > ../.quality/deadcode-ts.json
         continue-on-error: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !cancelled() }}
         with:
           name: coverage-fragments
@@ -79,7 +85,7 @@ jobs:
         continue-on-error: true
       - name: Code quality (report-only)
         if: ${{ !cancelled() }}
-        uses: jfms7s/eng-metrics-lab/action@v0
+        uses: jfms7s/eng-metrics-lab/action@961b196f18ec58c1fc42cdd0e7e000094a39f545 # v0.4.0
         continue-on-error: true
 
   app:
@@ -89,27 +95,28 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
       - name: Rust toolchain (pinned in rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: app/src-tauri -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: npm ci
         working-directory: app
       - run: cargo fmt --check
         working-directory: app/src-tauri
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
         working-directory: app/src-tauri
       - run: npx tauri build --debug --no-bundle
         working-directory: app
