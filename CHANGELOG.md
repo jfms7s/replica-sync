@@ -11,6 +11,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ### Fixed
 - An Apply now stops as "backup drive disconnected" (or "source drive disconnected") when the saved drive is no longer the one at that folder, checked during the run before each batch of copies is put in place and at least every 2 seconds (on Linux, a drive unmounted from under its folder is caught at the next change). Before, only a missing folder stopped it, so on Linux a backup drive unmounted from a fixed mount point (`/mnt/backup`) left an empty folder and the remaining copies went to the system disk.
+- A move, delete or copy whose source can't be read (permission denied, in use) now fails with that reason and is offered by **Retry failed**; a move used to be skipped as "changed since preview". A new empty folder whose source folder was removed since the preview is skipped ("deleted since scan"), and a folder removal is skipped when the source has that folder again ("back on source").
+- The Apply progress bar ends at 100 %: a copy that is skipped or fails is taken out of the total instead of leaving the bar short (or past the end).
+- If a capital-letters-only rename fails half-way and can't be undone, the error now says where the file was left.
 
 ### Security
 - Every change to your files in the backup folder (copying, the rename of a finished copy into place, moving, creating and removing folders, trashing and restoring) now goes through one checked path, which checks right before the write that the folder still resolves inside the backup folder. A path under a link pointing outside is refused instead of followed. (The trash's own bookkeeping inside `.sync-trash` and the drive's case probe keep their own checks.)
