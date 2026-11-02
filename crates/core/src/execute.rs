@@ -351,6 +351,8 @@ pub fn execute(
         on_progress,
         last_drive_check: Cell::new(None),
         root_devs: ctx.drive_check.as_ref().and_then(|_| root_devs(ctx)),
+        buf: Vec::new(),
+        made_dirs: HashSet::new(),
     };
     for p in todo {
         let copy = match &p.change {
@@ -509,6 +511,11 @@ struct Run<'a, 'p> {
     last_drive_check: Cell<Option<Instant>>,
     /// (source, replica) device ids at the start, when a drive check is set.
     root_devs: Option<(u64, u64)>,
+    /// The copy buffer, allocated at the first copy and reused for the rest.
+    buf: Vec<u8>,
+    /// Replica folders this run already made (or found) for a copy: the next
+    /// copy into one skips `create_dir_all`, but still checks containment.
+    made_dirs: HashSet<RelPath>,
 }
 
 #[cfg(unix)]
@@ -649,7 +656,16 @@ impl Run<'_, '_> {
             }
             Err(e) => return Err(source_stop(&e, ctx)),
         }
-        let dest = act(ctx, ctx.replica.create_parent(rel))?;
+        let parent = rel.parent();
+        let known_dir = parent.as_ref().is_some_and(|p| self.made_dirs.contains(p));
+        let dest = if known_dir {
+            act(ctx, ctx.replica.target(rel))?
+        } else {
+            act(ctx, ctx.replica.create_parent(rel))?
+        };
+        if let Some(p) = parent {
+            self.made_dirs.insert(p);
+        }
         let tmp = temp_path(&dest);
         // Something already at the temp name is a leftover the user kept (its
         // planned Delete, which runs before copies, was unticked) or something
@@ -676,19 +692,29 @@ impl Run<'_, '_> {
         if !unchanged(&before) {
             return Err(Stop::Skip(SkipReason::ChangedSincePreview));
         }
-        let out = match ctx
-            .replica
-            .create_new(&safety::with_suffix(rel, TEMP_SUFFIX))
+        let temp_rel = safety::with_suffix(rel, TEMP_SUFFIX);
+        let mut created = ctx.replica.create_new(&temp_rel);
+        if known_dir
+            && matches!(&created, Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::NotFound)
         {
+            // The folder made earlier in this run is gone: make it again, once.
+            act(ctx, ctx.replica.create_parent(rel))?;
+            created = ctx.replica.create_new(&temp_rel);
+        }
+        let out = match created {
             Ok((_, out)) => out,
             Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(Stop::Fail(FailReason::TargetExists));
             }
             Err(e) => return Err(safety_stop(e, root)),
         };
+        if self.buf.is_empty() {
+            self.buf = vec![0u8; CHUNK];
+        }
         let synced = match write_temp(
             ctx,
             &mut self.disk,
+            &mut self.buf,
             src,
             out,
             &tmp,
@@ -878,6 +904,7 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
 fn write_temp(
     ctx: &ExecContext,
     disk: &mut durable::Replica,
+    buf: &mut [u8],
     mut src: File,
     mut out: File,
     tmp: &Path,
@@ -889,9 +916,8 @@ fn write_temp(
     let on_io = |e: io::Error| io_stop(&e, root);
     let (start, mut written) = (progress.bytes_done, 0u64);
     durable::write_fault(tmp).map_err(on_io)?;
-    let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = src.read(&mut buf).map_err(on_io)?;
+        let n = src.read(buf).map_err(on_io)?;
         if n == 0 {
             break;
         }
@@ -2501,6 +2527,36 @@ mod apply_tests {
             .find(|r| r.path.as_str() == "gone")
             .unwrap();
         assert_eq!(r.outcome, Outcome::Applied);
+    }
+
+    #[test]
+    fn a_folder_made_earlier_in_the_run_and_then_removed_is_made_again() {
+        let f = fixture();
+        write_file(&f.src, "d/x.txt", b"xx", T0);
+        write_file(&f.src, "d/y.txt", b"yy", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        let moved = Cell::new(false);
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p| {
+                // Just before the second copy, something moves the folder away.
+                if p.current.as_ref().is_some_and(|c| c.as_str() == "d/y.txt") && !moved.get() {
+                    fs::rename(f.rep.join("d"), f.rep.join("elsewhere")).unwrap();
+                    moved.set(true);
+                }
+            },
+        );
+        assert!(moved.get());
+        let y = report
+            .results
+            .iter()
+            .find(|r| r.path.as_str() == "d/y.txt")
+            .unwrap();
+        assert_eq!(y.outcome, Outcome::Applied, "{report:?}");
+        assert_eq!(fs::read(f.rep.join("d/y.txt")).unwrap(), b"yy");
     }
 
     #[test]
