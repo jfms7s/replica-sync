@@ -246,7 +246,19 @@ fn assert_converges(s: &Path, r: &Path, case: CaseMode) -> Result<(), TestCaseEr
     let report = apply_all(s, r, &p);
     prop_assert!(report.stopped.is_none(), "{:?}", report.stopped);
     prop_assert_eq!(report.failed(), 0, "{:?}", report.results);
-    prop_assert_eq!(sizes(without_thumbs(files(r, true))), sizes(files(s, true)));
+    let key = |t: BTreeMap<String, usize>| -> BTreeMap<String, usize> {
+        match case {
+            CaseMode::Sensitive => t,
+            // A folder holding skipped files (a `Thumbs.db`) keeps its replica
+            // spelling by design (`diff` won't rename it and carry them along),
+            // so on an insensitive drive only the folded names must match.
+            CaseMode::Insensitive => t.into_iter().map(|(k, v)| (fold(&k), v)).collect(),
+        }
+    };
+    prop_assert_eq!(
+        key(sizes(without_thumbs(files(r, true)))),
+        key(sizes(files(s, true)))
+    );
     let again = prepare_with_case(s, r, &[], case);
     prop_assert!(again.plan.is_empty(), "{:?}", again.plan.changes);
     Ok(())
