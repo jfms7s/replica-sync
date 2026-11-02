@@ -16,9 +16,9 @@ pub const BUILTIN_PATTERNS: &[&str] = &[
     ".DS_Store",
     "lost+found/",
     ".sync-trash/",
-    // `TEMP_SUFFIX`: the scan handles these before any rule runs; listed so
-    // the app shows it as a built-in rule.
-    "*.replica-sync.tmp",
+    // No `*TEMP_SUFFIX` pattern: the scan handles those names before any rule
+    // runs (a file is a leftover temp, which a replica plans as a Delete; a
+    // link or folder is blocked), so "always skipped" would misdescribe them.
     ".replica-sync-case-probe",
 ];
 
@@ -121,7 +121,6 @@ mod tests {
         assert!(r.is_skipped(&rel("Photos/THUMBS.DB"), false));
         assert!(r.is_skipped(&rel(".sync-trash"), true));
         assert!(r.is_skipped(&rel(".Trash-1000"), true));
-        assert!(r.is_skipped(&rel("a/b.jpg.replica-sync.tmp"), false));
         assert!(!r.is_skipped(&rel("Photos/a.jpg"), false));
         // folder-only built-in does not hit a file of the same name
         assert!(!r.is_skipped(&rel("lost+found"), false));
@@ -135,12 +134,12 @@ mod tests {
         use crate::reserved::{CASE_PROBE_NAME, CASE_RENAME_SUFFIX, TEMP_SUFFIX, TRASH_DIR};
         assert!(BUILTIN_PATTERNS.contains(&format!("{TRASH_DIR}/").as_str()));
         assert!(BUILTIN_PATTERNS.contains(&CASE_PROBE_NAME));
-        assert!(BUILTIN_PATTERNS.contains(&format!("*{TEMP_SUFFIX}").as_str()));
+        // The scan handles temp names itself; no rule (and no "always skipped" line) for them.
+        assert!(!BUILTIN_PATTERNS.iter().any(|p| p.contains(TEMP_SUFFIX)));
 
         let r = rules(&[]);
         assert!(r.is_skipped(&rel(TRASH_DIR), true));
         assert!(r.is_skipped(&rel(CASE_PROBE_NAME), false));
-        assert!(r.is_skipped(&rel(&format!("a/b.jpg{TEMP_SUFFIX}")), false));
         // Deliberately visible: a stranded case rename must never be hidden.
         let aside = format!("a/B.jpg{CASE_RENAME_SUFFIX}");
         assert!(!r.is_skipped(&rel(&aside), false));
