@@ -121,6 +121,7 @@ fn id_of(root: &Path) -> io::Result<String> {
 }
 
 /// Which source the id came from, printed by `replica-sync-cli volume` for the manual exFAT check.
+#[allow(clippy::disallowed_methods)] // dunce: a Win32-friendly path for GetVolumePathNameW, not compared
 pub fn id_method(path: &Path) -> io::Result<&'static str> {
     let root = mount_root(&dunce::canonicalize(path)?)?;
     Ok(if serial_from_file_id(&root).is_ok() {
@@ -159,6 +160,7 @@ fn label_of(root: &Path) -> String {
 }
 
 impl Volumes for WindowsVolumes {
+    #[allow(clippy::disallowed_methods)] // dunce: a Win32-friendly path for GetVolumePathNameW, not compared
     fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
         let root = mount_root(&dunce::canonicalize(path)?)?;
         Ok(VolumeInfo {

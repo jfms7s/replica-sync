@@ -29,6 +29,17 @@ pub fn nesting(a: &Path, b: &Path) -> Option<Nesting> {
     }
 }
 
+/// The canonical form every path comparison in replica-sync uses: a thin
+/// wrapper over `std::fs::canonicalize`, which is always `\\?\` verbatim on
+/// Windows. Never compare with `dunce::canonicalize`: it drops the verbatim
+/// prefix below 260 characters and keeps it above, so two of its results (or
+/// one of its and one of these) stop comparing once a path gets long. `dunce`
+/// is for display and Win32 calls only (clippy's `disallowed-methods` enforces
+/// this; see `clippy.toml`).
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path)
+}
+
 /// `rel` with `suffix` added to its last name (a temp or rename-aside name).
 pub fn with_suffix(rel: &RelPath, suffix: &str) -> RelPath {
     RelPath::new(&format!("{}{suffix}", rel.as_str())).expect("a suffix keeps a valid path valid")
@@ -45,9 +56,8 @@ pub enum SafetyError {
 #[derive(Clone, Debug)]
 pub struct ReplicaRoot {
     root: PathBuf,
-    /// `std::fs::canonicalize`d: always `\\?\` verbatim on Windows, so it compares
-    /// with the probes in `target` whatever their length (`dunce` keeps the
-    /// verbatim prefix only for paths over 260 characters).
+    /// From [`canonical`], so it compares with the probes in `target`
+    /// whatever their length.
     canonical: PathBuf,
 }
 
@@ -55,7 +65,7 @@ impl ReplicaRoot {
     pub fn new(root: &Path) -> io::Result<ReplicaRoot> {
         Ok(ReplicaRoot {
             root: root.to_path_buf(),
-            canonical: std::fs::canonicalize(root)?,
+            canonical: canonical(root)?,
         })
     }
 
@@ -69,7 +79,7 @@ impl ReplicaRoot {
         let target = rel.to_path(&self.root);
         let mut probe = target.parent();
         while let Some(dir) = probe {
-            match std::fs::canonicalize(dir) {
+            match canonical(dir) {
                 Ok(real) if real.starts_with(&self.canonical) => return Ok(target),
                 Ok(_) => return Err(SafetyError::Escapes(target)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {

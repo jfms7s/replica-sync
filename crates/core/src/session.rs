@@ -8,7 +8,6 @@ use crate::plan::{Plan, PlanError, build_plan};
 use crate::rules::SkipRules;
 use crate::scan::{ScanCounters, ScanError, scan};
 use serde::Serialize;
-use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -53,10 +52,10 @@ pub enum PrepareError {
     Plan(#[from] PlanError),
 }
 
-/// `std::fs::canonicalize`, not `dunce`: always verbatim on Windows, so two
-/// results compare correctly whatever their length.
+/// [`crate::safety::canonical`], so two results compare correctly whatever
+/// their length.
 fn canonical(root: &Path) -> Result<std::path::PathBuf, ScanError> {
-    fs::canonicalize(root).map_err(|source| ScanError::Root {
+    crate::safety::canonical(root).map_err(|source| ScanError::Root {
         path: root.to_path_buf(),
         source,
     })
@@ -120,6 +119,7 @@ pub fn prepare(
 mod tests {
     use super::*;
     use crate::testutil::{T0, write_file};
+    use std::fs;
 
     #[test]
     fn prepare_plans_leftover_temp_files_as_deletes_and_writes_nothing() {

@@ -612,10 +612,10 @@ pub fn restore(
     let mut manifest = open_manifest(&manifest_path)?;
     // Defence in depth: every source must still resolve inside this run's own
     // `files` folder (a link planted below it would otherwise be followed).
-    let files_root = fs::canonicalize(&files)?;
+    let files_root = crate::safety::canonical(&files)?;
     for p in paths {
         let source = p.to_path(&files);
-        let parent = fs::canonicalize(source.parent().expect("never the root"))?;
+        let parent = crate::safety::canonical(source.parent().expect("never the root"))?;
         if !parent.starts_with(&files_root) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
