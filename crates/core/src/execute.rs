@@ -1914,7 +1914,7 @@ mod tests {
                 size: 1,
                 mtime_ns: ns(T0),
             }],
-            crate::diff::CaseMode::Sensitive,
+            crate::model::CaseMode::Sensitive,
         )
         .unwrap();
         let report = run_with(
@@ -1944,7 +1944,7 @@ mod tests {
                 size: 1,
                 mtime_ns: ns(T0),
             }],
-            crate::diff::CaseMode::Insensitive,
+            crate::model::CaseMode::Insensitive,
         )
         .unwrap();
         let report = run_with(
@@ -2109,7 +2109,7 @@ mod apply_tests {
                     mtime_ns: ns(T0),
                 },
             }],
-            crate::diff::CaseMode::Insensitive,
+            crate::model::CaseMode::Insensitive,
         )
         .unwrap();
         let report = run_with(
@@ -2343,7 +2343,7 @@ mod apply_tests {
                 size: 1,
                 mtime_ns: ns(T0),
             }],
-            crate::diff::CaseMode::Sensitive,
+            crate::model::CaseMode::Sensitive,
         )
         .unwrap();
         let report = run_with(
@@ -2565,7 +2565,7 @@ mod apply_tests {
                     mtime_ns: ns(T0),
                 },
             ],
-            crate::diff::CaseMode::Sensitive,
+            crate::model::CaseMode::Sensitive,
         )
         .unwrap();
         let first = run_with(
@@ -2627,7 +2627,7 @@ mod apply_tests {
                     mtime_ns: ns(T0),
                 },
             }],
-            crate::diff::CaseMode::Insensitive,
+            crate::model::CaseMode::Insensitive,
         )
         .unwrap();
         let report = run_with(
@@ -2655,7 +2655,7 @@ mod apply_tests {
                     mtime_ns: ns(T0),
                 },
             }],
-            crate::diff::CaseMode::Sensitive,
+            crate::model::CaseMode::Sensitive,
         )
         .unwrap()
     }
@@ -2700,7 +2700,7 @@ mod apply_tests {
                 .into_iter()
                 .map(|p| p.change),
         );
-        let plan = crate::plan::build_plan(changes, crate::diff::CaseMode::Sensitive).unwrap();
+        let plan = crate::plan::build_plan(changes, crate::model::CaseMode::Sensitive).unwrap();
         fs::remove_file(f.rep.join("a/x.txt")).unwrap();
         let report = run_with(
             &f,

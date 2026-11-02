@@ -109,6 +109,24 @@ pub fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 
+/// Whether the replica's filesystem treats `A.jpg` and `a.jpg` as one name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CaseMode {
+    Sensitive,
+    Insensitive,
+}
+
+impl CaseMode {
+    /// The key two paths share exactly when this filesystem sees them as the
+    /// same name. The one place diff, plan and moves compare paths.
+    pub fn key(self, rel: &RelPath) -> String {
+        match self {
+            CaseMode::Sensitive => rel.as_str().to_owned(),
+            CaseMode::Insensitive => rel.fold(),
+        }
+    }
+}
+
 impl fmt::Display for RelPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -287,6 +305,17 @@ pub fn modified_ns(md: &fs::Metadata) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_mode_key_folds_only_when_insensitive() {
+        let p = RelPath::new("A/B.jpg").unwrap();
+        assert_eq!(CaseMode::Sensitive.key(&p), "A/B.jpg");
+        assert_eq!(CaseMode::Insensitive.key(&p), "a/b.jpg");
+        assert_eq!(
+            CaseMode::Insensitive.key(&p),
+            CaseMode::Insensitive.key(&RelPath::new("a/b.JPG").unwrap())
+        );
+    }
 
     #[test]
     fn new_rejects_empty_and_dot_components() {

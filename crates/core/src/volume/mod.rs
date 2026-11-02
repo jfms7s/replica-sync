@@ -1,7 +1,7 @@
 //! Which drive a folder lives on, found again later even if its letter or
 //! mount point changed.
 
-use crate::diff::CaseMode;
+use crate::model::CaseMode;
 use crate::rules::CASE_PROBE_NAME;
 use std::fs::{self, OpenOptions};
 use std::io;

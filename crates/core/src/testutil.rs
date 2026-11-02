@@ -87,7 +87,7 @@ pub fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-use crate::diff::CaseMode;
+use crate::model::CaseMode;
 use crate::plan::Plan;
 use crate::rules::SkipRules;
 use crate::session::{SessionCounters, prepare};

@@ -6,10 +6,10 @@ use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::settings::Settings;
 use crate::tree::{ChildrenPage, PlanTree};
-use replica_sync_core::diff::CaseMode;
 use replica_sync_core::execute::{
     Control, DRIVE_CHECK_EVERY, DriveCheck, ExecContext, Progress, RunReport, execute,
 };
+use replica_sync_core::model::CaseMode;
 use replica_sync_core::model::{RelPath, SideKind};
 use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, ResolveError, Resolved};
 use replica_sync_core::plan::{

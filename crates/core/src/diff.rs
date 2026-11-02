@@ -5,27 +5,14 @@ use crate::model::{
     Snapshot,
 };
 use crate::reason::SkipReason;
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
 
-/// Whether the replica's filesystem treats `A.jpg` and `a.jpg` as one name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub enum CaseMode {
-    Sensitive,
-    Insensitive,
-}
+pub use crate::model::CaseMode;
 
 /// The equality rule: same size and modified times within 2 seconds.
 pub fn unchanged(src: &Entry, rep: &Entry) -> bool {
     src.size == rep.size && src.mtime_ns.abs_diff(rep.mtime_ns) <= MTIME_TOLERANCE_NS as u64
-}
-
-fn key(rel: &RelPath, case: CaseMode) -> String {
-    match case {
-        CaseMode::Sensitive => rel.as_str().to_owned(),
-        CaseMode::Insensitive => rel.fold(),
-    }
 }
 
 fn index<'a>(
@@ -35,7 +22,7 @@ fn index<'a>(
 ) -> BTreeMap<String, &'a Entry> {
     let mut map = BTreeMap::new();
     for e in &snap.entries {
-        let k = key(&e.rel, case);
+        let k = case.key(&e.rel);
         if map.insert(k.clone(), e).is_some() {
             collisions.entry(k).or_insert_with(|| e.rel.clone());
         }
@@ -103,7 +90,7 @@ fn pinned_folders(
         .iter()
         .chain(kept_leftovers.iter().map(|e| &e.rel))
     {
-        pin_ancestors(&key(r, case));
+        pin_ancestors(&case.key(r));
     }
     for k in blocks.0.keys() {
         pin_ancestors(k);
@@ -126,14 +113,14 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
     }
     for p in &source.problems {
         blocks.add(
-            key(&p.rel, case),
+            case.key(&p.rel),
             p.rel.clone(),
             problem_reason(p, SideKind::Source),
         );
     }
     for p in &replica.problems {
         blocks.add(
-            key(&p.rel, case),
+            case.key(&p.rel),
             p.rel.clone(),
             problem_reason(p, SideKind::Replica),
         );
@@ -168,14 +155,14 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
     // shown and goes to the trash), unless a block covers it or the same name is
     // on the source; then it is left alone and pins its folder.
     let src_leftovers: HashSet<String> =
-        source.leftovers.iter().map(|e| key(&e.rel, case)).collect();
+        source.leftovers.iter().map(|e| case.key(&e.rel)).collect();
     // Two leftovers one key can't tell apart would collide in the trash too.
     let mut leftover_keys: BTreeMap<String, usize> = BTreeMap::new();
     for e in &replica.leftovers {
-        *leftover_keys.entry(key(&e.rel, case)).or_default() += 1;
+        *leftover_keys.entry(case.key(&e.rel)).or_default() += 1;
     }
     let (doomed, kept): (Vec<&Entry>, Vec<&Entry>) = replica.leftovers.iter().partition(|e| {
-        let k = key(&e.rel, case);
+        let k = case.key(&e.rel);
         !blocks.covers(&k)
             && !src.contains_key(&k)
             && !rep.contains_key(&k)

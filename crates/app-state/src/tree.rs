@@ -232,7 +232,7 @@ impl PlanTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use replica_sync_core::diff::CaseMode;
+    use replica_sync_core::model::CaseMode;
     use replica_sync_core::model::MoveKind;
     use replica_sync_core::plan::build_plan;
     use replica_sync_core::reason::SkipReason;
