@@ -11,13 +11,13 @@ use crate::plan::{ChangeId, Plan, Planned};
 pub use crate::reason::StopReason;
 use crate::reason::{FailReason, SkipReason};
 use crate::rules::{CASE_RENAME_SUFFIX, TEMP_SUFFIX};
-use crate::safety::{ReplicaRoot, SafetyError};
+use crate::safety::{self, ReplicaRoot, SafetyError};
 use crate::trash::{TrashReason, TrashWriter};
 use filetime::FileTime;
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -219,6 +219,11 @@ fn safety_stop(e: SafetyError, replica_root: &Path) -> Stop {
     }
 }
 
+/// A [`ReplicaRoot`] action's error as a [`Stop`].
+fn act<T>(ctx: &ExecContext, r: Result<T, SafetyError>) -> Result<T, Stop> {
+    r.map_err(|e| safety_stop(e, ctx.replica.path()))
+}
+
 fn target(ctx: &ExecContext, rel: &RelPath) -> Result<PathBuf, Stop> {
     ctx.replica
         .target(rel)
@@ -262,7 +267,7 @@ pub fn execute(
     let mut run = Run {
         ctx,
         disk: durable::Replica::open(ctx.replica.path()),
-        trash: TrashWriter::new(ctx.replica.path(), ctx.trash_stamp.clone()),
+        trash: TrashWriter::for_replica(ctx.replica, ctx.trash_stamp.clone()),
         report: RunReport::default(),
         batch: Batch::default(),
         progress: &mut progress,
@@ -524,9 +529,7 @@ impl Run<'_, '_> {
         if before.len() != size || modified_ns(&before) != mtime_ns {
             return Err(Stop::Skip(SkipReason::ChangedSincePreview));
         }
-        let dest = target(ctx, rel)?;
-        fs::create_dir_all(dest.parent().expect("never the root"))
-            .map_err(|e| io_stop(&e, root))?;
+        let dest = act(ctx, ctx.replica.create_parent(rel))?;
         let tmp = temp_path(&dest);
         // Something already at the temp name is a leftover the user kept (its
         // planned Delete, which runs before copies, was unticked) or something
@@ -539,14 +542,16 @@ impl Run<'_, '_> {
         // Until `create_new` succeeds the temp name is not ours: an error before
         // that point must not remove whatever is there.
         let src = File::open(&src_path).map_err(|e| io_stop(&e, root))?;
-        let out = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| match e.kind() {
-                io::ErrorKind::AlreadyExists => Stop::Fail(FailReason::TargetExists),
-                _ => io_stop(&e, root),
-            })?;
+        let out = match ctx
+            .replica
+            .create_new(&safety::with_suffix(rel, TEMP_SUFFIX))
+        {
+            Ok((_, out)) => out,
+            Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(Stop::Fail(FailReason::TargetExists));
+            }
+            Err(e) => return Err(safety_stop(e, root)),
+        };
         let synced = match write_temp(
             ctx,
             &mut self.disk,
@@ -697,7 +702,7 @@ impl Run<'_, '_> {
         if after.len() != w.len || modified_ns(&after) != w.mtime_ns {
             return Err(Stop::Fail(FailReason::ChangedDuringCopy));
         }
-        replace_with_temp(&w.rel, &w.dest, &w.tmp, &mut self.trash, root)
+        replace_with_temp(self.ctx, &w.rel, &w.dest, &mut self.trash)
     }
 }
 
@@ -706,9 +711,7 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
         Change::Create { .. } | Change::Update { .. } => {
             unreachable!("copies go through Run::write_copy")
         }
-        Change::MkDir { path } => {
-            fs::create_dir_all(target(ctx, path)?).map_err(|e| io_stop(&e, ctx.replica.path()))
-        }
+        Change::MkDir { path } => act(ctx, ctx.replica.create_dir_all(path)),
         Change::Move { from, to, kind } => move_entry(ctx, from, to, kind),
         Change::Delete { path, .. } => delete_file(ctx, path, trash),
         Change::RmDir { path } => remove_dir(ctx, path),
@@ -1260,12 +1263,12 @@ mod durable {
 }
 
 fn replace_with_temp(
+    ctx: &ExecContext,
     rel: &RelPath,
     dest: &Path,
-    tmp: &Path,
     trash: &mut TrashWriter,
-    root: &Path,
 ) -> Result<(), Stop> {
+    let root = ctx.replica.path();
     match fs::symlink_metadata(dest) {
         Ok(old) => trash
             .move_in(rel, old.len(), modified_ns(&old), TrashReason::Replaced)
@@ -1273,7 +1276,11 @@ fn replace_with_temp(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(io_stop(&e, root)),
     }
-    fs::rename(tmp, dest).map_err(|e| io_stop(&e, root))
+    act(
+        ctx,
+        ctx.replica
+            .rename(&safety::with_suffix(rel, TEMP_SUFFIX), rel),
+    )
 }
 
 fn move_entry(
@@ -1283,7 +1290,6 @@ fn move_entry(
     kind: &MoveKind,
 ) -> Result<(), Stop> {
     let root = ctx.replica.path();
-    let on_io = |e: io::Error| io_stop(&e, root);
     let still_planned = match (kind, fs::metadata(to.to_path(ctx.source_root))) {
         (MoveKind::File { size, mtime_ns }, Ok(m)) => {
             m.is_file() && m.len() == *size && modified_ns(&m) == *mtime_ns
@@ -1306,19 +1312,18 @@ fn move_entry(
     if !case_only && fs::symlink_metadata(&to_path).is_ok() {
         return Err(Stop::Fail(FailReason::TargetExists));
     }
-    fs::create_dir_all(to_path.parent().expect("never the root")).map_err(on_io)?;
+    act(ctx, ctx.replica.create_parent(to))?;
     if case_only {
-        let tmp = case_rename_path(&from_path);
-        if fs::symlink_metadata(&tmp).is_ok() {
+        if fs::symlink_metadata(case_rename_path(&from_path)).is_ok() {
             return Err(Stop::Fail(FailReason::TargetExists));
         }
-        fs::rename(&from_path, &tmp).map_err(on_io)?;
-        fs::rename(&tmp, &to_path).map_err(|e| {
-            let _ = fs::rename(&tmp, &from_path);
-            io_stop(&e, root)
+        let aside = safety::with_suffix(from, CASE_RENAME_SUFFIX);
+        act(ctx, ctx.replica.rename(from, &aside))?;
+        act(ctx, ctx.replica.rename(&aside, to)).inspect_err(|_| {
+            let _ = ctx.replica.rename(&aside, from);
         })
     } else {
-        fs::rename(&from_path, &to_path).map_err(on_io)
+        act(ctx, ctx.replica.rename(from, to))
     }
 }
 
@@ -1347,16 +1352,16 @@ fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Res
 }
 
 fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
-    match fs::remove_dir(target(ctx, rel)?) {
+    match ctx.replica.remove_dir(rel) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(replica_gone_or(
+        Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Err(replica_gone_or(
             Stop::Skip(SkipReason::AlreadyGone),
             ctx.replica.path(),
         )),
-        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
+        Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
             Err(Stop::Skip(SkipReason::FolderNotEmpty))
         }
-        Err(e) => Err(io_stop(&e, ctx.replica.path())),
+        Err(e) => Err(safety_stop(e, ctx.replica.path())),
     }
 }
 

@@ -1,8 +1,38 @@
 //! Every write, rename or trash target must resolve inside the replica folder.
+//!
+//! [`ReplicaRoot`] is the only write path into the replica: its methods check
+//! containment and act in one call, so a new caller cannot skip the check.
+//! (Paths it hands out are for reading metadata, and for the temps a run
+//! created itself.)
 
 use crate::model::RelPath;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// How two folders relate, for the "same folder or one inside the other" rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nesting {
+    Same,
+    Nested,
+}
+
+/// Whether `a` and `b` are the same folder or one is inside the other. Both
+/// must already be in the same canonical form; this compares components.
+pub fn nesting(a: &Path, b: &Path) -> Option<Nesting> {
+    if a == b {
+        Some(Nesting::Same)
+    } else if a.starts_with(b) || b.starts_with(a) {
+        Some(Nesting::Nested)
+    } else {
+        None
+    }
+}
+
+/// `rel` with `suffix` added to its last name (a temp or rename-aside name).
+pub fn with_suffix(rel: &RelPath, suffix: &str) -> RelPath {
+    RelPath::new(&format!("{}{suffix}", rel.as_str())).expect("a suffix keeps a valid path valid")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SafetyError {
@@ -54,6 +84,48 @@ impl ReplicaRoot {
             }
         }
         Err(SafetyError::Escapes(target))
+    }
+
+    /// Creates the folder `rel` and any missing parents.
+    pub fn create_dir_all(&self, rel: &RelPath) -> Result<(), SafetyError> {
+        Ok(fs::create_dir_all(self.target(rel)?)?)
+    }
+
+    /// Creates the parent folders of `rel` (never the root) and returns its path.
+    pub fn create_parent(&self, rel: &RelPath) -> Result<PathBuf, SafetyError> {
+        // Checking `rel` checks its deepest existing ancestor, which is also
+        // the parent's: one check covers both.
+        let target = self.target(rel)?;
+        fs::create_dir_all(target.parent().expect("never the root"))?;
+        Ok(target)
+    }
+
+    /// Creates `rel` as a new file for writing; fails `AlreadyExists` when
+    /// anything (a link included) is already there.
+    pub fn create_new(&self, rel: &RelPath) -> Result<(PathBuf, File), SafetyError> {
+        let path = self.target(rel)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok((path, file))
+    }
+
+    /// Renames `from` to `to`, both inside the replica.
+    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<(), SafetyError> {
+        let from_path = self.target(from)?;
+        // Same folder (a temp or a rename aside): one check covers both.
+        let to_path = if from.parent() == to.parent() {
+            to.to_path(&self.root)
+        } else {
+            self.target(to)?
+        };
+        Ok(fs::rename(from_path, to_path)?)
+    }
+
+    /// Removes the empty folder `rel`.
+    pub fn remove_dir(&self, rel: &RelPath) -> Result<(), SafetyError> {
+        Ok(fs::remove_dir(self.target(rel)?)?)
     }
 }
 
@@ -139,5 +211,73 @@ mod tests {
             r.target(&rel("alias/x.txt")).unwrap(),
             d.path().join("alias").join("x.txt")
         );
+    }
+
+    #[test]
+    fn nesting_tells_same_from_nested() {
+        let p = Path::new;
+        assert_eq!(nesting(p("/a/b"), p("/a/b")), Some(Nesting::Same));
+        assert_eq!(nesting(p("/a/b"), p("/a/b/c")), Some(Nesting::Nested));
+        assert_eq!(nesting(p("/a/b/c"), p("/a/b")), Some(Nesting::Nested));
+        assert_eq!(nesting(p("/a/b"), p("/a/bc")), None);
+    }
+
+    #[test]
+    fn actions_inside_the_replica_work() {
+        let d = tempfile::tempdir().unwrap();
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        r.create_dir_all(&rel("a/b")).unwrap();
+        let dest = r.create_parent(&rel("c/d/x.txt")).unwrap();
+        assert_eq!(dest, d.path().join("c").join("d").join("x.txt"));
+        let tmp = with_suffix(&rel("c/d/x.txt"), ".tmp");
+        let (path, _) = r.create_new(&tmp).unwrap();
+        assert_eq!(path, d.path().join("c").join("d").join("x.txt.tmp"));
+        assert_eq!(
+            r.create_new(&tmp).err().map(|e| match e {
+                SafetyError::Io(e) => e.kind(),
+                SafetyError::Escapes(_) => io::ErrorKind::Other,
+            }),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        r.rename(&tmp, &rel("c/d/x.txt")).unwrap();
+        assert!(dest.is_file());
+        r.remove_dir(&rel("a/b")).unwrap();
+        assert!(!d.path().join("a/b").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actions_under_a_link_pointing_outside_are_refused_and_touch_nothing() {
+        let outside = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("x.txt"), b"keep").unwrap();
+        std::fs::create_dir(outside.path().join("empty")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.path().join("Docs")).unwrap();
+        std::fs::write(d.path().join("in.txt"), b"in").unwrap();
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        let escapes = |e: SafetyError| matches!(e, SafetyError::Escapes(_));
+        assert!(escapes(r.create_dir_all(&rel("Docs/new")).unwrap_err()));
+        assert!(escapes(
+            r.create_parent(&rel("Docs/new/x.txt")).unwrap_err()
+        ));
+        assert!(escapes(r.create_new(&rel("Docs/y.txt")).unwrap_err()));
+        assert!(escapes(
+            r.rename(&rel("in.txt"), &rel("Docs/in.txt")).unwrap_err()
+        ));
+        assert!(escapes(
+            r.rename(&rel("Docs/x.txt"), &rel("x.txt")).unwrap_err()
+        ));
+        assert!(escapes(r.remove_dir(&rel("Docs/empty")).unwrap_err()));
+        let mut left: Vec<_> = std::fs::read_dir(outside.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["empty", "x.txt"]);
+        assert_eq!(
+            std::fs::read(outside.path().join("x.txt")).unwrap(),
+            b"keep"
+        );
+        assert!(d.path().join("in.txt").exists());
     }
 }

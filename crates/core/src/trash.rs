@@ -56,6 +56,8 @@ pub fn new_run_stamp() -> String {
 
 pub struct TrashWriter {
     replica_root: PathBuf,
+    /// Checks each trashed path's containment; made with the first move.
+    replica: Option<ReplicaRoot>,
     stamp: String,
     run: Option<(String, PathBuf, File)>,
 }
@@ -64,8 +66,18 @@ impl TrashWriter {
     pub fn new(replica_root: &Path, stamp: String) -> TrashWriter {
         TrashWriter {
             replica_root: replica_root.to_path_buf(),
+            replica: None,
             stamp,
             run: None,
+        }
+    }
+
+    /// A writer that checks containment against `replica` (the run's own
+    /// [`ReplicaRoot`]) rather than a baseline of its own.
+    pub fn for_replica(replica: &ReplicaRoot, stamp: String) -> TrashWriter {
+        TrashWriter {
+            replica: Some(replica.clone()),
+            ..TrashWriter::new(replica.path(), stamp)
         }
     }
 
@@ -81,6 +93,9 @@ impl TrashWriter {
         mtime_ns: i64,
         reason: TrashReason,
     ) -> io::Result<()> {
+        if self.replica.is_none() {
+            self.replica = Some(ReplicaRoot::new(&self.replica_root)?);
+        }
         let opened_here = self.run.is_none();
         if opened_here {
             self.run = Some(self.open_run()?);
@@ -108,6 +123,11 @@ impl TrashWriter {
         mtime_ns: i64,
         reason: TrashReason,
     ) -> io::Result<()> {
+        let replica = self.replica.as_ref().expect("made by move_in");
+        let from = replica.target(rel).map_err(|e| match e {
+            SafetyError::Io(e) => e,
+            e @ SafetyError::Escapes(_) => io::Error::new(io::ErrorKind::InvalidInput, e),
+        })?;
         let (_, run_dir, manifest) = self.run.as_mut().expect("opened by move_in");
         let manifest_path = run_dir.join(MANIFEST);
         let dest = rel.to_path(&run_dir.join(FILES_DIR));
@@ -126,7 +146,6 @@ impl TrashWriter {
         }))
         .map_err(io::Error::other)?;
         let recorded = manifest.metadata()?.len();
-        let from = rel.to_path(&self.replica_root);
         fs::rename(&from, &dest)?;
         if let Err(e) = append_line(manifest, &manifest_path, &line) {
             // Undo, so a full or failing disk never leaves a trashed file the
@@ -585,7 +604,7 @@ pub fn restore(
     if let (Some(&i), OnConflict::Refuse) = (conflicts.first(), on_conflict) {
         return Err(RestoreError::Conflict(paths[i].clone()));
     }
-    let mut displaced = TrashWriter::new(replica_root, new_run_stamp());
+    let mut displaced = TrashWriter::for_replica(&replica, new_run_stamp());
     for &i in &conflicts {
         let md = fs::symlink_metadata(&targets[i])?;
         displaced.move_in(&paths[i], md.len(), modified_ns(&md), TrashReason::Replaced)?;
@@ -594,7 +613,7 @@ pub fn restore(
     // Defence in depth: every source must still resolve inside this run's own
     // `files` folder (a link planted below it would otherwise be followed).
     let files_root = fs::canonicalize(&files)?;
-    for (p, target) in paths.iter().zip(&targets) {
+    for p in paths {
         let source = p.to_path(&files);
         let parent = fs::canonicalize(source.parent().expect("never the root"))?;
         if !parent.starts_with(&files_root) {
@@ -604,7 +623,9 @@ pub fn restore(
             )
             .into());
         }
-        fs::create_dir_all(target.parent().expect("never the root"))?;
+        // Re-checked right before the write: a folder swapped for a link since
+        // the check above is refused, not followed.
+        let target = &replica.create_parent(p)?;
         let line = serde_json::to_string(&ManifestLine::Restored {
             restored: p.clone(),
         })
@@ -664,6 +685,22 @@ mod tests {
         let mut w = TrashWriter::new(root, STAMP.into());
         w.move_in(&rel(p), 3, ns(T0), reason).unwrap();
         w
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_in_refuses_a_path_under_a_link_pointing_outside() {
+        let outside = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        write_file(outside.path(), "x.txt", b"keep", T0);
+        std::os::unix::fs::symlink(outside.path(), d.path().join("Docs")).unwrap();
+        let mut w = TrashWriter::new(d.path(), STAMP.into());
+        let err = w
+            .move_in(&rel("Docs/x.txt"), 4, ns(T0), TrashReason::Deleted)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(outside.path().join("x.txt")).unwrap(), b"keep");
+        assert!(w.run_id().is_none());
     }
 
     #[test]

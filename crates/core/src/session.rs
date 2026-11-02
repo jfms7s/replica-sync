@@ -77,10 +77,11 @@ fn stats(s: &Snapshot, elapsed: Duration) -> ScanStats {
 pub fn check_roots(source_root: &Path, replica_root: &Path) -> Result<(), PrepareError> {
     let src_canon = canonical(source_root).map_err(PrepareError::Source)?;
     let rep_canon = canonical(replica_root).map_err(PrepareError::Replica)?;
-    if src_canon.starts_with(&rep_canon) || rep_canon.starts_with(&src_canon) {
-        return Err(PrepareError::Nested);
+    // Same or nested: both are one error here.
+    match crate::safety::nesting(&src_canon, &rep_canon) {
+        Some(_) => Err(PrepareError::Nested),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub fn prepare(

@@ -396,3 +396,29 @@ fn folder_with_a_leftover_temp_file_clears_in_one_sync() {
     assert!(!r.join("Trip").exists());
     assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_leftover_temp_under_a_replica_link_pointing_outside_is_left_alone() {
+    let t = tempfile::tempdir().unwrap();
+    let (s, r, outside) = (t.path().join("s"), t.path().join("r"), t.path().join("out"));
+    for d in [&s, &r, &outside] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write_file(&outside, "x.jpg.replica-sync.tmp", b"theirs", 1_700_000_000);
+    write_file(&outside, "x.jpg", b"old", 1_700_000_000);
+    std::os::unix::fs::symlink(&outside, r.join("Docs")).unwrap();
+    write_file(&s, "Docs/x.jpg", b"new", 1_700_000_100);
+    let prepared = prepare_with(&s, &r, &[]);
+    assert_eq!(
+        fs::read(outside.join("x.jpg.replica-sync.tmp")).unwrap(),
+        b"theirs"
+    );
+    apply_all(&s, &r, &prepared);
+    assert_eq!(
+        fs::read(outside.join("x.jpg.replica-sync.tmp")).unwrap(),
+        b"theirs"
+    );
+    assert_eq!(fs::read(outside.join("x.jpg")).unwrap(), b"old");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 2);
+}

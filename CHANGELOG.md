@@ -11,6 +11,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ### Fixed
 - An Apply now stops as "backup drive disconnected" (or "source drive disconnected") when the saved drive is no longer the one at that folder, checked during the run before each batch of copies is put in place and at least every 2 seconds (on Linux, a drive unmounted from under its folder is caught at the next change). Before, only a missing folder stopped it, so on Linux a backup drive unmounted from a fixed mount point (`/mnt/backup`) left an empty folder and the remaining copies went to the system disk.
 
+### Security
+- Every change to your files in the backup folder (copying, the rename of a finished copy into place, moving, creating and removing folders, trashing and restoring) now goes through one checked path, which checks right before the write that the folder still resolves inside the backup folder. A path under a link pointing outside is refused instead of followed. (The trash's own bookkeeping inside `.sync-trash` and the drive's case probe keep their own checks.)
+
 ## 0.4.1 — 2026-11-01
 
 Supersedes the unpublished 0.4.0 draft and includes all of its changes (below). Like 0.4.0, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
