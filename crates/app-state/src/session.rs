@@ -90,7 +90,9 @@ struct Current {
     selection: HashSet<ChangeId>,
     first_sync: bool,
     free_space: u64,
-    guard_confirmed: bool,
+    /// How many removals the user confirmed; a selection that removes more
+    /// asks again.
+    guard_confirmed_for: Option<u64>,
     delete_folders: Vec<RelPath>,
     last_report: Option<RunReport>,
 }
@@ -379,7 +381,7 @@ impl Session {
             selection,
             first_sync,
             free_space,
-            guard_confirmed: false,
+            guard_confirmed_for: None,
             delete_folders,
             last_report: None,
         });
@@ -414,8 +416,11 @@ impl Session {
             selected_count: c.selection.len(),
             actionable_count: plan.changes.len() - plan.totals.skipped,
             is_empty: plan.is_empty(),
+            guard_confirmed: guard
+                .as_ref()
+                .zip(c.guard_confirmed_for)
+                .is_some_and(|(g, n)| g.affected <= n),
             guard,
-            guard_confirmed: c.guard_confirmed,
             shortfall,
             source: c.prepared.source.clone(),
             replica: c.prepared.replica.clone(),
@@ -461,7 +466,9 @@ impl Session {
     }
 
     pub fn confirm_guard(&mut self) -> Result<PreviewSummary, AppError> {
-        self.current_mut()?.guard_confirmed = true;
+        self.ensure_idle()?;
+        let affected = self.summary()?.guard.map(|g| g.affected);
+        self.current_mut()?.guard_confirmed_for = affected;
         self.summary()
     }
 
@@ -815,6 +822,15 @@ mod tests {
         // A fresh scan forgets an earlier confirmation.
         w.s.confirm_guard().unwrap();
         assert!(!w.scan().guard_confirmed);
+        // Confirming a smaller selection doesn't cover a bigger one.
+        w.s.toggle(&RelPath::new("f1.txt").unwrap()).unwrap();
+        assert!(w.s.confirm_guard().unwrap().guard_confirmed);
+        let s = w.s.select_all(true).unwrap();
+        assert!(s.guard.is_some() && !s.guard_confirmed);
+        assert_eq!(
+            w.s.begin_apply(&w.v).err().unwrap().code,
+            "apply.wrongFolderUnconfirmed"
+        );
         w.s.confirm_guard().unwrap();
         assert_eq!(w.apply().report.failed(), 0);
         assert!(!w.rep().join("f1.txt").exists());

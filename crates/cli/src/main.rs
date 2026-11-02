@@ -98,7 +98,7 @@ fn print_summary(p: &Prepared) {
 
 /// The app's apply checks, minus the drive check (the CLI has no saved
 /// pairs, so every run counts as a first sync). Returns why to refuse.
-fn refusals(p: &Prepared, replica: &Path) -> Result<Vec<String>> {
+fn refusals(p: &Prepared, replica: &Path) -> Vec<String> {
     let approved = p.plan.actionable_ids();
     let mut why = Vec::new();
     if let Some(g) = mass_change_guard(&p.plan, &approved, p.replica_files, true) {
@@ -107,15 +107,21 @@ fn refusals(p: &Prepared, replica: &Path) -> Result<Vec<String>> {
             g.affected, g.replica_files
         ));
     }
-    let free = volume::free_space(replica)
-        .with_context(|| format!("reading free space on {}", replica.display()))?;
-    if let Some(short) = space_shortfall(p.plan.totals.bytes_to_copy, free) {
-        why.push(format!(
-            "not enough space on the replica drive: {} more needed",
-            human_bytes(short)
-        ));
+    match volume::free_space(replica) {
+        Ok(free) => {
+            if let Some(short) = space_shortfall(p.plan.totals.bytes_to_copy, free) {
+                why.push(format!(
+                    "not enough space on the replica drive: {} more needed",
+                    human_bytes(short)
+                ));
+            }
+        }
+        Err(e) => why.push(format!(
+            "could not read the free space on {}: {e}",
+            replica.display()
+        )),
     }
-    Ok(why)
+    why
 }
 
 fn gen_tree(dir: &Path, files: u64, large: u32) -> Result<()> {
@@ -168,7 +174,7 @@ fn main() -> Result<ExitCode> {
                 eprintln!("nothing applied: pass --yes to apply these changes");
                 return Ok(ExitCode::from(2));
             }
-            let why = refusals(&p, &replica)?;
+            let why = refusals(&p, &replica);
             if !why.is_empty() && !force {
                 for w in &why {
                     eprintln!("{w}");
