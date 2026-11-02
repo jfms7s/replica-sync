@@ -2,6 +2,7 @@
 
 use crate::model::RelPath;
 use crate::rules::{RuleError, SkipRules};
+use crate::safety::canonical;
 use crate::volume::{self, Volumes};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -84,13 +85,13 @@ pub struct NewPair<'a> {
 }
 
 /// The stored side for `path`, plus its canonical path for comparing with the
-/// other side. Both canonical paths come from `std::fs::canonicalize` (always
-/// verbatim on Windows), so a long path still strips and compares correctly.
+/// other side. Both canonical paths come from [`canonical`] (always verbatim
+/// on Windows), so a long path still strips and compares correctly.
 fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairError> {
-    let canonical = fs::canonicalize(path)?;
-    let vol = volumes.volume_of(&canonical)?;
-    let mount_root = fs::canonicalize(&vol.mount_root)?;
-    let rest = canonical
+    let canonical_path = canonical(path)?;
+    let vol = volumes.volume_of(&canonical_path)?;
+    let mount_root = canonical(&vol.mount_root)?;
+    let rest = canonical_path
         .strip_prefix(&mount_root)
         .map_err(|_| io::Error::other("folder is not under its drive's mount point"))?;
     let rel_path = RelPath::try_from(
@@ -106,7 +107,7 @@ fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairE
             rel_path,
             label: vol.label,
         },
-        canonical,
+        canonical_path,
     ))
 }
 
@@ -254,7 +255,7 @@ pub fn relink(
         SideKind::Replica => (&pair.source, SideKind::Source),
     };
     if let Ok(other_path) = resolve_side(other.0, other.1, volumes) {
-        check_folders(&new_path, &fs::canonicalize(other_path)?)?;
+        check_folders(&new_path, &canonical(&other_path)?)?;
     }
     match side {
         SideKind::Source => pair.source = new_side,
@@ -351,7 +352,7 @@ mod tests {
 
     impl FakeVolumes {
         fn mount(&self, id: &str, root: &Path) {
-            let root = dunce::canonicalize(root).unwrap();
+            let root = crate::safety::canonical(root).unwrap();
             self.0.borrow_mut().retain(|v| v.id != id);
             self.0.borrow_mut().push(VolumeInfo {
                 id: id.into(),
@@ -363,7 +364,7 @@ mod tests {
 
     impl Volumes for FakeVolumes {
         fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
-            let path = dunce::canonicalize(path)?;
+            let path = crate::safety::canonical(path)?;
             self.0
                 .borrow()
                 .iter()
@@ -536,8 +537,8 @@ mod tests {
         v.mount("B", &t.path().join("diskB-now-F"));
         let r = resolve(&p, &v).unwrap();
         assert_eq!(
-            dunce::canonicalize(&r.replica_root).unwrap(),
-            dunce::canonicalize(t.path().join("diskB-now-F/Backup/Photos")).unwrap()
+            canonical(&r.replica_root).unwrap(),
+            canonical(&t.path().join("diskB-now-F/Backup/Photos")).unwrap()
         );
         verify_replica(&p, &r, &v).unwrap();
     }

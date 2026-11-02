@@ -1,0 +1,6 @@
+# Path comparisons must use replica_sync_core::safety::canonical (always
+# verbatim on Windows). dunce::canonicalize drops the \\?\ prefix only when it
+# can (short, ordinary names), so comparing its results breaks on long paths.
+disallowed-methods = [
+    { path = "dunce::canonicalize", reason = "compare with replica_sync_core::safety::canonical; dunce only for display or Win32 calls" },
+]
