@@ -31,6 +31,18 @@ pub fn create_dir_all(dir: &Path) -> io::Result<()> {
 pub fn create_file(path: &Path) -> io::Result<File> {
     let mut o = fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
+    open_private(&mut o, path)
+}
+
+/// Creates `path` for writing, failing with `AlreadyExists` if anything is
+/// there; the file is 0600.
+pub fn create_new_file(path: &Path) -> io::Result<File> {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    open_private(&mut o, path)
+}
+
+fn open_private(o: &mut fs::OpenOptions, path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -56,5 +68,9 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         create_file(&dir.join("f")).unwrap();
         assert_eq!(mode(&dir.join("f")), 0o600);
+        create_new_file(&dir.join("g")).unwrap();
+        assert_eq!(mode(&dir.join("g")), 0o600);
+        let again = create_new_file(&dir.join("g")).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     }
 }
