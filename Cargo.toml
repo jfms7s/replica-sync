@@ -9,3 +9,12 @@ version = "0.5.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+
+# Smaller release binaries for the installers and the CLI. Profiles live here
+# only: `app/src-tauri` is a member of this workspace. No `panic = "abort"`:
+# the app catches a worker's panic (`catch_unwind` in commands.rs) so the run
+# still reaches `finish_apply` and the session is not left busy.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
