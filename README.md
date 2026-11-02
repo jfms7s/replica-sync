@@ -19,9 +19,23 @@ Download the installer for your system from the [latest release](https://github.
 
 ## Develop
 
+The same checks CI runs (`.github/workflows/ci.yml`), per part:
+
 ```bash
-cargo test --workspace                 # engine + app state
+# Engine, app state and CLI (repo root)
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast
 cargo run -p replica-sync-cli -- plan <source> <replica>
-cd app && npm ci && npm test           # UI
-npm run tauri dev                      # run the app (needs the Tauri system packages)
+
+# UI (app/, Node 22)
+cd app && npm ci
+npm run typecheck && npm run lint && npm test && npm run i18n:check
+
+# Desktop shell (needs the Tauri system packages)
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+cd .. && npx tauri build --debug --no-bundle
+npm run tauri dev                      # run the app
 ```
+
+`app/src/i18n/codes.json` is generated from Rust: after adding a reason or error code, run `UPDATE_CODES=1 cargo test -p replica-sync-app-state codes_json` and add the new keys to `en.json` and `pt-PT.json`. The permission tests refuse to run as root.

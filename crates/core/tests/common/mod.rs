@@ -1,9 +1,11 @@
 #![allow(dead_code)]
+//! Helpers for the integration tests. `src/testutil.rs` has a twin set for the
+//! unit tests: integration tests can't see `#[cfg(test)]` modules.
 
 use replica_sync_core::execute::{Control, ExecContext, RunReport, execute};
 use replica_sync_core::rules::SkipRules;
 use replica_sync_core::safety::ReplicaRoot;
-use replica_sync_core::session::{Prepared, SessionCounters, prepare};
+use replica_sync_core::session::{Prepared, SessionCounters, check_roots, prepare};
 use replica_sync_core::{trash, volume};
 use std::collections::BTreeMap;
 use std::fs;
@@ -46,6 +48,8 @@ pub fn files(root: &Path, skip_trash: bool) -> BTreeMap<String, Vec<u8>> {
 
 pub fn prepare_with(src: &Path, rep: &Path, rules: &[&str]) -> Prepared {
     let rules = SkipRules::new(&rules.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    // As the app does: refuse nested roots before the case probe writes.
+    check_roots(src, rep).unwrap();
     let case = volume::case_mode(rep).unwrap();
     prepare(src, rep, &rules, case, &SessionCounters::default()).unwrap()
 }

@@ -177,9 +177,9 @@ fn read_only_source_syncs_without_writing_to_it() {
 #[test]
 fn unreadable_source_folder_keeps_replica() {
     use std::os::unix::fs::PermissionsExt;
-    if unsafe { libc::geteuid() } == 0 {
-        return;
-    }
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    assert!(euid != 0, "permission tests must not run as root");
     let (_d, s, r) = dirs();
     write_file(&s, "Docs/a.txt", b"1", T0);
     write_file(&r, "Docs/a.txt", b"1", T0);
@@ -421,4 +421,65 @@ fn a_leftover_temp_under_a_replica_link_pointing_outside_is_left_alone() {
     );
     assert_eq!(fs::read(outside.join("x.jpg")).unwrap(), b"old");
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 2);
+}
+
+/// A capital-letters-only rename that stopped half-way leaves the entry at
+/// `<name>.replica-sync-rename`. The next sync recovers without losing data:
+/// a folder comes back with one folder move, a file is copied again and the
+/// stranded one goes to the trash (file-move pairing needs the same name).
+#[test]
+fn case_rename_strand_recovers_on_next_sync() {
+    // (a) A stranded folder.
+    let (_d, s, r) = dirs();
+    write_file(&s, "photos/a.jpg", b"aaaa", T0);
+    write_file(&r, "Photos.replica-sync-rename/a.jpg", b"aaaa", T0);
+    let (p, report) = sync_all(&s, &r);
+    let moves: Vec<_> = p
+        .plan
+        .changes
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.change,
+                Change::Move {
+                    kind: MoveKind::Dir { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        (moves.len(), p.plan.changes.len()),
+        (1, 1),
+        "{:?}",
+        p.plan.changes
+    );
+    assert_eq!(report.failed(), 0);
+    assert_eq!(files(&r, true), files(&s, true));
+
+    // (b) A stranded file: recopied, the strand trashed, nothing lost.
+    let (_d, s, r) = dirs();
+    write_file(&s, "photo.jpg", b"pppp", T0);
+    write_file(&r, "Photo.JPG.replica-sync-rename", b"pppp", T0);
+    let (p, report) = sync_all(&s, &r);
+    let mut shape: Vec<&str> = p
+        .plan
+        .changes
+        .iter()
+        .map(|c| match c.change {
+            Change::Create { .. } => "create",
+            Change::Delete { .. } => "delete",
+            _ => "other",
+        })
+        .collect();
+    shape.sort();
+    assert_eq!(shape, ["create", "delete"]);
+    assert_eq!(report.failed(), 0);
+    assert_eq!(files(&r, true), files(&s, true));
+    let trashed: Vec<String> = files(&r, false)
+        .into_iter()
+        .filter(|(k, v)| k.ends_with("Photo.JPG.replica-sync-rename") && v == b"pppp")
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(trashed.len(), 1, "{trashed:?}");
 }
