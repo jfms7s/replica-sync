@@ -92,3 +92,25 @@ fn gen_tree_copies_plan_as_in_sync() {
         "{text}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn gen_tree_errors_name_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let locked = t.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(locked.join("probe"), b"x").is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        panic!("permission tests must not run as root (permissions are not enforced)");
+    }
+    let out = cli(&[&"gen-tree", &locked.join("tree"), &"--files", &"1"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&*locked.join("tree").to_string_lossy()),
+        "{err}"
+    );
+}
