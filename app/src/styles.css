@@ -35,7 +35,8 @@ label { display: flex; flex-direction: column; gap: 4px; }
 .badge.delete, .badge.rmDir { background: var(--delete-bg); color: var(--delete); }
 .badge.skipped { background: var(--line); color: var(--muted); }
 .tree { flex: 1; overflow: auto; font-size: 13px; }
-.tree [role="treeitem"] { display: flex; gap: 6px; align-items: center; padding: 2px 4px; border-radius: 4px; }
+/* A fixed height (ROW_HEIGHT in Tree.tsx): the tree draws only the rows in view. */
+.tree [role="treeitem"] { display: flex; gap: 6px; align-items: center; height: 24px; padding: 0 4px; border-radius: 4px; white-space: nowrap; overflow: hidden; }
 .tree [role="treeitem"]:focus { outline: 2px solid var(--accent); }
 .bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
 .progress { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }

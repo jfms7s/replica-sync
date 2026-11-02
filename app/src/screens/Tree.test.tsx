@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
@@ -50,7 +50,7 @@ describe('Tree', () => {
     expect(screen.getByRole('checkbox', { name: 's' })).toBeDisabled();
   });
 
-  it('reexpanding_a_collapsed_folder_after_a_toggle_refetches_it', async () => {
+  it('reexpanding_a_collapsed_folder_after_toggling_it_refetches_it', async () => {
     vi.mocked(api.toggle).mockResolvedValue({} as never);
     vi.mocked(api.treeChildren).mockImplementation(async (p) =>
       page(p === '' ? [folder('a', 'on'), folder('b', 'on')] : [file]));
@@ -60,13 +60,61 @@ describe('Tree', () => {
     await userEvent.keyboard('{ArrowRight}');
     await screen.findByText('x.txt');
     await userEvent.keyboard('{ArrowLeft}');
-    await userEvent.keyboard('{ArrowDown} ');
-    await waitFor(() => expect(api.toggle).toHaveBeenCalledWith('b'));
-    const before = vi.mocked(api.treeChildren).mock.calls.filter(([p]) => p === 'a').length;
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(api.toggle).toHaveBeenCalledWith('a'));
+    const calls = (p: string) => vi.mocked(api.treeChildren).mock.calls.filter(([q]) => q === p).length;
+    await waitFor(() => expect(calls('')).toBe(2));
+    const before = calls('a');
     screen.getByRole('treeitem', { name: /^a$/ }).focus();
     await userEvent.keyboard('{ArrowRight}');
-    await waitFor(() =>
-      expect(vi.mocked(api.treeChildren).mock.calls.filter(([p]) => p === 'a').length).toBe(before + 1));
+    await waitFor(() => expect(calls('a')).toBe(before + 1));
+  });
+
+  it('a toggle refetches only the folders above it and keeps every other page', async () => {
+    vi.mocked(api.toggle).mockResolvedValue({} as never);
+    const c: NodeView = { ...file, name: 'c.txt', path: 'a/b/c.txt' };
+    vi.mocked(api.treeChildren).mockImplementation(async (p) =>
+      page(p === '' ? [folder('a', 'on'), folder('z', 'on')]
+        : p === 'a' ? [{ ...folder('b', 'on'), path: 'a/b' }]
+          : p === 'a/b' ? [c]
+            : [{ ...file, name: 'y.txt', path: 'z/y.txt' }]));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a', 'a/b', 'z']} /></I18nProvider>);
+    await screen.findByText('c.txt');
+    await screen.findByText('y.txt');
+    vi.mocked(api.treeChildren).mockClear();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'c.txt' }));
+    await waitFor(() => expect(api.toggle).toHaveBeenCalledWith('a/b/c.txt'));
+    await waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(api.treeChildren).mock.calls.map(([p]) => p).sort()).toEqual(['', 'a', 'a/b']);
+    expect(screen.getByText('y.txt')).toBeInTheDocument();
+  });
+
+  it('draws only the rows in view of a huge page and scrolls the focused row into view', async () => {
+    const many = Array.from({ length: 5000 }, (_, i): NodeView =>
+      ({ ...file, name: `f${i}.txt`, path: `f${i}.txt` }));
+    vi.mocked(api.treeChildren).mockResolvedValue(page(many));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    const first = await screen.findByRole('treeitem', { name: 'f0.txt' });
+    expect(screen.getAllByRole('treeitem').length).toBeLessThanOrEqual(100);
+    expect(screen.queryByRole('treeitem', { name: 'f4999.txt' })).not.toBeInTheDocument();
+    first.focus();
+    for (let i = 0; i < 40; i++) await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(screen.getByRole('treeitem', { name: 'f40.txt' })).toHaveFocus());
+    expect(screen.getByRole('tree').scrollTop).toBeGreaterThan(0);
+    expect(screen.queryByRole('treeitem', { name: 'f0.txt' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('treeitem').length).toBeLessThanOrEqual(100);
+  });
+
+  it('keeps one row tabbable after the focused row scrolled away', async () => {
+    const many = Array.from({ length: 500 }, (_, i): NodeView =>
+      ({ ...file, name: `f${i}.txt`, path: `f${i}.txt` }));
+    vi.mocked(api.treeChildren).mockResolvedValue(page(many));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    await screen.findByRole('treeitem', { name: 'f0.txt' });
+    const tree = screen.getByRole('tree');
+    act(() => tree.scrollTo({ top: 24 * 300 }));
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'f0.txt' })).not.toBeInTheDocument());
+    expect(screen.getAllByRole('treeitem').filter((el) => el.tabIndex === 0)).toHaveLength(1);
   });
 
   it('says how many children of a huge folder are not shown', async () => {

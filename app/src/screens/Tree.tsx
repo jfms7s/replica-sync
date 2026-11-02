@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { api, type ChildrenPage, type NodeView, type PreviewSummary } from '../api';
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
@@ -9,7 +10,18 @@ interface Row { node: NodeView; depth: number }
 /** What is drawn: a node, or the note under a folder that has more children than Rust sends. */
 type Line = { row: Row; index: number } | { more: number; path: string; depth: number };
 
-/** The Preview's folder tree: loads one folder at a time from Rust. */
+/** Every row is this tall (`.tree [role="treeitem"]` in styles.css), so the virtualiser never measures. */
+const ROW_HEIGHT = 24;
+
+/** `''` and every folder above `path`: `a/b/c.txt` → `''`, `a`, `a/b`. */
+function ancestors(path: string): string[] {
+  const parts = path.split('/');
+  return ['', ...parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join('/'))];
+}
+
+const isUnder = (p: string, folder: string) => p === folder || p.startsWith(`${folder}/`);
+
+/** The Preview's folder tree: loads one folder at a time from Rust and draws only the rows in view. */
 export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   onSummary: (s: PreviewSummary) => void;
   expandRequest: string[] | null;
@@ -20,9 +32,14 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const itemRefs = useRef(new Map<number, HTMLDivElement>());
+  /** A row the keyboard moved to: focused once it is rendered. */
+  const pendingFocus = useRef<number | null>(null);
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
+  const childrenRef = useRef(children);
+  childrenRef.current = children;
 
   const load = useCallback(async (paths: string[]) => {
     const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
@@ -38,9 +55,9 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   }, [load, tx, lang]);
 
   const expand = useCallback(async (path: string) => {
-    if (!children.has(path)) await load([path]);
+    if (!childrenRef.current.has(path)) await load([path]);
     setExpanded((prev) => new Set(prev).add(path));
-  }, [children, load]);
+  }, [load]);
 
   useEffect(() => {
     if (!expandRequest) return;
@@ -59,6 +76,25 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     setChildren(new Map(loaded));
   }, []);
 
+  /**
+   * After a toggle at `path` only its ancestors, itself and the folders under it can change. Those that are
+   * open are refetched; those that are cached but closed are dropped (a later expand refetches them); every
+   * other page is kept.
+   */
+  const refreshAfterToggle = useCallback(async (path: string) => {
+    const open = expandedRef.current;
+    const affected = [...childrenRef.current.keys()].filter((p) => p !== '' && isUnder(p, path));
+    const refetch = [...ancestors(path), ...affected.filter((p) => open.has(p))];
+    const drop = affected.filter((p) => !open.has(p));
+    const loaded = await Promise.all(refetch.map(async (p) => [p, await api.treeChildren(p)] as const));
+    setChildren((prev) => {
+      const next = new Map(prev);
+      for (const p of drop) next.delete(p);
+      for (const [p, page] of loaded) next.set(p, page);
+      return next;
+    });
+  }, []);
+
   const firstRefresh = useRef(true);
   useEffect(() => {
     if (firstRefresh.current) {
@@ -70,43 +106,73 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
 
-  const collapse = (path: string) =>
+  const collapse = useCallback((path: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
       next.delete(path);
       return next;
-    });
+    }), []);
 
-  const toggle = async (path: string) => {
+  const toggle = useCallback(async (path: string) => {
     try {
       const summary = await api.toggle(path);
       onSummary(summary);
-      await refresh();
+      await refreshAfterToggle(path);
     } catch (e) {
       setError(errorText(tx, lang, e));
     }
-  };
+  }, [onSummary, refreshAfterToggle, tx, lang]);
 
-  const rows: Row[] = [];
-  const lines: Line[] = [];
-  const walk = (path: string, depth: number) => {
-    const page = children.get(path);
-    for (const node of page?.nodes ?? []) {
-      const row = { node, depth };
-      lines.push({ row, index: rows.length });
-      rows.push(row);
-      if (node.isFolder && expanded.has(node.path)) walk(node.path, depth + 1);
+  const { rows, lines, lineOf } = useMemo(() => {
+    const rows: Row[] = [];
+    const lines: Line[] = [];
+    const lineOf: number[] = [];
+    const walk = (path: string, depth: number) => {
+      const page = children.get(path);
+      for (const node of page?.nodes ?? []) {
+        const row = { node, depth };
+        lineOf.push(lines.length);
+        lines.push({ row, index: rows.length });
+        rows.push(row);
+        if (node.isFolder && expanded.has(node.path)) walk(node.path, depth + 1);
+      }
+      if (page && page.total > page.nodes.length) lines.push({ more: page.total - page.nodes.length, path, depth });
+    };
+    walk('', 1);
+    return { rows, lines, lineOf };
+  }, [children, expanded]);
+
+  const virtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 10,
+  });
+
+  // The keyboard moved focus to a row that may only now be rendered.
+  useLayoutEffect(() => {
+    const i = pendingFocus.current;
+    if (i === null) return;
+    const el = itemRefs.current.get(i);
+    if (el) {
+      pendingFocus.current = null;
+      el.focus();
     }
-    if (page && page.total > page.nodes.length) lines.push({ more: page.total - page.nodes.length, path, depth });
-  };
-  walk('', 1);
+  });
 
-  const onKey = (e: KeyboardEvent, i: number) => {
+  // Handlers read the latest state through a ref, so the memoised rows get stable callbacks.
+  const latest = useRef({ rows, lineOf, expanded, expand, collapse, toggle, virtualizer });
+  latest.current = { rows, lineOf, expanded, expand, collapse, toggle, virtualizer };
+
+  const onKey = useCallback((e: KeyboardEvent, i: number) => {
+    const { rows, lineOf, expand, collapse, toggle, virtualizer } = latest.current;
     const row = rows[i];
     const move = (to: number) => {
       const j = Math.max(0, Math.min(rows.length - 1, to));
       setFocus(j);
-      itemRefs.current[j]?.focus();
+      pendingFocus.current = j;
+      virtualizer.scrollToIndex(lineOf[j]);
+      itemRefs.current.get(j)?.focus();
     };
     if (e.key === 'ArrowDown') move(i + 1);
     else if (e.key === 'ArrowUp') move(i - 1);
@@ -115,8 +181,81 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     else if (e.key === ' ' && row.node.tick !== 'none') void toggle(row.node.path);
     else return;
     e.preventDefault();
-  };
+  }, []);
 
+  const onOpenClick = useCallback((path: string) => {
+    const { expanded, expand, collapse } = latest.current;
+    if (expanded.has(path)) collapse(path);
+    else void expand(path);
+  }, []);
+
+  const onToggle = useCallback((path: string) => void latest.current.toggle(path), []);
+
+  const setItemRef = useCallback((i: number, el: HTMLDivElement | null) => {
+    if (el) itemRefs.current.set(i, el);
+    else itemRefs.current.delete(i);
+  }, []);
+
+  const items = virtualizer.getVirtualItems();
+  // Keep one row tabbable: the focused one, or the first in view once it has scrolled away.
+  const rendered = items.flatMap((v) => {
+    const line = lines[v.index];
+    return line && 'row' in line ? [line.index] : [];
+  });
+  const tabbable = rendered.includes(focus) ? focus : rendered[0];
+
+  return (
+    <div className="tree panel" role="tree" aria-label={t('tree.label')} ref={scrollRef}>
+      {error && <p className="error" role="alert">{error}</p>}
+      <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+        {items.map((v) => {
+          const line = lines[v.index];
+          const style = { position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${v.start}px)` } as const;
+          if ('more' in line) {
+            return (
+              <div key={`${line.path}\0more`} role="treeitem" aria-level={line.depth} aria-disabled tabIndex={-1}
+                className="muted" style={{ ...style, paddingLeft: line.depth * 16 }}>
+                {t('tree.more', { count: formatCount(lang, line.more) })}
+              </div>
+            );
+          }
+          const { row: { node, depth }, index } = line;
+          return (
+            <TreeRow
+              key={node.path}
+              node={node}
+              depth={depth}
+              index={index}
+              top={v.start}
+              expanded={node.isFolder && expanded.has(node.path)}
+              tabbable={index === tabbable}
+              setItemRef={setItemRef}
+              onKey={onKey}
+              onFocusRow={setFocus}
+              onOpenClick={onOpenClick}
+              onToggle={onToggle}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabbable, setItemRef, onKey, onFocusRow, onOpenClick, onToggle }: {
+  node: NodeView;
+  depth: number;
+  index: number;
+  top: number;
+  expanded: boolean;
+  tabbable: boolean;
+  setItemRef: (i: number, el: HTMLDivElement | null) => void;
+  onKey: (e: KeyboardEvent, i: number) => void;
+  onFocusRow: (i: number) => void;
+  onOpenClick: (path: string) => void;
+  onToggle: (path: string) => void;
+}) {
+  const { t, tx, lang } = useT();
   const counts = (n: NodeView) => {
     const c = n.counts;
     const parts: [number, string, string][] = [
@@ -129,62 +268,43 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     ];
     return parts.filter(([n]) => n > 0).map(([, cls, text]) => <span key={cls} className={`badge ${cls}`}>{text}</span>);
   };
-
   return (
-    <div className="tree panel" role="tree" aria-label={t('tree.label')}>
-      {error && <p className="error" role="alert">{error}</p>}
-      {lines.map((line) => {
-        if ('more' in line) {
-          return (
-            <div key={`${line.path}\0more`} role="treeitem" aria-level={line.depth} aria-disabled tabIndex={-1}
-              className="muted" style={{ paddingLeft: line.depth * 16 }}>
-              {t('tree.more', { count: formatCount(lang, line.more) })}
-            </div>
-          );
-        }
-        const { row: { node, depth }, index: i } = line;
-        return (
-        <div
-          key={node.path}
-          ref={(el) => { itemRefs.current[i] = el; }}
-          role="treeitem"
-          aria-label={node.name}
-          aria-level={depth}
-          aria-expanded={node.isFolder ? expanded.has(node.path) : undefined}
-          aria-checked={node.tick === 'mixed' ? 'mixed' : node.tick === 'on'}
-          tabIndex={i === focus ? 0 : -1}
-          style={{ paddingLeft: depth * 16 }}
-          onKeyDown={(e) => onKey(e, i)}
-          onFocus={() => setFocus(i)}
-        >
-          <input
-            type="checkbox"
-            aria-label={node.name}
-            checked={node.tick === 'on'}
-            disabled={node.tick === 'none'}
-            ref={(el) => { if (el) el.indeterminate = node.tick === 'mixed'; }}
-            onChange={() => void toggle(node.path)}
-            tabIndex={-1}
-          />
-          {node.isFolder ? (
-            <button className="link" tabIndex={-1}
-              onClick={() => (expanded.has(node.path) ? collapse(node.path) : void expand(node.path))}>
-              {expanded.has(node.path) ? '▾' : '▸'} {node.name}/
-            </button>
-          ) : (
-            <span>{node.name}</span>
-          )}
-          {node.changes.map(({ id, change }) => (
-            <span key={id} className="row">
-              <span className={`badge ${change.type}`}>{tx(`change.${change.type}`)}</span>
-              <span className="muted">{changeDetail(t, tx, change)}</span>
-            </span>
-          ))}
-          {node.isFolder && counts(node)}
-          {node.bytesToCopy > 0 && <span className="muted">{formatBytes(lang, node.bytesToCopy)}</span>}
-        </div>
-        );
-      })}
+    <div
+      ref={(el) => setItemRef(index, el)}
+      role="treeitem"
+      aria-label={node.name}
+      aria-level={depth}
+      aria-expanded={node.isFolder ? expanded : undefined}
+      aria-checked={node.tick === 'mixed' ? 'mixed' : node.tick === 'on'}
+      tabIndex={tabbable ? 0 : -1}
+      style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${top}px)`, paddingLeft: depth * 16 }}
+      onKeyDown={(e) => onKey(e, index)}
+      onFocus={() => onFocusRow(index)}
+    >
+      <input
+        type="checkbox"
+        aria-label={node.name}
+        checked={node.tick === 'on'}
+        disabled={node.tick === 'none'}
+        ref={(el) => { if (el) el.indeterminate = node.tick === 'mixed'; }}
+        onChange={() => onToggle(node.path)}
+        tabIndex={-1}
+      />
+      {node.isFolder ? (
+        <button className="link" tabIndex={-1} onClick={() => onOpenClick(node.path)}>
+          {expanded ? '▾' : '▸'} {node.name}/
+        </button>
+      ) : (
+        <span>{node.name}</span>
+      )}
+      {node.changes.map(({ id, change }) => (
+        <span key={id} className="row">
+          <span className={`badge ${change.type}`}>{tx(`change.${change.type}`)}</span>
+          <span className="muted">{changeDetail(t, tx, change)}</span>
+        </span>
+      ))}
+      {node.isFolder && counts(node)}
+      {node.bytesToCopy > 0 && <span className="muted">{formatBytes(lang, node.bytesToCopy)}</span>}
     </div>
   );
-}
+});
