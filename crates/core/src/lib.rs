@@ -9,6 +9,7 @@ pub mod pairs;
 pub mod plan;
 pub mod private;
 pub mod reason;
+pub mod reserved;
 pub mod rules;
 pub mod runlog;
 pub mod safety;

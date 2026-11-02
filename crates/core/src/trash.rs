@@ -9,7 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub const TRASH_DIR: &str = ".sync-trash";
+pub use crate::reserved::TRASH_DIR;
 pub const FILES_DIR: &str = "files";
 pub const MANIFEST: &str = "manifest.jsonl";
 const STAMP_FORMAT: &str = "%Y-%m-%d_%H%M%S";
