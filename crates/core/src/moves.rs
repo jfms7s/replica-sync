@@ -33,18 +33,33 @@ fn pair_file_moves(changes: Vec<Change>) -> Vec<Change> {
             Change::Create { mtime_ns, .. } | Change::Delete { mtime_ns, .. } => *mtime_ns,
             _ => unreachable!("only creates and deletes are indexed"),
         };
-        let close = |a: usize, b: usize| mtime(a).abs_diff(mtime(b)) <= MTIME_TOLERANCE_NS as u64;
+        // Each bucket sorted by mtime: the changes within the 2 s window of an
+        // mtime are one contiguous run, found by two binary searches.
+        let by_mtime = |mut v: Vec<usize>| {
+            v.sort_by_key(|&i| (mtime(i), i));
+            v
+        };
+        let window = |sorted: &[usize], m: i64| {
+            let t = MTIME_TOLERANCE_NS;
+            let lo = sorted.partition_point(|&i| mtime(i) < m.saturating_sub(t));
+            let hi = sorted.partition_point(|&i| mtime(i) <= m.saturating_add(t));
+            lo..hi
+        };
         let mut pairs = Vec::new();
-        for (key, dels) in &deletes {
-            let Some(crs) = creates.get(key) else {
+        for (key, dels) in deletes {
+            let Some(crs) = creates.remove(&key) else {
                 continue;
             };
-            for &d in dels {
-                let mut cands = crs.iter().copied().filter(|&c| close(d, c));
-                let (Some(c), None) = (cands.next(), cands.next()) else {
+            let (dels, crs) = (by_mtime(dels), by_mtime(crs));
+            for &d in &dels {
+                // Pairs only when exactly one create is close to this delete and
+                // exactly one delete (this one) is close to that create.
+                let near = window(&crs, mtime(d));
+                if near.len() != 1 {
                     continue;
-                };
-                if dels.iter().filter(|&&other| close(other, c)).count() == 1 {
+                }
+                let c = crs[near.start];
+                if window(&dels, mtime(c)).len() == 1 {
                     pairs.push((d, c));
                 }
             }
@@ -145,24 +160,24 @@ fn collapse_folder_moves(
     // An unreadable entry, or one a skip rule hides (leftovers included), at or
     // under X must not be carried along by a rename: the skipped entry would
     // land where its rule no longer matches it.
-    let blocked_keys: Vec<String> = replica
-        .problems
-        .iter()
-        .map(|p| &p.rel)
-        .chain(&replica.unlisted)
-        .chain(replica.leftovers.iter().map(|e| &e.rel))
-        .map(k)
-        .collect();
+    let blocked = PathTree(
+        replica
+            .problems
+            .iter()
+            .map(|p| &p.rel)
+            .chain(&replica.unlisted)
+            .chain(replica.leftovers.iter().map(|e| &e.rel))
+            .map(k)
+            .collect(),
+    );
     let has_problem = |x: &RelPath| {
         let kx = k(x);
-        blocked_keys.iter().any(|p| {
-            *p == kx
-                || p.strip_prefix(kx.as_str())
-                    .is_some_and(|r| r.starts_with('/'))
-        })
+        blocked.0.contains(&kx) || blocked.has_below(&kx)
     };
 
     let mut done: Vec<(RelPath, RelPath, u32, u64)> = Vec::new();
+    // The accepted X and Y folders, for "overlaps an accepted move" lookups.
+    let (mut done_x, mut done_y) = (PathTree::default(), PathTree::default());
     for (_, x, y) in candidates {
         if x.is_within(&y) || y.is_within(&x) || !is_rep_dir(&x) || has_problem(&x) {
             continue;
@@ -170,9 +185,7 @@ fn collapse_folder_moves(
         if src_keys.contains(&k(&x)) || rep_keys.contains(&k(&y)) {
             continue;
         }
-        if done.iter().any(|(dx, dy, ..)| {
-            x.is_within(dx) || dx.is_within(&x) || y.is_within(dy) || dy.is_within(&y)
-        }) {
+        if done_x.overlaps(x.as_str()) || done_y.overlaps(y.as_str()) {
             continue;
         }
         let prefix = format!("{x}/");
@@ -199,6 +212,8 @@ fn collapse_folder_moves(
             }
         }
         if ok && files > 0 {
+            done_x.0.insert(x.as_str().to_owned());
+            done_y.0.insert(y.as_str().to_owned());
             done.push((x, y, files, bytes));
         }
     }
@@ -206,7 +221,8 @@ fn collapse_folder_moves(
         return changes;
     }
 
-    let in_x = |p: &RelPath| done.iter().any(|(x, ..)| p.is_within(x));
+    let in_x = |p: &RelPath| done_x.at_or_above(p.as_str()).is_some();
+    let x_of_y: HashMap<&str, &RelPath> = done.iter().map(|(x, y, ..)| (y.as_str(), x)).collect();
     let rep_dirs: HashSet<String> = replica
         .entries
         .iter()
@@ -214,14 +230,13 @@ fn collapse_folder_moves(
         .map(|e| k(&e.rel))
         .collect();
     // A MkDir under Y is covered only when it is one of X's folders being renamed.
-    let covered_by_rename = |p: &RelPath| {
-        done.iter().any(|(x, y, ..)| {
-            p.is_within(y)
-                && match p.strip_dir(y) {
-                    None => true,
-                    Some(rest) => rep_dirs.contains(&k(&x.join(rest))),
-                }
-        })
+    // Accepted Y folders never overlap, so at most one holds `p`.
+    let covered_by_rename = |p: &RelPath| match done_y.at_or_above(p.as_str()) {
+        None => false,
+        Some(y) => match p.as_str().strip_prefix(y).and_then(|r| r.strip_prefix('/')) {
+            None => true,
+            Some(rest) => rep_dirs.contains(&k(&x_of_y[y].join(rest))),
+        },
     };
     let mut out: Vec<Change> = changes
         .into_iter()
@@ -242,6 +257,38 @@ fn collapse_folder_moves(
         kind: MoveKind::Dir { files, bytes },
     }));
     out
+}
+
+/// A set of folder paths answering "is a member at, above or below this path"
+/// in O(depth · log n), instead of a scan of every member.
+#[derive(Default)]
+struct PathTree(BTreeSet<String>);
+
+impl PathTree {
+    /// The member that is `p` or holds it, if any.
+    fn at_or_above<'a>(&'a self, p: &'a str) -> Option<&'a str> {
+        let mut cur = p;
+        loop {
+            if let Some(m) = self.0.get(cur) {
+                return Some(m.as_str());
+            }
+            cur = &cur[..cur.rfind('/')?];
+        }
+    }
+
+    /// Whether a member lies strictly below `p`.
+    fn has_below(&self, p: &str) -> bool {
+        let prefix = format!("{p}/");
+        self.0
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|m| m.starts_with(&prefix))
+    }
+
+    /// Whether a member is `p`, holds it, or lies below it.
+    fn overlaps(&self, p: &str) -> bool {
+        self.at_or_above(p).is_some() || self.has_below(p)
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +436,65 @@ mod tests {
         );
         out.sort_by(|a, b| a.path().cmp(b.path()));
         out
+    }
+
+    /// `n` albums of four photos each, every album renamed on the source.
+    fn renamed_albums(n: usize) -> (Vec<Entry>, Vec<Entry>) {
+        let (mut src, mut rep) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let secs = T0 + 10 * i as i64;
+            src.push(dir(&format!("trip{i}")));
+            rep.push(dir(&format!("album{i}")));
+            for f in ["a", "b", "c", "d"] {
+                src.push(file(&format!("trip{i}/{f}.jpg"), 4, secs));
+                rep.push(file(&format!("album{i}/{f}.jpg"), 4, secs));
+            }
+        }
+        (src, rep)
+    }
+
+    #[test]
+    fn five_thousand_renamed_folders_collapse_quickly() {
+        let (src, rep) = renamed_albums(5_000);
+        let t = std::time::Instant::now();
+        let out = pipeline(src, rep);
+        let elapsed = t.elapsed();
+        let dir_moves = out
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Move {
+                        kind: MoveKind::Dir { files: 4, .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((dir_moves, out.len()), (5_000, 5_000));
+        assert!(elapsed.as_secs_f64() < 1.0, "took {elapsed:?}");
+    }
+
+    #[test]
+    fn same_name_files_pair_only_when_their_times_are_unambiguous() {
+        // Many `cover.jpg` of one size: each pairs with the one create within
+        // 2 s, except where two deletes (or two creates) share a window.
+        let mut changes = Vec::new();
+        for i in 0..200 {
+            let secs = T0 + 10 * i;
+            changes.push(delete(&format!("old{i}/cover.jpg"), 7, secs));
+            changes.push(create(&format!("new{i}/cover.jpg"), 7, secs + 1));
+        }
+        changes.push(delete("dupe/cover.jpg", 7, T0 + 10 * 50 + 2));
+        let out = detect_moves(changes, &snap(vec![]), &snap(vec![]), CaseMode::Sensitive);
+        let moves = out
+            .iter()
+            .filter(|c| matches!(c, Change::Move { .. }))
+            .count();
+        assert_eq!(moves, 199);
+        assert!(out.iter().any(
+            |c| matches!(c, Change::Create { path, .. } if path.as_str() == "new50/cover.jpg")
+        ));
     }
 
     #[test]
