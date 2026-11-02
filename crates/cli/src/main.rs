@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use replica_sync_core::execute::{Control, ExecContext, execute};
+use replica_sync_core::plan::{mass_change_guard, space_shortfall};
 use replica_sync_core::rules::SkipRules;
 use replica_sync_core::runlog::{human_bytes, render_plan, render_run};
 use replica_sync_core::safety::ReplicaRoot;
@@ -42,6 +43,10 @@ enum Cmd {
         skip: Vec<String>,
         #[arg(long)]
         yes: bool,
+        /// Apply even when most of the replica would be removed or replaced,
+        /// or the replica drive looks too small.
+        #[arg(long)]
+        force: bool,
     },
     /// Show the drive id the app would store for a folder.
     Volume { path: PathBuf },
@@ -91,6 +96,28 @@ fn print_summary(p: &Prepared) {
     );
 }
 
+/// The app's apply checks, minus the drive check (the CLI has no saved
+/// pairs, so every run counts as a first sync). Returns why to refuse.
+fn refusals(p: &Prepared, replica: &Path) -> Result<Vec<String>> {
+    let approved = p.plan.actionable_ids();
+    let mut why = Vec::new();
+    if let Some(g) = mass_change_guard(&p.plan, &approved, p.replica_files, true) {
+        why.push(format!(
+            "{} of the replica's {} files would be removed or replaced: is this the right pair of folders?",
+            g.affected, g.replica_files
+        ));
+    }
+    let free = volume::free_space(replica)
+        .with_context(|| format!("reading free space on {}", replica.display()))?;
+    if let Some(short) = space_shortfall(p.plan.totals.bytes_to_copy, free) {
+        why.push(format!(
+            "not enough space on the replica drive: {} more needed",
+            human_bytes(short)
+        ));
+    }
+    Ok(why)
+}
+
 fn gen_tree(dir: &Path, files: u64, large: u32) -> Result<()> {
     const T0: i64 = 1_700_000_000;
     for i in 0..files {
@@ -133,12 +160,21 @@ fn main() -> Result<ExitCode> {
             replica,
             skip,
             yes,
+            force,
         } => {
             let p = prepared(&source, &replica, &skip)?;
             if !yes {
                 print!("{}", render_plan(&p.plan, &p.plan.actionable_ids()));
                 eprintln!("nothing applied: pass --yes to apply these changes");
                 return Ok(ExitCode::from(2));
+            }
+            let why = refusals(&p, &replica)?;
+            if !why.is_empty() && !force {
+                for w in &why {
+                    eprintln!("{w}");
+                }
+                eprintln!("nothing applied: pass --force to apply anyway");
+                return Ok(ExitCode::from(3));
             }
             let approved = p.plan.actionable_ids();
             let replica_root = ReplicaRoot::new(&replica)

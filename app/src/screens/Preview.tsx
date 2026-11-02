@@ -108,13 +108,13 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
       </div>
       {guardOpen && s.guard && (
         <Modal
-          title={t('preview.guardTitle')}
+          title={t(s.guard.first_sync ? 'preview.guardTitle' : 'preview.guardLaterTitle')}
           actions={<>
             <button onClick={() => navigate({ name: 'pairs' })}>{t('common.back')}</button>
-            <button className="primary" onClick={() => void run(api.confirmWrongFolder)}>{t('preview.guardConfirm')}</button>
+            <button className="primary" onClick={() => void run(api.confirmWrongFolder)}>{t(s.guard.first_sync ? 'preview.guardConfirm' : 'preview.guardLaterConfirm')}</button>
           </>}
         >
-          {t('preview.guardBody', { affected: formatCount(lang, s.guard.affected), total: formatCount(lang, s.guard.replica_files) })}
+          {t(s.guard.first_sync ? 'preview.guardBody' : 'preview.guardLaterBody', { affected: formatCount(lang, s.guard.affected), total: formatCount(lang, s.guard.replica_files) })}
         </Modal>
       )}
     </main>

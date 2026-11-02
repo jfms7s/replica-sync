@@ -25,12 +25,23 @@ describe('Preview', () => {
   });
 
   it('blocks on the wrong-folder dialog until confirmed', async () => {
-    vi.mocked(api.confirmWrongFolder).mockResolvedValue({ ...base, guard: { affected: 3, replica_files: 4 }, guardConfirmed: true });
-    render(<I18nProvider lang="en"><Preview summary={{ ...base, guard: { affected: 3, replica_files: 4 } }} navigate={vi.fn()} /></I18nProvider>);
+    vi.mocked(api.confirmWrongFolder).mockResolvedValue({ ...base, guard: { affected: 3, replica_files: 4, first_sync: true }, guardConfirmed: true });
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, guard: { affected: 3, replica_files: 4, first_sync: true } }} navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByRole('dialog', { name: 'Is this the right backup folder?' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Apply selected' })).toBeDisabled();
     await userEvent.click(screen.getByRole('button', { name: 'Yes, this is the right folder' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply selected' })).toBeEnabled();
+  });
+
+  it('asks about the source folder on a later sync', async () => {
+    const guard = { affected: 4, replica_files: 4, first_sync: false };
+    vi.mocked(api.confirmWrongFolder).mockResolvedValue({ ...base, guard, guardConfirmed: true });
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, guard }} navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByRole('dialog', { name: 'Is the source folder right?' })).toBeInTheDocument();
+    expect(screen.getByText(/Most of the backup would be removed: 4 of 4 files/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply selected' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, the source folder is right' }));
     expect(screen.getByRole('button', { name: 'Apply selected' })).toBeEnabled();
   });
 

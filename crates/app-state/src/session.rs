@@ -11,7 +11,7 @@ use replica_sync_core::execute::{Control, ExecContext, Progress, RunReport, exec
 use replica_sync_core::model::{RelPath, SideKind};
 use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, Resolved};
 use replica_sync_core::plan::{
-    ChangeId, GuardWarning, Totals, first_sync_guard, selected_totals, space_shortfall,
+    ChangeId, GuardWarning, Totals, mass_change_guard, selected_totals, space_shortfall,
 };
 use replica_sync_core::rules::{BUILTIN_PATTERNS, SkipRules};
 use replica_sync_core::runlog;
@@ -405,11 +405,7 @@ impl Session {
         let selected = selected_totals(plan, &c.selection);
         let free_space = volume::free_space(&c.resolved.replica_root).unwrap_or(c.free_space);
         let shortfall = space_shortfall(selected.bytes_to_copy, free_space);
-        let guard = if c.first_sync {
-            first_sync_guard(plan, &c.selection, c.prepared.replica_files)
-        } else {
-            None
-        };
+        let guard = mass_change_guard(plan, &c.selection, c.prepared.replica_files, c.first_sync);
         Ok(PreviewSummary {
             pair_id: c.pair_id.clone(),
             pair_name: pair.name.clone(),
@@ -781,7 +777,7 @@ mod tests {
         }
         write(&w.src(), "a.txt", b"a");
         let s = w.scan();
-        assert!(s.guard.is_some() && !s.guard_confirmed);
+        assert!(s.guard.as_ref().is_some_and(|g| g.first_sync) && !s.guard_confirmed);
         assert_eq!(
             w.s.begin_apply(&w.v).err().unwrap().code,
             "apply.wrongFolderUnconfirmed"
@@ -790,6 +786,38 @@ mod tests {
         w.s.confirm_guard().unwrap();
         let run = w.apply();
         assert_eq!(run.report.failed(), 0);
+    }
+
+    #[test]
+    fn later_sync_removing_most_of_the_backup_needs_confirmation() {
+        let mut w = world();
+        for i in 0..4 {
+            write(&w.src(), &format!("f{i}.txt"), b"x");
+        }
+        w.scan();
+        w.apply();
+        // Small later changes don't trip the guard.
+        fs::remove_file(w.src().join("f0.txt")).unwrap();
+        let s = w.scan();
+        assert_eq!((s.totals.deletes, s.guard.is_none()), (1, true));
+        // The source is emptied (moved away, or another folder at its path).
+        for i in 1..4 {
+            fs::remove_file(w.src().join(format!("f{i}.txt"))).unwrap();
+        }
+        let s = w.scan();
+        let g = s.guard.as_ref().expect("guard on a later sync");
+        assert_eq!((g.affected, g.replica_files, g.first_sync), (4, 4, false));
+        assert_eq!(
+            w.s.begin_apply(&w.v).err().unwrap().code,
+            "apply.wrongFolderUnconfirmed"
+        );
+        assert!(w.rep().join("f1.txt").exists());
+        // A fresh scan forgets an earlier confirmation.
+        w.s.confirm_guard().unwrap();
+        assert!(!w.scan().guard_confirmed);
+        w.s.confirm_guard().unwrap();
+        assert_eq!(w.apply().report.failed(), 0);
+        assert!(!w.rep().join("f1.txt").exists());
     }
 
     #[test]
