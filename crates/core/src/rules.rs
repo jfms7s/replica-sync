@@ -3,16 +3,10 @@
 use crate::model::RelPath;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-/// Suffix of the temporary file a copy writes before renaming into place.
-pub const TEMP_SUFFIX: &str = ".replica-sync.tmp";
-/// Suffix of the intermediate name in a capital-letters-only rename. Deliberately
-/// matched by neither `TEMP_SUFFIX` nor any skip rule: a crash between the two
-/// renames leaves an ordinary, visible replica entry, never one that is silently
-/// deleted as a leftover or hidden forever.
-pub const CASE_RENAME_SUFFIX: &str = ".replica-sync-rename";
-/// File written briefly to test whether a drive ignores capital letters.
-pub const CASE_PROBE_NAME: &str = ".replica-sync-case-probe";
+pub use crate::reserved::{CASE_PROBE_NAME, CASE_RENAME_SUFFIX, TEMP_SUFFIX};
 
+/// Built-in skip rules, shown to the user in the app. The last three entries
+/// are the engine's own names from `crate::reserved` (see the drift test).
 pub const BUILTIN_PATTERNS: &[&str] = &[
     "$RECYCLE.BIN/",
     "System Volume Information/",
@@ -22,6 +16,8 @@ pub const BUILTIN_PATTERNS: &[&str] = &[
     ".DS_Store",
     "lost+found/",
     ".sync-trash/",
+    // `TEMP_SUFFIX`: the scan handles these before any rule runs; listed so
+    // the app shows it as a built-in rule.
     "*.replica-sync.tmp",
     ".replica-sync-case-probe",
 ];
@@ -129,6 +125,26 @@ mod tests {
         assert!(!r.is_skipped(&rel("Photos/a.jpg"), false));
         // folder-only built-in does not hit a file of the same name
         assert!(!r.is_skipped(&rel("lost+found"), false));
+    }
+
+    /// Ties `BUILTIN_PATTERNS` to the reserved-name constants: renaming a
+    /// constant or dropping its pattern would let the scan plan the engine's
+    /// own trash or probe files as user data.
+    #[test]
+    fn builtin_patterns_cover_every_reserved_name() {
+        use crate::reserved::{CASE_PROBE_NAME, CASE_RENAME_SUFFIX, TEMP_SUFFIX, TRASH_DIR};
+        assert!(BUILTIN_PATTERNS.contains(&format!("{TRASH_DIR}/").as_str()));
+        assert!(BUILTIN_PATTERNS.contains(&CASE_PROBE_NAME));
+        assert!(BUILTIN_PATTERNS.contains(&format!("*{TEMP_SUFFIX}").as_str()));
+
+        let r = rules(&[]);
+        assert!(r.is_skipped(&rel(TRASH_DIR), true));
+        assert!(r.is_skipped(&rel(CASE_PROBE_NAME), false));
+        assert!(r.is_skipped(&rel(&format!("a/b.jpg{TEMP_SUFFIX}")), false));
+        // Deliberately visible: a stranded case rename must never be hidden.
+        let aside = format!("a/B.jpg{CASE_RENAME_SUFFIX}");
+        assert!(!r.is_skipped(&rel(&aside), false));
+        assert!(!r.is_skipped(&rel(&aside), true));
     }
 
     #[test]
