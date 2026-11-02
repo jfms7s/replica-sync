@@ -72,6 +72,15 @@ impl TrashWriter {
         }
     }
 
+    /// A writer that checks containment against `replica` (the run's own
+    /// [`ReplicaRoot`]) rather than a baseline of its own.
+    pub fn for_replica(replica: &ReplicaRoot, stamp: String) -> TrashWriter {
+        TrashWriter {
+            replica: Some(replica.clone()),
+            ..TrashWriter::new(replica.path(), stamp)
+        }
+    }
+
     pub fn run_id(&self) -> Option<&str> {
         self.run.as_ref().map(|(id, ..)| id.as_str())
     }
@@ -595,7 +604,7 @@ pub fn restore(
     if let (Some(&i), OnConflict::Refuse) = (conflicts.first(), on_conflict) {
         return Err(RestoreError::Conflict(paths[i].clone()));
     }
-    let mut displaced = TrashWriter::new(replica_root, new_run_stamp());
+    let mut displaced = TrashWriter::for_replica(&replica, new_run_stamp());
     for &i in &conflicts {
         let md = fs::symlink_metadata(&targets[i])?;
         displaced.move_in(&paths[i], md.len(), modified_ns(&md), TrashReason::Replaced)?;
@@ -604,7 +613,7 @@ pub fn restore(
     // Defence in depth: every source must still resolve inside this run's own
     // `files` folder (a link planted below it would otherwise be followed).
     let files_root = fs::canonicalize(&files)?;
-    for (p, target) in paths.iter().zip(&targets) {
+    for p in paths {
         let source = p.to_path(&files);
         let parent = fs::canonicalize(source.parent().expect("never the root"))?;
         if !parent.starts_with(&files_root) {
@@ -614,7 +623,9 @@ pub fn restore(
             )
             .into());
         }
-        fs::create_dir_all(target.parent().expect("never the root"))?;
+        // Re-checked right before the write: a folder swapped for a link since
+        // the check above is refused, not followed.
+        let target = &replica.create_parent(p)?;
         let line = serde_json::to_string(&ManifestLine::Restored {
             restored: p.clone(),
         })

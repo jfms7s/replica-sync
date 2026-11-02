@@ -93,11 +93,11 @@ impl ReplicaRoot {
 
     /// Creates the parent folders of `rel` (never the root) and returns its path.
     pub fn create_parent(&self, rel: &RelPath) -> Result<PathBuf, SafetyError> {
-        let parent = rel.parent().expect("never the root");
-        if !parent.is_root() {
-            self.create_dir_all(&parent)?;
-        }
-        self.target(rel)
+        // Checking `rel` checks its deepest existing ancestor, which is also
+        // the parent's: one check covers both.
+        let target = self.target(rel)?;
+        fs::create_dir_all(target.parent().expect("never the root"))?;
+        Ok(target)
     }
 
     /// Creates `rel` as a new file for writing; fails `AlreadyExists` when
@@ -113,8 +113,14 @@ impl ReplicaRoot {
 
     /// Renames `from` to `to`, both inside the replica.
     pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<(), SafetyError> {
-        let (from, to) = (self.target(from)?, self.target(to)?);
-        Ok(fs::rename(from, to)?)
+        let from_path = self.target(from)?;
+        // Same folder (a temp or a rename aside): one check covers both.
+        let to_path = if from.parent() == to.parent() {
+            to.to_path(&self.root)
+        } else {
+            self.target(to)?
+        };
+        Ok(fs::rename(from_path, to_path)?)
     }
 
     /// Removes the empty folder `rel`.

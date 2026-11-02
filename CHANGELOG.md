@@ -12,7 +12,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - An Apply now stops as "backup drive disconnected" (or "source drive disconnected") when the saved drive is no longer the one at that folder, checked during the run before each batch of copies is put in place and at least every 2 seconds (on Linux, a drive unmounted from under its folder is caught at the next change). Before, only a missing folder stopped it, so on Linux a backup drive unmounted from a fixed mount point (`/mnt/backup`) left an empty folder and the remaining copies went to the system disk.
 
 ### Security
-- Every write, rename and folder removal inside the backup folder now goes through one checked path (`ReplicaRoot`), including trashing a file and renaming a finished copy into place, which re-checks that its folder still resolves inside the backup folder. A path under a link pointing outside is refused instead of followed.
+- Every change to your files in the backup folder (copying, the rename of a finished copy into place, moving, creating and removing folders, trashing and restoring) now goes through one checked path, which checks right before the write that the folder still resolves inside the backup folder. A path under a link pointing outside is refused instead of followed. (The trash's own bookkeeping inside `.sync-trash` and the drive's case probe keep their own checks.)
 
 ## 0.4.1 — 2026-11-01
 

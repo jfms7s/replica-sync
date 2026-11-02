@@ -267,7 +267,7 @@ pub fn execute(
     let mut run = Run {
         ctx,
         disk: durable::Replica::open(ctx.replica.path()),
-        trash: TrashWriter::new(ctx.replica.path(), ctx.trash_stamp.clone()),
+        trash: TrashWriter::for_replica(ctx.replica, ctx.trash_stamp.clone()),
         report: RunReport::default(),
         batch: Batch::default(),
         progress: &mut progress,
