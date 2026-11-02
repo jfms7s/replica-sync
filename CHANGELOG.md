@@ -4,6 +4,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- The "is this the right folder?" check now runs on every sync, not only a pair's first. When an Apply would remove or replace more than half of the backup's files on a later sync, the Preview asks "Is the source folder right?" (it may be empty, or another folder may now be at its place) and Apply stays off until you confirm.
+- `replica-sync-cli apply --yes` refuses (exit code 3) when more than half of the replica would be removed or replaced, or the replica drive looks too small, unless `--force` is also given.
+
 ## 0.4.1 — 2026-11-01
 
 Supersedes the unpublished 0.4.0 draft and includes all of its changes (below). Like 0.4.0, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.

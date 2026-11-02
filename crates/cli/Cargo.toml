@@ -10,3 +10,6 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 filetime = "0.2"
 replica-sync-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile = "3"

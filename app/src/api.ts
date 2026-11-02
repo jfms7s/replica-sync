@@ -48,7 +48,7 @@ export interface Totals {
   creates: number; updates: number; moves: number; deletes: number; folders: number; skipped: number; bytes_to_copy: number;
 }
 export interface ScanStats { files: number; bytes: number; elapsed_ms: number }
-export interface GuardWarning { affected: number; replica_files: number }
+export interface GuardWarning { affected: number; replica_files: number; first_sync: boolean }
 export interface PreviewSummary {
   pairId: string; pairName: string; totals: Totals; selected: Totals; selectedCount: number; actionableCount: number;
   isEmpty: boolean; guard: GuardWarning | null; guardConfirmed: boolean; shortfall: number | null;

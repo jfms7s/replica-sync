@@ -64,6 +64,9 @@
   "preview.guardTitle": "Esta é a pasta certa para a cópia?",
   "preview.guardBody": "Esta pasta não parece uma cópia da origem: {affected} de {total} ficheiros seriam apagados ou substituídos. Confirme que escolheu as pastas certas.",
   "preview.guardConfirm": "Sim, é a pasta certa",
+  "preview.guardLaterTitle": "A pasta de origem está certa?",
+  "preview.guardLaterBody": "A maior parte da cópia seria removida: {affected} de {total} ficheiros seriam apagados ou substituídos. A pasta de origem está certa? Pode estar vazia, ou outra pasta pode estar agora no seu lugar.",
+  "preview.guardLaterConfirm": "Sim, a pasta de origem está certa",
 
   "change.create": "Novo",
   "change.update": "Atualizado",

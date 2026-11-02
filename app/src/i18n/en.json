@@ -64,6 +64,9 @@
   "preview.guardTitle": "Is this the right backup folder?",
   "preview.guardBody": "This backup folder doesn't look like a copy of the source: {affected} of {total} files would be removed or replaced. Check that you picked the right folders.",
   "preview.guardConfirm": "Yes, this is the right folder",
+  "preview.guardLaterTitle": "Is the source folder right?",
+  "preview.guardLaterBody": "Most of the backup would be removed: {affected} of {total} files would be removed or replaced. Is the source folder right? It may be empty, or another folder may now be at its place.",
+  "preview.guardLaterConfirm": "Yes, the source folder is right",
 
   "change.create": "New",
   "change.update": "Updated",

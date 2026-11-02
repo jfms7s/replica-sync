@@ -47,7 +47,8 @@ impl Pair {
         SkipRules::new(&self.user_rules)
     }
 
-    /// The wrong-folder guard applies only to a pair's first sync.
+    /// Never synced: the mass-change guard then suspects the replica folder
+    /// rather than the source.
     pub fn is_first_sync(&self) -> bool {
         self.last_sync.is_none()
     }

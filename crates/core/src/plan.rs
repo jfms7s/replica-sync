@@ -150,14 +150,19 @@ pub fn selected_totals(plan: &Plan, approved: &HashSet<ChangeId>) -> Totals {
 pub struct GuardWarning {
     pub affected: u64,
     pub replica_files: u64,
+    /// The pair has never synced: the replica may be the wrong folder. On a
+    /// later sync the source is the suspect (emptied, or another folder now
+    /// at its path), so the UI words the warning differently.
+    pub first_sync: bool,
 }
 
-/// On a pair's first sync: warn when the approved plan deletes or replaces
-/// more than half of the replica's files (the replica may be the wrong folder).
-pub fn first_sync_guard(
+/// On every sync: warn when the approved plan deletes or replaces more than
+/// half of the replica's files.
+pub fn mass_change_guard(
     plan: &Plan,
     approved: &HashSet<ChangeId>,
     replica_files: u64,
+    first_sync: bool,
 ) -> Option<GuardWarning> {
     let affected = plan
         .changes
@@ -171,6 +176,7 @@ pub fn first_sync_guard(
     (replica_files > 0 && affected * 2 > replica_files).then_some(GuardWarning {
         affected,
         replica_files,
+        first_sync,
     })
 }
 
@@ -297,16 +303,22 @@ mod tests {
         let changes: Vec<Change> = (0..6).map(|i| delete(&format!("f{i}"))).collect();
         let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
         let all = plan.actionable_ids();
-        assert_eq!(
-            first_sync_guard(&plan, &all, 10),
-            Some(GuardWarning {
-                affected: 6,
-                replica_files: 10
-            })
-        );
-        assert_eq!(first_sync_guard(&plan, &all, 12), None);
-        assert_eq!(first_sync_guard(&plan, &all, 0), None);
-        assert_eq!(first_sync_guard(&plan, &HashSet::new(), 10), None);
+        for first_sync in [true, false] {
+            assert_eq!(
+                mass_change_guard(&plan, &all, 10, first_sync),
+                Some(GuardWarning {
+                    affected: 6,
+                    replica_files: 10,
+                    first_sync,
+                })
+            );
+            assert_eq!(mass_change_guard(&plan, &all, 12, first_sync), None);
+            assert_eq!(mass_change_guard(&plan, &all, 0, first_sync), None);
+            assert_eq!(
+                mass_change_guard(&plan, &HashSet::new(), 10, first_sync),
+                None
+            );
+        }
     }
 
     #[test]
@@ -331,12 +343,13 @@ mod tests {
             vec!["a.jpg.replica-sync.tmp", "b.replica-sync.tmp", "a.jpg", "x"]
         );
         let all = plan.actionable_ids();
-        assert_eq!(first_sync_guard(&plan, &all, 3), None);
+        assert_eq!(mass_change_guard(&plan, &all, 3, true), None);
         assert_eq!(
-            first_sync_guard(&plan, &all, 1),
+            mass_change_guard(&plan, &all, 1, true),
             Some(GuardWarning {
                 affected: 1,
-                replica_files: 1
+                replica_files: 1,
+                first_sync: true,
             })
         );
     }
