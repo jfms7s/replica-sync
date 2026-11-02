@@ -5,6 +5,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Changed
+- Copies now keep the source's permission bits on Linux (an executable script stays executable, a private `0600` file stays private) and the read-only and hidden attributes on Windows, besides content and modification time. Not kept: ACLs, owners, alternate data streams, creation time, setuid/setgid. Where the backup drive can't hold them (FAT/exFAT on Linux) the copy still succeeds. Files already in a backup keep their old attributes until they next change.
 - The "is this the right folder?" check now runs on every sync, not only a pair's first. When an Apply would remove or replace more than half of the backup's files on a later sync, the Preview asks "Is the source folder right?" (it may be empty, or another folder may now be at its place) and Apply stays off until you confirm.
 - `replica-sync-cli apply --yes` refuses (exit code 3) when more than half of the replica would be removed or replaced, or the replica drive looks too small, unless `--force` is also given.
 

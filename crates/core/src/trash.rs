@@ -645,7 +645,32 @@ pub fn restore(
 
 /// Permanently deletes one trash run. The only permanent delete in replica-sync.
 pub fn empty_run(replica_root: &Path, run_id: &str) -> io::Result<()> {
-    fs::remove_dir_all(run_paths(replica_root, run_id)?.run)
+    let run = run_paths(replica_root, run_id)?.run;
+    #[cfg(windows)]
+    clear_read_only_below(&run);
+    fs::remove_dir_all(run)
+}
+
+/// Copies keep a source's read-only attribute, so a trash run can hold
+/// read-only files; clear it so the run can be emptied. Links are not followed.
+#[cfg(windows)]
+fn clear_read_only_below(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let Ok(md) = fs::symlink_metadata(e.path()) else {
+            continue;
+        };
+        if md.is_dir() {
+            clear_read_only_below(&e.path());
+        } else if md.is_file() && md.permissions().readonly() {
+            let mut p = md.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+            let _ = fs::set_permissions(e.path(), p);
+        }
+    }
 }
 
 pub fn runs_older_than(
