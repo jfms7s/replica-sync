@@ -201,6 +201,29 @@ fn io_stop(e: &io::Error, replica_root: &Path) -> Stop {
     })
 }
 
+/// A source-side error other than "not found", the same for every change kind:
+/// fatal when the source root is gone, otherwise a (retryable) failure.
+fn source_stop(e: &io::Error, ctx: &ExecContext) -> Stop {
+    if !ctx.source_root.is_dir() {
+        return Stop::Fatal(StopReason::SourceDisconnected);
+    }
+    if e.raw_os_error().is_some_and(|c| IN_USE_CODES.contains(&c)) {
+        return Stop::Fail(FailReason::InUse);
+    }
+    if e.kind() == io::ErrorKind::PermissionDenied {
+        return Stop::Fail(FailReason::PermissionDenied);
+    }
+    Stop::Fail(FailReason::Io {
+        detail: e.to_string(),
+    })
+}
+
+/// The error for a capital-letters-only rename whose roll-back also failed:
+/// it says where the file now is.
+fn stranded_detail(e: &io::Error, aside: &RelPath) -> String {
+    format!("{e}; the file was left at {aside}")
+}
+
 /// A replica root that vanished mid-change is fatal, whatever the change found.
 fn replica_gone_or(stop: Stop, root: &Path) -> Stop {
     if root.is_dir() {
@@ -306,7 +329,15 @@ pub fn execute(
         let result = match copy {
             Some((rel, size, mtime_ns)) => {
                 let replaces = matches!(p.change, Change::Update { .. });
-                run.write_copy(p.id, rel, size, mtime_ns, replaces)
+                let start = run.progress.bytes_done;
+                let r = run.write_copy(p.id, rel, size, mtime_ns, replaces);
+                // Count exactly the planned size: a copy that ends up not
+                // applied is taken out of the total (see also `flush`).
+                run.progress.bytes_done = start + if r.is_ok() { size } else { 0 };
+                if r.is_err() {
+                    run.progress.bytes_total -= size;
+                }
+                r
             }
             None => apply_one(&p.change, ctx, &mut run.trash),
         };
@@ -456,22 +487,29 @@ impl Run<'_, '_> {
 
     /// Reports one finished change and counts it as done.
     fn finish(&mut self, id: ChangeId, path: &RelPath, outcome: Outcome) {
-        self.report.results.push(ChangeResult {
-            id,
-            path: path.clone(),
-            outcome,
-        });
+        self.push_result(id, path, outcome);
         self.progress.changes_done += 1;
         (self.on_progress)(self.progress);
     }
 
     /// Reports the change a fatal stop cut short; it never counts as done.
     fn interrupted(&mut self, id: ChangeId, path: &RelPath) {
+        self.push_result(id, path, Outcome::Failed(FailReason::Interrupted));
+    }
+
+    /// The one place a result enters the report.
+    fn push_result(&mut self, id: ChangeId, path: &RelPath, outcome: Outcome) {
         self.report.results.push(ChangeResult {
             id,
             path: path.clone(),
-            outcome: Outcome::Failed(FailReason::Interrupted),
+            outcome,
         });
+    }
+
+    /// Takes a written copy that will not be applied out of the byte counts.
+    fn uncount(&mut self, len: u64) {
+        self.progress.bytes_done -= len;
+        self.progress.bytes_total -= len;
     }
 
     /// Reports a change now, or after the open batch so results keep plan order.
@@ -499,7 +537,10 @@ impl Run<'_, '_> {
     fn discard(&mut self) {
         for item in std::mem::take(&mut self.batch.items) {
             match item {
-                Pending::Written(w) => self.disk.remove_temp(self.ctx.replica.path(), &w.tmp),
+                Pending::Written(w) => {
+                    self.disk.remove_temp(self.ctx.replica.path(), &w.tmp);
+                    self.uncount(w.len);
+                }
                 Pending::Done(r) => self.finish(r.id, &r.path, r.outcome),
             }
         }
@@ -524,7 +565,7 @@ impl Run<'_, '_> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Stop::Skip(SkipReason::DeletedSinceScan));
             }
-            Err(e) => return Err(io_stop(&e, root)),
+            Err(e) => return Err(source_stop(&e, ctx)),
         };
         if before.len() != size || modified_ns(&before) != mtime_ns {
             return Err(Stop::Skip(SkipReason::ChangedSincePreview));
@@ -541,7 +582,7 @@ impl Run<'_, '_> {
         }
         // Until `create_new` succeeds the temp name is not ours: an error before
         // that point must not remove whatever is there.
-        let src = File::open(&src_path).map_err(|e| io_stop(&e, root))?;
+        let src = File::open(&src_path).map_err(|e| source_stop(&e, ctx))?;
         let out = match ctx
             .replica
             .create_new(&safety::with_suffix(rel, TEMP_SUFFIX))
@@ -618,6 +659,7 @@ impl Run<'_, '_> {
                         match item {
                             Pending::Written(w) => {
                                 self.disk.remove_temp(root, &w.tmp);
+                                self.uncount(w.len);
                                 self.interrupted(w.id, &w.rel);
                             }
                             Pending::Done(r) => self.finish(r.id, &r.path, r.outcome),
@@ -648,6 +690,7 @@ impl Run<'_, '_> {
                     && (w.replaces || fs::symlink_metadata(&w.dest).is_ok())
             {
                 self.disk.remove_temp(root, &w.tmp);
+                self.uncount(w.len);
                 self.interrupted(w.id, &w.rel);
                 continue;
             }
@@ -670,6 +713,7 @@ impl Run<'_, '_> {
                 Err(Stop::Cancelled) => unreachable!("commit never waits on the control"),
                 Err(Stop::Fatal(r)) => {
                     self.disk.remove_temp(root, &w.tmp);
+                    self.uncount(w.len);
                     self.interrupted(w.id, &w.rel);
                     self.batch.items = items.collect();
                     self.stop(r);
@@ -678,6 +722,7 @@ impl Run<'_, '_> {
             };
             if outcome != Outcome::Applied {
                 self.disk.remove_temp(root, &w.tmp);
+                self.uncount(w.len);
             }
             self.finish(w.id, &w.rel, outcome);
         }
@@ -691,13 +736,12 @@ impl Run<'_, '_> {
     /// Renames one durable temp into place, unless its source changed since it
     /// was first read.
     fn commit(&mut self, w: &Written) -> Result<(), Stop> {
-        let root = self.ctx.replica.path();
         let after = match fs::metadata(&w.src_path) {
             Ok(m) => m,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Stop::Skip(SkipReason::DeletedSinceScan));
             }
-            Err(e) => return Err(io_stop(&e, root)),
+            Err(e) => return Err(source_stop(&e, self.ctx)),
         };
         if after.len() != w.len || modified_ns(&after) != w.mtime_ns {
             return Err(Stop::Fail(FailReason::ChangedDuringCopy));
@@ -711,7 +755,17 @@ fn apply_one(change: &Change, ctx: &ExecContext, trash: &mut TrashWriter) -> Res
         Change::Create { .. } | Change::Update { .. } => {
             unreachable!("copies go through Run::write_copy")
         }
-        Change::MkDir { path } => act(ctx, ctx.replica.create_dir_all(path)),
+        Change::MkDir { path } => {
+            match fs::metadata(path.to_path(ctx.source_root)) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => return Err(Stop::Skip(SkipReason::ChangedSincePreview)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(Stop::Skip(SkipReason::DeletedSinceScan));
+                }
+                Err(e) => return Err(source_stop(&e, ctx)),
+            }
+            act(ctx, ctx.replica.create_dir_all(path))
+        }
         Change::Move { from, to, kind } => move_entry(ctx, from, to, kind),
         Change::Delete { path, .. } => delete_file(ctx, path, trash),
         Change::RmDir { path } => remove_dir(ctx, path),
@@ -1402,7 +1456,8 @@ fn move_entry(
             m.is_file() && m.len() == *size && modified_ns(&m) == *mtime_ns
         }
         (MoveKind::Dir { .. }, Ok(m)) => m.is_dir(),
-        (_, Err(_)) => false,
+        (_, Err(e)) if e.kind() == io::ErrorKind::NotFound => false,
+        (_, Err(e)) => return Err(source_stop(&e, ctx)),
     };
     if !still_planned {
         return Err(Stop::Skip(SkipReason::ChangedSincePreview));
@@ -1426,9 +1481,24 @@ fn move_entry(
         }
         let aside = safety::with_suffix(from, CASE_RENAME_SUFFIX);
         act(ctx, ctx.replica.rename(from, &aside))?;
-        act(ctx, ctx.replica.rename(&aside, to)).inspect_err(|_| {
-            let _ = ctx.replica.rename(&aside, from);
-        })
+        match ctx.replica.rename(&aside, to) {
+            Ok(()) => Ok(()),
+            Err(e) => match ctx.replica.rename(&aside, from) {
+                Ok(()) => Err(safety_stop(e, root)),
+                Err(_) => {
+                    let e = match e {
+                        SafetyError::Io(e) => e,
+                        e => io::Error::other(e.to_string()),
+                    };
+                    Err(replica_gone_or(
+                        Stop::Fail(FailReason::Io {
+                            detail: stranded_detail(&e, &aside),
+                        }),
+                        root,
+                    ))
+                }
+            },
+        }
     } else {
         act(ctx, ctx.replica.rename(from, to))
     }
@@ -1439,11 +1509,7 @@ fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Res
     match fs::symlink_metadata(rel.to_path(ctx.source_root)) {
         Ok(_) => return Err(Stop::Skip(SkipReason::BackOnSource)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(Stop::Fail(FailReason::Io {
-                detail: e.to_string(),
-            }));
-        }
+        Err(e) => return Err(source_stop(&e, ctx)),
     }
     let dest = target(ctx, rel)?;
     let md = match fs::symlink_metadata(&dest) {
@@ -1459,6 +1525,24 @@ fn delete_file(ctx: &ExecContext, rel: &RelPath, trash: &mut TrashWriter) -> Res
 }
 
 fn remove_dir(ctx: &ExecContext, rel: &RelPath) -> Result<(), Stop> {
+    // By exact name: on a source that ignores capital letters, `foo` would
+    // otherwise "exist" while only `Foo` does.
+    let parent = rel
+        .parent()
+        .expect("never the root")
+        .to_path(ctx.source_root);
+    match fs::read_dir(&parent) {
+        Ok(entries) => {
+            for e in entries {
+                let e = e.map_err(|e| source_stop(&e, ctx))?;
+                if e.file_name().to_str() == Some(rel.name()) {
+                    return Err(Stop::Skip(SkipReason::BackOnSource));
+                }
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(source_stop(&e, ctx)),
+    }
     match ctx.replica.remove_dir(rel) {
         Ok(()) => Ok(()),
         Err(SafetyError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Err(replica_gone_or(
@@ -2194,6 +2278,135 @@ mod apply_tests {
         assert!(matches!(report.results[0].outcome, Outcome::Failed(_)));
         assert!(f.rep.join("d/x.txt").exists());
     }
+    #[cfg(unix)]
+    #[test]
+    fn a_move_whose_source_is_unreadable_fails_and_can_be_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        write_file(&f.src, "new/a.jpg", b"aaaa", T0);
+        write_file(&f.src, "old/keep.txt", b"k", T0);
+        write_file(&f.rep, "old/a.jpg", b"aaaa", T0);
+        write_file(&f.rep, "old/keep.txt", b"k", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        assert!(
+            plan.changes
+                .iter()
+                .any(|p| matches!(p.change, Change::Move { .. }))
+        );
+        let locked = f.src.join("new");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::metadata(locked.join("a.jpg")).is_ok() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("SKIPPED: running as root, permissions are not enforced");
+            return;
+        }
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let move_id = plan
+            .changes
+            .iter()
+            .find(|p| matches!(p.change, Change::Move { .. }))
+            .unwrap()
+            .id;
+        let mv = report.results.iter().find(|r| r.id == move_id).unwrap();
+        assert_eq!(mv.outcome, Outcome::Failed(FailReason::PermissionDenied));
+        assert!(report.failed_ids().contains(&mv.id));
+        assert!(f.rep.join("old/a.jpg").exists());
+    }
+
+    #[test]
+    fn mkdir_and_rmdir_recheck_the_source() {
+        let f = fixture();
+        fs::create_dir_all(f.src.join("empty")).unwrap();
+        fs::create_dir_all(f.rep.join("gone")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        fs::remove_dir(f.src.join("empty")).unwrap();
+        fs::create_dir_all(f.src.join("gone")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        let outcome = |p: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == p)
+                .map(|r| r.outcome.clone())
+        };
+        assert_eq!(
+            outcome("empty"),
+            Some(Outcome::Skipped(SkipReason::DeletedSinceScan))
+        );
+        assert_eq!(
+            outcome("gone"),
+            Some(Outcome::Skipped(SkipReason::BackOnSource))
+        );
+        assert!(!f.rep.join("empty").exists());
+        assert!(f.rep.join("gone").is_dir());
+    }
+
+    #[test]
+    fn rmdir_matches_the_source_name_exactly() {
+        let f = fixture();
+        fs::create_dir_all(f.rep.join("gone")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        fs::create_dir_all(f.src.join("GONE")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        let r = report
+            .results
+            .iter()
+            .find(|r| r.path.as_str() == "gone")
+            .unwrap();
+        assert_eq!(r.outcome, Outcome::Applied);
+    }
+
+    #[test]
+    fn progress_ends_at_the_total_when_a_copy_is_skipped() {
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"aaaa", T0);
+        write_file(&f.src, "b.txt", b"bbbbbbbb", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        write_file(&f.src, "b.txt", b"changed!!", T0 + 60);
+        let mut last = Progress::default();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p| {
+                assert!(p.bytes_done <= p.bytes_total, "{p:?}");
+                last = p.clone();
+            },
+        );
+        assert_eq!((report.applied(), report.skipped()), (1, 1));
+        assert_eq!((last.bytes_done, last.bytes_total), (4, 4));
+        assert_eq!(last.changes_done, 2);
+    }
+
+    #[test]
+    fn a_stranded_case_rename_says_where_the_file_is() {
+        let e = io::Error::other("disk said no");
+        assert_eq!(
+            stranded_detail(&e, &rel("Photos/a.jpg.replica-sync-rename")),
+            "disk said no; the file was left at Photos/a.jpg.replica-sync-rename"
+        );
+    }
+
     #[test]
     fn retry_failed_reruns_only_the_failed_changes_of_the_same_plan() {
         let f = fixture();
