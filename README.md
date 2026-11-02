@@ -19,22 +19,22 @@ Download the installer for your system from the [latest release](https://github.
 
 ## Develop
 
-The same checks CI runs (`.github/workflows/ci.yml`), per part:
+The same checks CI runs (`.github/workflows/ci.yml`), per part. One Cargo workspace (one `Cargo.lock`, one `target/`) holds all four crates; the desktop crate `replica-sync-app` needs WebKit, so the engine commands exclude it:
 
 ```bash
 # Engine, app state and CLI (repo root)
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --no-fail-fast
+cargo clippy --workspace --exclude replica-sync-app --all-targets -- -D warnings
+cargo test --workspace --exclude replica-sync-app --no-fail-fast
 cargo run -p replica-sync-cli -- plan <source> <replica>
 
 # UI (app/, Node 22)
 cd app && npm ci
 npm run typecheck && npm run lint && npm test && npm run i18n:check
 
-# Desktop shell (needs the Tauri system packages)
-cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
-cd .. && npx tauri build --debug --no-bundle
+# Desktop shell (needs the Tauri system packages; repo root, then app/)
+cargo clippy -p replica-sync-app --all-targets -- -D warnings
+cd app && npx tauri build --debug --no-bundle
 npm run tauri dev                      # run the app
 ```
 
