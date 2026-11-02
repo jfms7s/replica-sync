@@ -1,9 +1,10 @@
 [package]
 name = "replica-sync-app"
-version = "0.5.1"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+# Tauri 2 needs a newer compiler than the engine crates.
 rust-version = "1.90"
-license = "MIT"
+license.workspace = true
 
 [lib]
 name = "replica_sync_app_lib"

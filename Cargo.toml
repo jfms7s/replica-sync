@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli", "crates/app-state"]
-exclude = ["app/src-tauri"]
+members = ["crates/core", "crates/cli", "crates/app-state", "app/src-tauri"]
+# Plain `cargo build`/`cargo test` (without --workspace) stays WebKit-free.
+default-members = ["crates/core", "crates/cli", "crates/app-state"]
 
 [workspace.package]
 version = "0.5.1"
