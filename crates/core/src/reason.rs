@@ -31,6 +31,9 @@ pub enum FailReason {
     OutsideReplica,
     /// The run stopped (drive gone or full) while this change was in progress.
     Interrupted,
+    /// The post-apply spot check read the copy back and its bytes differ from
+    /// the source (see `verify`).
+    VerifyMismatch,
     Io {
         detail: String,
     },
@@ -73,6 +76,7 @@ impl FailReason {
             FailReason::TargetExists => "targetExists",
             FailReason::OutsideReplica => "outsideReplica",
             FailReason::Interrupted => "interrupted",
+            FailReason::VerifyMismatch => "verifyMismatch",
             FailReason::Io { .. } => "io",
         }
     }
@@ -121,6 +125,7 @@ fn all_fail() -> Vec<FailReason> {
         FailReason::TargetExists,
         FailReason::OutsideReplica,
         FailReason::Interrupted,
+        FailReason::VerifyMismatch,
         FailReason::Io {
             detail: String::new(),
         },
@@ -179,10 +184,11 @@ mod tests {
             FailReason::TargetExists => 3,
             FailReason::OutsideReplica => 4,
             FailReason::Interrupted => 5,
-            FailReason::Io { .. } => 6,
+            FailReason::VerifyMismatch => 6,
+            FailReason::Io { .. } => 7,
         }
     }
-    const FAIL_VARIANTS: usize = 7;
+    const FAIL_VARIANTS: usize = 8;
 
     fn stop_sample_index(r: &StopReason) -> usize {
         match r {
@@ -240,7 +246,7 @@ mod tests {
     #[test]
     fn reason_codes_list_every_code_once_with_its_family() {
         let codes = reason_codes();
-        assert_eq!(codes.len(), 12 + 7 + 4);
+        assert_eq!(codes.len(), 12 + 8 + 4);
         assert!(codes.contains(&"skip.changedSincePreview".to_string()));
         assert!(codes.contains(&"fail.interrupted".to_string()));
         assert!(codes.contains(&"stop.sourceDisconnected".to_string()));

@@ -5,6 +5,7 @@ use crate::model::{Change, MoveKind, SideKind};
 use crate::plan::{ChangeId, Plan, selected_totals};
 use crate::reason::{FailReason, SkipReason};
 use crate::session::Prepared;
+use crate::verify::SpotCheck;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -63,6 +64,9 @@ pub fn fail_text(r: &FailReason) -> String {
         FailReason::TargetExists => "something already exists at the new location".into(),
         FailReason::OutsideReplica => "outside the replica folder".into(),
         FailReason::Interrupted => "interrupted: the run stopped".into(),
+        FailReason::VerifyMismatch => {
+            "the spot check read the copy back and it differs from the source".into()
+        }
         FailReason::Io { detail } => detail.clone(),
     }
 }
@@ -175,7 +179,22 @@ pub fn render_run(
         let _ = writeln!(out, "trash run: {run}");
     }
     let _ = writeln!(out, "{}", durability_text(&report.durability));
+    if let Some(c) = &report.spot_check {
+        let _ = writeln!(out, "{}", spot_check_text(c));
+    }
     out
+}
+
+/// e.g. `spot check: read back 50 copies, 1 differed from the source`.
+pub fn spot_check_text(c: &SpotCheck) -> String {
+    let mut line = format!(
+        "spot check: read back {} copies, {} differed from the source",
+        c.checked, c.mismatched
+    );
+    if c.cancelled {
+        line.push_str(" (cancelled)");
+    }
+    line
 }
 
 /// How the run made copies durable, e.g. `durability: flushed in batches before renaming (btrfs)`.

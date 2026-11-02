@@ -24,9 +24,12 @@ describe('Applying', () => {
     render(<I18nProvider lang="en"><Applying mode="apply" pairName="Photos" navigate={navigate} /></I18nProvider>);
     await vi.waitFor(() => expect(api.apply).toHaveBeenCalled());
     expect(handlers['apply-done']).toBeDefined();
-    act(() => handlers['apply-progress']({ bytes_done: 512, bytes_total: 1024, changes_done: 1, changes_total: 4, current: 'a/b.jpg' }));
+    act(() => handlers['apply-progress']({ bytes_done: 512, bytes_total: 1024, changes_done: 1, changes_total: 4, current: 'a/b.jpg', checking: null }));
     expect(screen.getByText(/1 of 4 changes/)).toBeInTheDocument();
     expect(screen.getByText('Now: a/b.jpg')).toBeInTheDocument();
+    expect(screen.queryByText(/Checking copies/)).not.toBeInTheDocument();
+    act(() => handlers['apply-progress']({ bytes_done: 1024, bytes_total: 1024, changes_done: 4, changes_total: 4, current: null, checking: { done: 12, total: 50 } }));
+    expect(screen.getByText('Checking copies: 12 of 50')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
     expect(api.pause).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();

@@ -46,6 +46,7 @@
     "fail.targetExists",
     "fail.outsideReplica",
     "fail.interrupted",
+    "fail.verifyMismatch",
     "fail.io",
     "stop.cancelled",
     "stop.replicaDisconnected",
