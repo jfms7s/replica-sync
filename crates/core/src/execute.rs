@@ -15,13 +15,14 @@ use crate::safety::{ReplicaRoot, SafetyError};
 use crate::trash::{TrashReason, TrashWriter};
 use filetime::FileTime;
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CHUNK: usize = 8 * 1024 * 1024;
 #[cfg(windows)]
@@ -153,7 +154,20 @@ pub struct ExecContext<'a> {
     pub replica: &'a ReplicaRoot,
     pub control: &'a Control,
     pub trash_stamp: String,
+    /// Re-checks that the saved drives are still at both roots. `None` keeps
+    /// only the "root is a folder" checks (CLI, tests).
+    pub drive_check: Option<DriveCheck<'a>>,
 }
+
+/// A drive identity check run at the per-change checkpoint: before the first
+/// change and then at most once per `every`. An `Err` stops the run as fatal.
+pub struct DriveCheck<'a> {
+    pub check: &'a dyn Fn() -> Result<(), StopReason>,
+    pub every: Duration,
+}
+
+/// How often the app re-checks drive identity during a run.
+pub const DRIVE_CHECK_EVERY: Duration = Duration::from_secs(2);
 
 /// Why one change did not apply.
 enum Stop {
@@ -249,6 +263,7 @@ pub fn execute(
         batch: Batch::default(),
         progress: &mut progress,
         on_progress,
+        last_drive_check: Cell::new(None),
     };
     for p in todo {
         let copy = match &p.change {
@@ -374,6 +389,7 @@ struct Run<'a, 'p> {
     batch: Batch,
     progress: &'p mut Progress,
     on_progress: &'p mut dyn FnMut(&Progress),
+    last_drive_check: Cell<Option<Instant>>,
 }
 
 impl Run<'_, '_> {
@@ -385,8 +401,23 @@ impl Run<'_, '_> {
         } else if !self.ctx.source_root.is_dir() {
             Some(StopReason::SourceDisconnected)
         } else {
-            None
+            self.check_drives()
         }
+    }
+
+    /// The saved drives are still the ones at both roots (rate-limited).
+    fn check_drives(&self) -> Option<StopReason> {
+        let dc = self.ctx.drive_check.as_ref()?;
+        let now = Instant::now();
+        if self
+            .last_drive_check
+            .get()
+            .is_some_and(|t| now.duration_since(t) < dc.every)
+        {
+            return None;
+        }
+        self.last_drive_check.set(Some(now));
+        (dc.check)().err()
     }
 
     /// Reports one finished change and counts it as done.
@@ -1328,6 +1359,7 @@ mod tests {
             replica: &replica,
             control,
             trash_stamp: "2026-10-07_120000".into(),
+            drive_check: None,
         };
         execute(plan, approved, &ctx, on_progress)
     }
@@ -1345,6 +1377,73 @@ mod tests {
 
     pub(super) fn no_temp_files(root: &Path) -> bool {
         read_tree(root).keys().all(|k| !k.ends_with(TEMP_SUFFIX))
+    }
+
+    fn run_checking_drives(
+        f: &Fixture,
+        check: &dyn Fn() -> Result<(), StopReason>,
+        every: Duration,
+    ) -> RunReport {
+        let plan = plan_for(&f.src, &f.rep);
+        let replica = ReplicaRoot::new(&f.rep).unwrap();
+        let control = Control::default();
+        let ctx = ExecContext {
+            source_root: &f.src,
+            replica: &replica,
+            control: &control,
+            trash_stamp: "2026-10-07_120000".into(),
+            drive_check: Some(DriveCheck { check, every }),
+        };
+        execute(&plan, &plan.actionable_ids(), &ctx, &mut |_| {})
+    }
+
+    #[test]
+    fn a_drive_that_stops_matching_mid_run_stops_it() {
+        let f = fixture();
+        for i in 0..5 {
+            write_file(&f.src, &format!("f{i}.txt"), b"x", T0);
+        }
+        let calls = Cell::new(0);
+        let check = || {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 3 {
+                Err(StopReason::ReplicaDisconnected)
+            } else {
+                Ok(())
+            }
+        };
+        let report = run_checking_drives(&f, &check, Duration::ZERO);
+        assert_eq!(report.stopped, Some(StopReason::ReplicaDisconnected));
+        assert!(report.applied() < 5, "{report:?}");
+        assert!(no_temp_files(&f.rep));
+        let copied = (0..5)
+            .filter(|i| f.rep.join(format!("f{i}.txt")).exists())
+            .count();
+        assert_eq!(copied, report.applied());
+    }
+
+    #[test]
+    fn the_drive_check_runs_first_and_is_rate_limited() {
+        let f = fixture();
+        for i in 0..5 {
+            write_file(&f.src, &format!("f{i}.txt"), b"x", T0);
+        }
+        let calls = Cell::new(0);
+        let check = || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let report = run_checking_drives(&f, &check, Duration::from_secs(3600));
+        assert_eq!((report.applied(), report.stopped), (5, None));
+        assert_eq!(calls.get(), 1);
+
+        let f = fixture();
+        write_file(&f.src, "a.txt", b"x", T0);
+        let gone = || Err(StopReason::SourceDisconnected);
+        let report = run_checking_drives(&f, &gone, Duration::from_secs(3600));
+        assert_eq!(report.stopped, Some(StopReason::SourceDisconnected));
+        assert_eq!(report.applied(), 0);
+        assert!(!f.rep.join("a.txt").exists());
     }
 
     #[test]

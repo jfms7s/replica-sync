@@ -7,12 +7,15 @@ use crate::paths::AppPaths;
 use crate::settings::Settings;
 use crate::tree::{ChildrenPage, PlanTree};
 use replica_sync_core::diff::CaseMode;
-use replica_sync_core::execute::{Control, ExecContext, Progress, RunReport, execute};
+use replica_sync_core::execute::{
+    Control, DRIVE_CHECK_EVERY, DriveCheck, ExecContext, Progress, RunReport, execute,
+};
 use replica_sync_core::model::{RelPath, SideKind};
-use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, Resolved};
+use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, ResolveError, Resolved};
 use replica_sync_core::plan::{
     ChangeId, GuardWarning, Totals, mass_change_guard, selected_totals, space_shortfall,
 };
+use replica_sync_core::reason::StopReason;
 use replica_sync_core::rules::{BUILTIN_PATTERNS, SkipRules};
 use replica_sync_core::runlog;
 use replica_sync_core::safety::ReplicaRoot;
@@ -20,10 +23,11 @@ use replica_sync_core::session::{Prepared, ScanStats, SessionCounters, check_roo
 use replica_sync_core::trash::{self, OnConflict, TrashRunContents, TrashRunInfo};
 use replica_sync_core::volume::{self, Volumes};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Rows one folder may send to the Preview; a folder with more says how many
 /// are not shown (its checkbox still includes or excludes them all).
@@ -127,15 +131,55 @@ pub struct ApplyJob {
     replica: ReplicaRoot,
     control: Arc<Control>,
     stamp: String,
+    /// The pair as it was at begin, and where its drives were: during the run
+    /// both drives are re-checked against it (see [`DriveCheck`]).
+    pair: Pair,
+    resolved: Resolved,
+    drive_check_every: Duration,
 }
 
 impl ApplyJob {
     pub fn run(&self, on_progress: &mut dyn FnMut(&Progress)) -> RunReport {
+        self.run_on(&volume::system(), on_progress)
+    }
+
+    /// [`run`](Self::run) against the given drives (tests pass fakes).
+    fn run_on(&self, volumes: &dyn Volumes, on_progress: &mut dyn FnMut(&Progress)) -> RunReport {
+        // A one-off lookup error is let through; a second one in a row stops
+        // the run as if the drive were gone.
+        let io_errors = Cell::new(0u32);
+        let check = || {
+            let side = pairs::verify_source(&self.pair, &self.resolved, volumes)
+                .map_err(|e| (e, StopReason::SourceDisconnected))
+                .and_then(|()| {
+                    pairs::verify_replica(&self.pair, &self.resolved, volumes)
+                        .map_err(|e| (e, StopReason::ReplicaDisconnected))
+                });
+            match side {
+                Ok(()) => {
+                    io_errors.set(0);
+                    Ok(())
+                }
+                Err((ResolveError::Io(_), stop)) => {
+                    io_errors.set(io_errors.get() + 1);
+                    if io_errors.get() >= 2 {
+                        Err(stop)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err((_, stop)) => Err(stop),
+            }
+        };
         let ctx = ExecContext {
             source_root: &self.source_root,
             replica: &self.replica,
             control: &self.control,
             trash_stamp: self.stamp.clone(),
+            drive_check: Some(DriveCheck {
+                check: &check,
+                every: self.drive_check_every,
+            }),
         };
         execute(&self.prepared.plan, &self.approved, &ctx, on_progress)
     }
@@ -530,6 +574,7 @@ impl Session {
 
     fn start_job(&mut self, approved: HashSet<ChangeId>) -> Result<ApplyJob, AppError> {
         let c = self.current()?;
+        let pair = self.pair(&c.pair_id)?.clone();
         let replica = ReplicaRoot::new(&c.resolved.replica_root)?;
         let control = Arc::new(Control::default());
         let job = ApplyJob {
@@ -540,6 +585,9 @@ impl Session {
             replica,
             control: control.clone(),
             stamp: trash::new_run_stamp(),
+            pair,
+            resolved: c.resolved.clone(),
+            drive_check_every: DRIVE_CHECK_EVERY,
         };
         self.control = Some(control);
         self.applying = true;
@@ -701,7 +749,7 @@ mod tests {
         }
         fn apply(&mut self) -> RunView {
             let job = self.s.begin_apply(&self.v).unwrap();
-            let report = job.run(&mut |_| {});
+            let report = job.run_on(&self.v, &mut |_| {});
             self.s.finish_apply(job, report).unwrap()
         }
     }
@@ -982,7 +1030,7 @@ mod tests {
         let mut job = w.s.begin_apply(&w.v).unwrap();
         // A stamp older than the trash age, as a clock change or a long run could give.
         job.stamp = "2020-01-01_000000".into();
-        let report = job.run(&mut |_| {});
+        let report = job.run_on(&w.v, &mut |_| {});
         assert_eq!(report.trash_run.as_deref(), Some("2020-01-01_000000"));
         let run = w.s.finish_apply(job, report).unwrap();
         assert_eq!(run.old_trash_runs, vec!["2019-01-01_000000".to_string()]);
@@ -1078,6 +1126,49 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_swapped_mid_run_stops_it() {
+        for (side, stop) in [
+            ("B", StopReason::ReplicaDisconnected),
+            ("A", StopReason::SourceDisconnected),
+        ] {
+            let mut w = world();
+            for i in 0..5 {
+                write(&w.src(), &format!("f{i}.txt"), b"x");
+            }
+            w.scan();
+            let mut job = w.s.begin_apply(&w.v).unwrap();
+            job.drive_check_every = Duration::ZERO;
+            let root = if side == "B" { w.rep() } else { w.src() };
+            let mut swapped = false;
+            let report = job.run_on(&w.v, &mut |_| {
+                // Another drive now answers at the same path.
+                if !swapped {
+                    w.v.mount("other", &root);
+                    swapped = true;
+                }
+            });
+            assert_eq!(report.stopped, Some(stop), "{side}");
+            assert!(report.applied() < 5);
+            let run = w.s.finish_apply(job, report).unwrap();
+            assert_eq!(run.report.stopped, Some(stop));
+        }
+    }
+
+    #[test]
+    fn healthy_drives_let_the_run_finish() {
+        let mut w = world();
+        for i in 0..5 {
+            write(&w.src(), &format!("f{i}.txt"), b"x");
+        }
+        w.scan();
+        let mut job = w.s.begin_apply(&w.v).unwrap();
+        job.drive_check_every = Duration::ZERO;
+        let report = job.run_on(&w.v, &mut |_| {});
+        assert_eq!((report.applied(), report.stopped), (5, None));
+        w.s.finish_apply(job, report).unwrap();
+    }
+
+    #[test]
     fn a_stopped_run_reports_what_was_not_done() {
         let mut w = world();
         write(&w.src(), "a.txt", b"a");
@@ -1085,7 +1176,7 @@ mod tests {
         w.scan();
         let job = w.s.begin_apply(&w.v).unwrap();
         w.s.cancel_apply();
-        let report = job.run(&mut |_| {});
+        let report = job.run_on(&w.v, &mut |_| {});
         let run = w.s.finish_apply(job, report).unwrap();
         assert!(run.report.stopped.is_some());
         assert_eq!(run.not_done, 2);
