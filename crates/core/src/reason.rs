@@ -46,6 +46,9 @@ pub enum StopReason {
     ReplicaDisconnected,
     SourceDisconnected,
     ReplicaFull,
+    /// The run itself failed (a bug); the app reports it in place of the
+    /// run's own report.
+    Internal,
 }
 
 impl SkipReason {
@@ -89,6 +92,7 @@ impl StopReason {
             StopReason::ReplicaDisconnected => "replicaDisconnected",
             StopReason::SourceDisconnected => "sourceDisconnected",
             StopReason::ReplicaFull => "replicaFull",
+            StopReason::Internal => "internal",
         }
     }
 }
@@ -138,6 +142,7 @@ fn all_stop() -> Vec<StopReason> {
         StopReason::ReplicaDisconnected,
         StopReason::SourceDisconnected,
         StopReason::ReplicaFull,
+        StopReason::Internal,
     ]
 }
 
@@ -196,9 +201,10 @@ mod tests {
             StopReason::ReplicaDisconnected => 1,
             StopReason::SourceDisconnected => 2,
             StopReason::ReplicaFull => 3,
+            StopReason::Internal => 4,
         }
     }
-    const STOP_VARIANTS: usize = 4;
+    const STOP_VARIANTS: usize = 5;
 
     /// The sample at position i is the variant with index i, for every index
     /// up to the variant count: no variant is missing or listed twice.
@@ -246,10 +252,11 @@ mod tests {
     #[test]
     fn reason_codes_list_every_code_once_with_its_family() {
         let codes = reason_codes();
-        assert_eq!(codes.len(), 12 + 8 + 4);
+        assert_eq!(codes.len(), 12 + 8 + 5);
         assert!(codes.contains(&"skip.changedSincePreview".to_string()));
         assert!(codes.contains(&"fail.interrupted".to_string()));
         assert!(codes.contains(&"stop.sourceDisconnected".to_string()));
+        assert!(codes.contains(&"stop.internal".to_string()));
         let unique: std::collections::BTreeSet<_> = codes.iter().collect();
         assert_eq!(unique.len(), codes.len());
     }

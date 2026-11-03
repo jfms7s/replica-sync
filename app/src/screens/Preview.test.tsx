@@ -16,6 +16,7 @@ const base: PreviewSummary = {
   pairId: 'p1', pairName: 'Photos', totals, selected: totals, selectedCount: 5, actionableCount: 5,
   isEmpty: false, guard: null, guardConfirmed: false, shortfall: null,
   source: { files: 10, bytes: 100, elapsed_ms: 1500 }, replica: { files: 8, bytes: 80, elapsed_ms: 1200 },
+  warnings: [],
 };
 
 describe('Preview', () => {
@@ -49,6 +50,12 @@ describe('Preview', () => {
     render(<I18nProvider lang="en"><Preview summary={{ ...base, shortfall: 1048576 }} navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByText(/1.0 MB more needed/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Apply selected' })).toBeDisabled();
+  });
+
+  it('shows a scan warning', () => {
+    const warnings = [{ code: 'io', params: { detail: 'read-only folder' } }];
+    render(<I18nProvider lang="en"><Preview summary={{ ...base, warnings }} navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByText(/Note: .*read-only folder/)).toBeInTheDocument();
   });
 
   it('says Already in sync for an empty plan', () => {

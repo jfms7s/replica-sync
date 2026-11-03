@@ -82,6 +82,9 @@ pub fn stop_text(r: &StopReason) -> String {
         StopReason::ReplicaDisconnected => "the backup drive was disconnected".into(),
         StopReason::SourceDisconnected => "the source drive was disconnected".into(),
         StopReason::ReplicaFull => "the backup drive is full".into(),
+        StopReason::Internal => {
+            "stopped by an internal error; scan again to see what is left".into()
+        }
     }
 }
 

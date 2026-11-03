@@ -7,7 +7,9 @@ use app_state::error::AppError;
 use app_state::paths::AppPaths;
 use app_state::session::Session;
 use replica_sync_core::volume::{self, SystemVolumes};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, TryLockError};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, WindowEvent};
 
 pub struct AppState {
@@ -16,6 +18,42 @@ pub struct AppState {
     pub open_error: Option<AppError>,
     pub data_dir: std::path::PathBuf,
     pub volumes: SystemVolumes,
+}
+
+/// Whether a close must wait for the user (a sync is running). A running scan
+/// is cancelled, since the window is about to go.
+fn keep_open_for_apply(session: Option<&Session>) -> bool {
+    match session {
+        Some(s) if s.is_applying() => true,
+        Some(s) => {
+            s.cancel_scan();
+            false
+        }
+        None => false,
+    }
+}
+
+/// Set while a thread waits to decide a close that found the session busy.
+static CLOSE_WAITER: AtomicBool = AtomicBool::new(false);
+
+/// How long that thread waits for the session lock.
+const CLOSE_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether a sync is running, once the session lock is free; `None` when it
+/// stays busy for [`CLOSE_WAIT`].
+fn wait_for_close_decision(window: &tauri::Window) -> Option<bool> {
+    let state = window.state::<AppState>();
+    let deadline = Instant::now() + CLOSE_WAIT;
+    while Instant::now() < deadline {
+        match state.session.try_lock() {
+            Ok(guard) => return Some(guard.as_ref().is_some_and(|s| s.is_applying())),
+            Err(TryLockError::Poisoned(e)) => {
+                return Some(e.into_inner().as_ref().is_some_and(|s| s.is_applying()));
+            }
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    None
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -47,13 +85,46 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                let guard = state.session.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(s) = guard.as_ref() {
-                    if s.is_applying() {
+                // Don't wait for the session lock here: a slow restore or trash
+                // listing can hold it for a long time. (Other commands still
+                // take it on the main thread; see review-preview-commands-on-main-thread.)
+                let applying = match state.session.try_lock() {
+                    Ok(guard) => Some(keep_open_for_apply(guard.as_ref())),
+                    Err(TryLockError::Poisoned(e)) => {
+                        Some(keep_open_for_apply(e.into_inner().as_ref()))
+                    }
+                    Err(TryLockError::WouldBlock) => None,
+                };
+                match applying {
+                    Some(false) => {}
+                    Some(true) => {
                         api.prevent_close();
                         let _ = window.emit("close-requested", ());
-                    } else {
-                        s.cancel_scan();
+                    }
+                    None => {
+                        // Decide once the lock is free, off the event loop;
+                        // `close` then asks again through this handler. One
+                        // waiter at a time; if the lock stays busy past the
+                        // deadline the window stays open and a later click
+                        // tries again.
+                        api.prevent_close();
+                        if CLOSE_WAITER.swap(true, Ordering::AcqRel) {
+                            return;
+                        }
+                        let window = window.clone();
+                        std::thread::spawn(move || {
+                            let decided = wait_for_close_decision(&window);
+                            CLOSE_WAITER.store(false, Ordering::Release);
+                            match decided {
+                                Some(true) => {
+                                    let _ = window.emit("close-requested", ());
+                                }
+                                Some(false) => {
+                                    let _ = window.close();
+                                }
+                                None => {}
+                            }
+                        });
                     }
                 }
             }

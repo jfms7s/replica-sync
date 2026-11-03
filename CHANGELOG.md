@@ -9,6 +9,11 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
 
 ### Fixed
+- A scan finishes and the Preview opens even when the pair list can't be saved or the free space can't be read; the Preview shows a note instead (with unknown free space, the "not enough space" check is skipped).
+- Problems pruning old logs or listing old trash runs after a sync are shown as notes on the Result screen instead of being ignored.
+- "The drive is not the one saved" names the source folder when it was the source that moved.
+- If a sync stops on an internal error, the Result screen says so and offers to scan again (before, it said "cancelled").
+- "Stop and close" exits after at most a minute even if the current file never finishes, and closing the window no longer freezes the app while a slow trash operation runs.
 - Cancel stops a scan quickly even inside one folder with hundreds of thousands of files.
 - A folder whose listing fails part-way shows one problem row, not one per failed item.
 - Sizes just under a unit boundary print as `1.0 MB`, not `1024.0 KB`.

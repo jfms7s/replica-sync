@@ -70,6 +70,9 @@ pub struct PreviewSummary {
     pub shortfall: Option<u64>,
     pub source: ScanStats,
     pub replica: ScanStats,
+    /// Problems during the scan that did not stop it (store not written, free
+    /// space unknown).
+    pub warnings: Vec<AppError>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,7 +96,10 @@ struct Current {
     tree: PlanTree,
     selection: HashSet<ChangeId>,
     first_sync: bool,
-    free_space: u64,
+    /// Free space on the replica at scan time; `None` when it couldn't be read.
+    free_space: Option<u64>,
+    /// Warnings from the scan itself (store not saved), for every summary.
+    warnings: Vec<AppError>,
     /// How many removals the user confirmed; a selection that removes more
     /// asks again.
     guard_confirmed_for: Option<u64>,
@@ -415,7 +421,11 @@ impl Session {
         self.scanning = false;
         self.scan_counters = None;
         let prepared = result?;
-        let free_space = volume::free_space(&job.resolved.replica_root)?;
+        let mut warnings = Vec::new();
+        // Unknown free space skips the shortfall check rather than the preview
+        // (the copy itself still fails cleanly on a full drive); `summary`
+        // warns while it stays unknown.
+        let free_space = volume::free_space(&job.resolved.replica_root).ok();
         let pair = self
             .store
             .pairs
@@ -424,7 +434,9 @@ impl Session {
             .ok_or_else(|| AppError::new("pair.notFound").with("id", &job.pair_id))?;
         let first_sync = pair.is_first_sync();
         pair.last_scan_files = Some(prepared.source.files);
-        self.store.save()?;
+        if let Err(e) = self.store.save() {
+            warnings.push(e.into());
+        }
         let tree = PlanTree::new(&prepared.plan);
         let delete_folders = tree.folders_with_deletes(&prepared.plan);
         let selection = prepared.plan.actionable_ids();
@@ -436,6 +448,7 @@ impl Session {
             selection,
             first_sync,
             free_space,
+            warnings,
             guard_confirmed_for: None,
             delete_folders,
             last_report: None,
@@ -460,8 +473,17 @@ impl Session {
         let pair = self.pair(&c.pair_id)?;
         let plan = &c.prepared.plan;
         let selected = selected_totals(plan, &c.selection);
-        let free_space = volume::free_space(&c.resolved.replica_root).unwrap_or(c.free_space);
-        let shortfall = space_shortfall(selected.bytes_to_copy, free_space);
+        let mut warnings = c.warnings.clone();
+        let free_space = match volume::free_space(&c.resolved.replica_root) {
+            Ok(free) => Some(free),
+            Err(e) => {
+                if c.free_space.is_none() {
+                    warnings.push(e.into());
+                }
+                c.free_space
+            }
+        };
+        let shortfall = free_space.and_then(|free| space_shortfall(selected.bytes_to_copy, free));
         let guard = mass_change_guard(plan, &c.selection, c.prepared.replica.files, c.first_sync);
         Ok(PreviewSummary {
             pair_id: c.pair_id.clone(),
@@ -479,6 +501,7 @@ impl Session {
             shortfall,
             source: c.prepared.source.clone(),
             replica: c.prepared.replica.clone(),
+            warnings,
         })
     }
 
@@ -574,9 +597,16 @@ impl Session {
         let c = self.current()?;
         let pair = self.pair(&c.pair_id)?;
         let now = pairs::resolve(pair, volumes)?;
-        if now.source_root != c.resolved.source_root || now.replica_root != c.resolved.replica_root
-        {
-            return Err(AppError::new("drive.wrongVolume").with("path", now.replica_root.display()));
+        // Name the side that moved; the replica when both did.
+        let moved = if now.replica_root != c.resolved.replica_root {
+            Some(&now.replica_root)
+        } else if now.source_root != c.resolved.source_root {
+            Some(&now.source_root)
+        } else {
+            None
+        };
+        if let Some(root) = moved {
+            return Err(AppError::new("drive.wrongVolume").with("path", root.display()));
         }
         pairs::verify_source(pair, &c.resolved, volumes)?;
         pairs::verify_replica(pair, &c.resolved, volumes)?;
@@ -642,7 +672,9 @@ impl Session {
                 None
             }
         };
-        let _ = runlog::prune(&logs, runlog::LOG_RETENTION, SystemTime::now());
+        if let Err(e) = runlog::prune(&logs, runlog::LOG_RETENTION, SystemTime::now()) {
+            warnings.push(e.into());
+        }
         if let Some(p) = self.store.pairs.iter_mut().find(|p| p.id == pair_id) {
             p.last_sync = Some(LastSync {
                 at: chrono::Local::now().to_rfc3339(),
@@ -655,15 +687,20 @@ impl Session {
             warnings.push(e.into());
         }
         // Never offer to empty the run this apply just made.
-        let old_trash_runs: Vec<String> = trash::runs_older_than(
+        let old_trash_runs: Vec<String> = match trash::runs_older_than(
             &replica_root,
             trash_days,
             chrono::Local::now().naive_local(),
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|id| report.trash_run.as_ref() != Some(id))
-        .collect();
+        ) {
+            Ok(runs) => runs
+                .into_iter()
+                .filter(|id| report.trash_run.as_ref() != Some(id))
+                .collect(),
+            Err(e) => {
+                warnings.push(e.into());
+                Vec::new()
+            }
+        };
         if let Some(c) = self
             .current
             .as_mut()
@@ -893,6 +930,57 @@ mod tests {
         w.s.confirm_guard().unwrap();
         assert_eq!(w.apply().report.failed(), 0);
         assert!(!w.rep().join("f1.txt").exists());
+    }
+
+    #[test]
+    fn a_source_moved_after_preview_is_named_in_the_wrong_drive_error() {
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        let elsewhere = w.t.path().join("diskA2");
+        fs::create_dir_all(elsewhere.join("Photos")).unwrap();
+        w.v.mount("A", &elsewhere);
+        let e = w.s.begin_apply(&w.v).err().unwrap();
+        assert_eq!(e.code, "drive.wrongVolume");
+        assert!(e.params["path"].contains("diskA2"), "{e:?}");
+    }
+
+    /// A data folder that can't be written keeps the preview, with a warning.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_that_cannot_be_saved_still_opens_the_preview() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        let data = w.t.path().join("data");
+        // No group or other bits: the store would reset those to 0700 itself.
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o500)).unwrap();
+        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let r = job.run();
+        let summary = w.s.finish_scan(job, r, &w.v);
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        let summary = summary.unwrap();
+        assert_eq!(summary.totals.creates, 1);
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        assert_eq!(summary.warnings[0].code, "io");
+    }
+
+    /// A logs folder that can be written but not listed: the log is kept, the
+    /// prune error becomes a warning.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_log_prune_is_a_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut w = world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        let logs = w.s.paths.logs_dir();
+        fs::create_dir_all(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o300)).unwrap();
+        let view = w.apply();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(view.log_path.is_some());
+        assert_eq!(view.warnings.len(), 1, "{:?}", view.warnings);
     }
 
     #[test]

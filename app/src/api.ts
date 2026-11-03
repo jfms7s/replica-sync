@@ -32,7 +32,7 @@ export type SkipReason =
 export type FailReason =
   | { code: 'inUse' | 'permissionDenied' | 'changedDuringCopy' | 'targetExists' | 'outsideReplica' | 'interrupted' | 'verifyMismatch' }
   | { code: 'io'; detail: string };
-export interface StopReason { code: 'cancelled' | 'replicaDisconnected' | 'sourceDisconnected' | 'replicaFull' }
+export interface StopReason { code: 'cancelled' | 'replicaDisconnected' | 'sourceDisconnected' | 'replicaFull' | 'internal' }
 
 export type MoveKind =
   | { kind: 'file'; size: number; mtime_ns: number }
@@ -56,6 +56,8 @@ export interface PreviewSummary {
   pairId: string; pairName: string; totals: Totals; selected: Totals; selectedCount: number; actionableCount: number;
   isEmpty: boolean; guard: GuardWarning | null; guardConfirmed: boolean; shortfall: number | null;
   source: ScanStats; replica: ScanStats;
+  /** Problems during the scan that did not stop it (store not saved, free space unknown). */
+  warnings: AppError[];
 }
 
 export type Tick = 'on' | 'off' | 'mixed' | 'none';
