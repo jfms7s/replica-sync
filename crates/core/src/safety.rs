@@ -84,12 +84,13 @@ impl ReplicaRoot {
                 Ok(real) if real.starts_with(&self.canonical) => return Ok(target),
                 Ok(_) => return Err(SafetyError::Escapes(target)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    // If the directory exists (e.g., dangling symlink), it has escaped.
-                    // Only walk up if the path doesn't exist.
-                    if std::fs::symlink_metadata(dir).is_ok() {
-                        return Err(SafetyError::Escapes(target));
+                    // Something there that doesn't resolve (a dangling link) has
+                    // escaped; only a path that isn't there walks up a level.
+                    match fs::symlink_metadata(dir) {
+                        Ok(_) => return Err(SafetyError::Escapes(target)),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => probe = dir.parent(),
+                        Err(e) => return Err(e.into()),
                     }
-                    probe = dir.parent();
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -166,6 +167,28 @@ mod tests {
             r.target(&rel("Docs/x.txt")),
             Err(SafetyError::Escapes(_))
         ));
+    }
+
+    /// An ancestor that can't be searched is an error, never "not there".
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_ancestor_is_an_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let locked = d.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let root_user = std::fs::read_dir(&locked).is_ok(); // root searches any folder
+        let r = ReplicaRoot::new(d.path()).unwrap();
+        let got = r.target(&rel("locked/sub/x.txt"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        match got {
+            Err(SafetyError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[cfg(unix)]

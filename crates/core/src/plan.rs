@@ -55,6 +55,8 @@ impl Plan {
 pub enum PlanError {
     #[error("two changes would write {0}")]
     DuplicateTarget(RelPath),
+    #[error("the plan has more than {} changes", u32::MAX)]
+    TooManyChanges,
 }
 
 /// A delete of a `*.replica-sync.tmp` file: it runs before any copy, because a
@@ -110,11 +112,14 @@ pub fn build_plan(mut changes: Vec<Change>, case: CaseMode) -> Result<Plan, Plan
     let changes = changes
         .into_iter()
         .enumerate()
-        .map(|(i, change)| Planned {
-            id: ChangeId(i as u32),
-            change,
+        .map(|(i, change)| {
+            let id = u32::try_from(i).map_err(|_| PlanError::TooManyChanges)?;
+            Ok(Planned {
+                id: ChangeId(id),
+                change,
+            })
         })
-        .collect();
+        .collect::<Result<_, PlanError>>()?;
     Ok(Plan { changes, totals })
 }
 

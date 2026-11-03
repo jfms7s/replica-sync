@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 891d29ef82b0c0df03fd6b8b20d2c2a8486e4e09ca2a524c36a9914c3aea1d81 # shrinks to (src, rep, thumbs) = ({}, {}, {"a"})
+cc d33c104b86c13dbe6a2dde6aaa3b27ab05c5debed87fecaf383933cddd5d855b # shrinks to (src, rep, thumbs) = ({"A/A": 5}, {"b/a": 5}, {})

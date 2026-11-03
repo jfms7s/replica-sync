@@ -138,6 +138,9 @@ impl From<PrepareError> for AppError {
             PrepareError::Plan(PlanError::DuplicateTarget(p)) => {
                 AppError::new("scan.planConflict").with("path", p)
             }
+            PrepareError::Plan(e @ PlanError::TooManyChanges) => {
+                AppError::new("io").with("detail", e)
+            }
         }
     }
 }

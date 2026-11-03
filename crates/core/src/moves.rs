@@ -1,7 +1,8 @@
 //! Turn Delete+Create pairs into renames, and whole moved folders into one rename.
 
 use crate::model::CaseMode;
-use crate::model::{Change, Kind, MoveKind, RelPath, Snapshot, times_match};
+use crate::model::{Change, Kind, MoveKind, RelPath, Snapshot, fold, times_match};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn detect_moves(
@@ -10,93 +11,107 @@ pub fn detect_moves(
     replica: &Snapshot,
     case: CaseMode,
 ) -> Vec<Change> {
-    let changes = pair_file_moves(changes);
+    let changes = pair_file_moves(changes, case);
     collapse_folder_moves(changes, source, replica, case)
 }
 
-fn pair_file_moves(changes: Vec<Change>) -> Vec<Change> {
-    let pairs: Vec<(usize, usize)> = {
-        let mut creates: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
-        let mut deletes: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
-        for (i, c) in changes.iter().enumerate() {
-            match c {
-                Change::Create { path, size, .. } => {
-                    creates.entry((path.name(), *size)).or_default().push(i)
-                }
-                Change::Delete { path, size, .. } => {
-                    deletes.entry((path.name(), *size)).or_default().push(i)
-                }
-                _ => {}
-            }
+/// One create or delete in a pairing bucket.
+struct Candidate<'a> {
+    mtime_ns: i64,
+    index: usize,
+    path: &'a RelPath,
+}
+
+/// On a case-insensitive replica `A.jpg` and `a.jpg` are one name, so a file
+/// moved and renamed only in capital letters still pairs.
+fn name_key(p: &RelPath, case: CaseMode) -> Cow<'_, str> {
+    match case {
+        CaseMode::Sensitive => Cow::Borrowed(p.name()),
+        CaseMode::Insensitive => Cow::Owned(fold(p.name())),
+    }
+}
+
+fn pair_file_moves(changes: Vec<Change>, case: CaseMode) -> Vec<Change> {
+    let moves: Vec<(usize, usize, Change)> = {
+        type Buckets<'a> = HashMap<(Cow<'a, str>, u64), Vec<Candidate<'a>>>;
+        let (mut creates, mut deletes): (Buckets, Buckets) = Default::default();
+        for (index, c) in changes.iter().enumerate() {
+            let (bucket, path, size, mtime_ns) = match c {
+                Change::Create {
+                    path,
+                    size,
+                    mtime_ns,
+                } => (&mut creates, path, size, mtime_ns),
+                Change::Delete {
+                    path,
+                    size,
+                    mtime_ns,
+                } => (&mut deletes, path, size, mtime_ns),
+                _ => continue,
+            };
+            bucket
+                .entry((name_key(path, case), *size))
+                .or_default()
+                .push(Candidate {
+                    mtime_ns: *mtime_ns,
+                    index,
+                    path,
+                });
         }
-        let mtime = |i: usize| match &changes[i] {
-            Change::Create { mtime_ns, .. } | Change::Delete { mtime_ns, .. } => *mtime_ns,
-            _ => unreachable!("only creates and deletes are indexed"),
-        };
-        // Each bucket sorted by mtime: the changes within the 2 s window of an
-        // mtime are one contiguous run, found by two binary searches.
-        let by_mtime = |mut v: Vec<usize>| {
-            v.sort_by_key(|&i| (mtime(i), i));
-            v
-        };
-        let window = |sorted: &[usize], m: i64| {
-            let lo = sorted.partition_point(|&i| mtime(i) < m && !times_match(mtime(i), m));
-            let hi = sorted.partition_point(|&i| mtime(i) <= m || times_match(mtime(i), m));
+        let window = |sorted: &[Candidate<'_>], m: i64| {
+            let lo = sorted.partition_point(|c| c.mtime_ns < m && !times_match(c.mtime_ns, m));
+            let hi = sorted.partition_point(|c| c.mtime_ns <= m || times_match(c.mtime_ns, m));
             lo..hi
         };
-        let mut pairs = Vec::new();
+        let mut moves = Vec::new();
         for (key, dels) in deletes {
-            let Some(crs) = creates.remove(&key) else {
+            let Some(mut crs) = creates.remove(&key) else {
                 continue;
             };
-            let (dels, crs) = (by_mtime(dels), by_mtime(crs));
-            for &d in &dels {
+            // Each bucket sorted by mtime: the changes within the 2 s window of
+            // an mtime are one contiguous run, found by two binary searches.
+            let mut dels = dels;
+            dels.sort_by_key(|c| (c.mtime_ns, c.index));
+            crs.sort_by_key(|c| (c.mtime_ns, c.index));
+            for d in &dels {
                 // Pairs only when exactly one create is close to this delete and
                 // exactly one delete (this one) is close to that create.
-                let near = window(&crs, mtime(d));
+                let near = window(&crs, d.mtime_ns);
                 if near.len() != 1 {
                     continue;
                 }
-                let c = crs[near.start];
-                if window(&dels, mtime(c)).len() == 1 {
-                    pairs.push((d, c));
+                let c = &crs[near.start];
+                if window(&dels, c.mtime_ns).len() == 1 {
+                    moves.push((
+                        d.index,
+                        c.index,
+                        Change::Move {
+                            from: d.path.clone(),
+                            to: c.path.clone(),
+                            kind: MoveKind::File {
+                                size: key.1,
+                                mtime_ns: c.mtime_ns,
+                            },
+                        },
+                    ));
                 }
             }
         }
-        pairs.sort_unstable();
-        pairs
+        moves.sort_unstable_by_key(|(d, c, _)| (*d, *c));
+        moves
     };
 
     let mut consumed = vec![false; changes.len()];
-    let mut moves = Vec::new();
-    for (d, c) in pairs {
-        consumed[d] = true;
-        consumed[c] = true;
-        if let (
-            Change::Delete { path: from, .. },
-            Change::Create {
-                path: to,
-                size,
-                mtime_ns,
-            },
-        ) = (&changes[d], &changes[c])
-        {
-            moves.push(Change::Move {
-                from: from.clone(),
-                to: to.clone(),
-                kind: MoveKind::File {
-                    size: *size,
-                    mtime_ns: *mtime_ns,
-                },
-            });
-        }
+    for (d, c, _) in &moves {
+        consumed[*d] = true;
+        consumed[*c] = true;
     }
     changes
         .into_iter()
         .enumerate()
         .filter(|(i, _)| !consumed[*i])
         .map(|(_, c)| c)
-        .chain(moves)
+        .chain(moves.into_iter().map(|(_, _, m)| m))
         .collect()
 }
 
@@ -120,6 +135,11 @@ fn collapse_folder_moves(
         };
         if k(from) == k(to) {
             continue; // capital-letters-only rename
+        }
+        if from.name() != to.name() {
+            // Renamed in capital letters as it moved: a folder rename would
+            // carry the old spelling along, so it stays a move of its own.
+            continue;
         }
         move_to.insert(k(from), k(to));
         let (mut x, mut y) = (from.parent(), to.parent());
@@ -171,6 +191,32 @@ fn collapse_folder_moves(
         blocked.0.contains(&kx) || blocked.has_below(&kx)
     };
 
+    // The files and bytes under replica folder X when every entry there goes
+    // to the same place under Y (files moved there, folders on the source);
+    // `None` when one doesn't, or when the count doesn't fit the move's fields.
+    let moves_whole = |x: &RelPath, y: &RelPath| -> Option<(u32, u64)> {
+        let prefix = format!("{x}/");
+        let start = replica
+            .entries
+            .partition_point(|e| e.rel.as_str() < prefix.as_str());
+        let under = replica.entries[start..]
+            .iter()
+            .take_while(|e| e.rel.as_str().starts_with(&prefix));
+        let (mut files, mut bytes) = (0u32, 0u64);
+        for e in under {
+            let target = k(&y.join(e.rel.strip_dir(x)?));
+            match e.kind {
+                Kind::File if move_to.get(&k(&e.rel)) == Some(&target) => {
+                    files = files.checked_add(1)?;
+                    bytes = bytes.checked_add(e.size)?;
+                }
+                Kind::Dir if src_dirs.contains(&target) => {}
+                _ => return None,
+            }
+        }
+        (files > 0).then_some((files, bytes))
+    };
+
     let mut done: Vec<(RelPath, RelPath, u32, u64)> = Vec::new();
     // The accepted X and Y folders, for "overlaps an accepted move" lookups.
     let (mut done_x, mut done_y) = (PathTree::default(), PathTree::default());
@@ -184,30 +230,7 @@ fn collapse_folder_moves(
         if done_x.overlaps(x.as_str()) || done_y.overlaps(y.as_str()) {
             continue;
         }
-        let prefix = format!("{x}/");
-        let start = replica
-            .entries
-            .partition_point(|e| e.rel.as_str() < prefix.as_str());
-        let under = replica.entries[start..]
-            .iter()
-            .take_while(|e| e.rel.as_str().starts_with(&prefix));
-        let (mut ok, mut files, mut bytes) = (true, 0u32, 0u64);
-        for e in under {
-            let target = k(&y.join(e.rel.strip_dir(&x).expect("entry is under x")));
-            ok = match e.kind {
-                Kind::File if move_to.get(&k(&e.rel)) == Some(&target) => {
-                    files += 1;
-                    bytes += e.size;
-                    true
-                }
-                Kind::Dir => src_dirs.contains(&target),
-                _ => false,
-            };
-            if !ok {
-                break;
-            }
-        }
-        if ok && files > 0 {
+        if let Some((files, bytes)) = moves_whole(&x, &y) {
             done_x.0.insert(x.as_str().to_owned());
             done_y.0.insert(y.as_str().to_owned());
             done.push((x, y, files, bytes));
@@ -309,6 +332,51 @@ mod tests {
     }
     fn run(changes: Vec<Change>) -> Vec<Change> {
         detect_moves(changes, &snap(vec![]), &snap(vec![]), CaseMode::Sensitive)
+    }
+
+    #[test]
+    fn a_name_differing_only_in_case_pairs_on_an_insensitive_replica_only() {
+        let changes = || vec![delete("old/A.jpg", 5, T0), create("new/a.jpg", 5, T0)];
+        let insensitive = detect_moves(
+            changes(),
+            &snap(vec![]),
+            &snap(vec![]),
+            CaseMode::Insensitive,
+        );
+        assert_eq!(
+            insensitive,
+            vec![Change::Move {
+                from: rel("old/A.jpg"),
+                to: rel("new/a.jpg"),
+                kind: MoveKind::File {
+                    size: 5,
+                    mtime_ns: ns(T0)
+                },
+            }]
+        );
+        assert_eq!(run(changes()), changes());
+    }
+
+    /// Renaming `b` to `A` would land the file at `A/a`, not `A/A`.
+    #[test]
+    fn a_file_renamed_in_case_as_it_moved_is_not_carried_by_a_folder_rename() {
+        let out = detect_moves(
+            vec![delete("b/a", 5, T0), create("A/A", 5, T0)],
+            &snap(vec![dir("A"), file("A/A", 5, T0)]),
+            &snap(vec![dir("b"), file("b/a", 5, T0)]),
+            CaseMode::Insensitive,
+        );
+        assert_eq!(
+            out,
+            vec![Change::Move {
+                from: rel("b/a"),
+                to: rel("A/A"),
+                kind: MoveKind::File {
+                    size: 5,
+                    mtime_ns: ns(T0)
+                },
+            }]
+        );
     }
 
     #[test]
