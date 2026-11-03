@@ -320,11 +320,15 @@ impl Session {
             }
             Some(id) => {
                 let mut pair = self.pair(id)?.clone();
+                // With both folders changing, the source is checked against the
+                // new replica in the second step, not against the old one here.
                 if let Some(folder) = &input.source {
-                    pairs::relink(&mut pair, SideKind::Source, folder, volumes)?;
+                    let allow = input.allow_same_volume || input.replica.is_some();
+                    pairs::relink(&mut pair, SideKind::Source, folder, allow, volumes)?;
                 }
                 if let Some(folder) = &input.replica {
-                    pairs::relink(&mut pair, SideKind::Replica, folder, volumes)?;
+                    let allow = input.allow_same_volume;
+                    pairs::relink(&mut pair, SideKind::Replica, folder, allow, volumes)?;
                 }
                 let moved = input.source.is_some() || input.replica.is_some();
                 if moved
@@ -364,11 +368,12 @@ impl Session {
         id: &str,
         side: SideKind,
         folder: &Path,
+        allow_same_volume: bool,
         volumes: &dyn Volumes,
     ) -> Result<Pair, AppError> {
         self.ensure_idle()?;
         let mut pair = self.pair(id)?.clone();
-        pairs::relink(&mut pair, side, folder, volumes)?;
+        pairs::relink(&mut pair, side, folder, allow_same_volume, volumes)?;
         self.store.upsert(pair.clone());
         self.store.save()?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
@@ -1022,6 +1027,48 @@ mod tests {
     }
 
     #[test]
+    fn moving_the_backup_onto_the_source_drive_asks_first() {
+        let mut w = world();
+        fs::create_dir_all(w.t.path().join("diskA/Backup")).unwrap();
+        let mut input = PairInput {
+            id: Some(w.id.clone()),
+            name: "Photos".into(),
+            source: None,
+            replica: Some(w.t.path().join("diskA/Backup")),
+            user_rules: vec![],
+            trash_days: 30,
+            allow_same_volume: false,
+        };
+        assert_eq!(
+            w.s.save_pair(input.clone(), &w.v).unwrap_err().code,
+            "pair.sameVolume"
+        );
+        input.allow_same_volume = true;
+        assert_eq!(w.s.save_pair(input, &w.v).unwrap().replica.volume_id, "A");
+    }
+
+    #[test]
+    fn swapping_both_folders_checks_the_new_pair_not_the_old_one() {
+        let mut w = world();
+        fs::create_dir_all(w.t.path().join("diskB/Photos")).unwrap();
+        fs::create_dir_all(w.t.path().join("diskA/Backup")).unwrap();
+        let input = PairInput {
+            id: Some(w.id.clone()),
+            name: "Photos".into(),
+            source: Some(w.t.path().join("diskB/Photos")),
+            replica: Some(w.t.path().join("diskA/Backup")),
+            user_rules: vec![],
+            trash_days: 30,
+            allow_same_volume: false,
+        };
+        let p = w.s.save_pair(input, &w.v).unwrap();
+        assert_eq!(
+            (p.source.volume_id.as_str(), p.replica.volume_id.as_str()),
+            ("B", "A")
+        );
+    }
+
+    #[test]
     fn editing_keeps_history_unless_a_folder_changes() {
         let mut w = world();
         write(&w.src(), "a.txt", b"a");
@@ -1166,7 +1213,8 @@ mod tests {
         w.scan();
         fs::create_dir_all(w.t.path().join("diskB/Other")).unwrap();
         let other = w.t.path().join("diskB/Other");
-        w.s.relink(&w.id, SideKind::Replica, &other, &w.v).unwrap();
+        w.s.relink(&w.id, SideKind::Replica, &other, false, &w.v)
+            .unwrap();
         assert_eq!(w.s.begin_apply(&w.v).err().unwrap().code, "apply.noPlan");
         assert!(!w.rep().join("a.txt").exists());
     }

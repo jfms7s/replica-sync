@@ -20,6 +20,8 @@
   "pairs.relinkReplica": "Choose the backup folder on {label}",
   "pairs.relinkSourceButton": "Re-link source drive",
   "pairs.relinkReplicaButton": "Re-link backup drive",
+  "pairs.sameVolumeTitle": "Same drive",
+  "pairs.sameVolumeBody": "This folder is on the same drive as the other side of the pair. If that drive fails, the original and the backup are lost together.",
   "pairs.settings": "Settings",
   "pairs.notConnected": "⚠ {label} not connected",
   "pairs.lastSync": "Last sync {date}: {applied} applied, {failed} failed",

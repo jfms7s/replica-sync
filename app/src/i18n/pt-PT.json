@@ -20,6 +20,8 @@
   "pairs.relinkReplica": "Escolha a pasta da cópia em {label}",
   "pairs.relinkSourceButton": "Voltar a ligar o disco de origem",
   "pairs.relinkReplicaButton": "Voltar a ligar o disco da cópia",
+  "pairs.sameVolumeTitle": "Mesmo disco",
+  "pairs.sameVolumeBody": "Esta pasta está no mesmo disco que o outro lado do par. Se esse disco avariar, perdem-se o original e a cópia ao mesmo tempo.",
   "pairs.settings": "Definições",
   "pairs.notConnected": "⚠ {label} não está ligado",
   "pairs.lastSync": "Última sincronização {date}: {applied} feitas, {failed} falharam",

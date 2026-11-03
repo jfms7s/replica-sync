@@ -9,6 +9,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
 
 ### Fixed
+- Changing or re-linking a pair's folder onto the drive of its other side now asks first, as creating a pair does.
+- A pair folder deleted while its drive is plugged in is reported as missing, not as "drive not connected".
+- A folder whose name is not valid Unicode is refused when the pair is created, instead of being saved with a replacement character and later reported missing.
+- Two pairs created in quick succession can no longer get the same id (which replaced the first one).
 - A scan finishes and the Preview opens even when the pair list can't be saved or the free space can't be read; the Preview shows a note instead (with unknown free space, the "not enough space" check is skipped).
 - Problems pruning old logs or listing old trash runs after a sync are shown as notes on the Result screen instead of being ignored.
 - "The drive is not the one saved" names the source folder when it was the source that moved.

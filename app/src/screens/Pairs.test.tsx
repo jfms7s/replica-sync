@@ -40,8 +40,24 @@ describe('Pairs', () => {
     expect(within(card).getByText('⚠ USB not connected')).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Sync' })).toBeDisabled();
     await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
-    expect(api.relink).toHaveBeenCalledWith('p1', 'Replica', '/media/usb/Backup');
+    expect(api.relink).toHaveBeenCalledWith('p1', 'Replica', '/media/usb/Backup', false);
     expect(pickFolder).toHaveBeenCalledWith('Choose the backup folder on USB');
+  });
+
+  it('asks before re-linking onto the other side\'s drive, then retries with the flag', async () => {
+    vi.mocked(api.listPairs).mockResolvedValue([view({ replicaConnected: false })]);
+    vi.mocked(pickFolder).mockResolvedValue('/home/me/Backup');
+    vi.mocked(api.relink)
+      .mockRejectedValueOnce({ code: 'pair.sameVolume', params: {} })
+      .mockResolvedValueOnce(view().pair);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    const card = (await screen.findByText('Photos')).closest('article')!;
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Replica', '/home/me/Backup', false);
+    const dialog = await screen.findByRole('dialog', { name: 'Same drive' });
+    await userEvent.click(within(dialog).getByRole('button', { name: /I understand/ }));
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Replica', '/home/me/Backup', true);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('offers one re-link button per drive when both are missing', async () => {
@@ -53,10 +69,10 @@ describe('Pairs', () => {
     expect(within(card).queryByRole('button', { name: 'Re-link drive' })).not.toBeInTheDocument();
     await userEvent.click(within(card).getByRole('button', { name: 'Re-link source drive' }));
     expect(pickFolder).toHaveBeenLastCalledWith('Choose the source folder on Internal');
-    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Source', '/media/x');
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Source', '/media/x', false);
     await userEvent.click(within(card).getByRole('button', { name: 'Re-link backup drive' }));
     expect(pickFolder).toHaveBeenLastCalledWith('Choose the backup folder on USB');
-    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Replica', '/media/x');
+    expect(api.relink).toHaveBeenLastCalledWith('p1', 'Replica', '/media/x', false);
   });
 
   it('starts a scan from Sync', async () => {
