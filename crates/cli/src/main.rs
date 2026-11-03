@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use replica_sync_core::execute::{Control, ExecContext, execute};
 use replica_sync_core::plan::{mass_change_guard, space_shortfall};
 use replica_sync_core::rules::SkipRules;
-use replica_sync_core::runlog::{human_bytes, render_plan, render_run};
+use replica_sync_core::runlog::{describe_totals, human_bytes, render_plan, render_run};
 use replica_sync_core::safety::ReplicaRoot;
 use replica_sync_core::session::{Prepared, SessionCounters, check_roots, prepare};
 use replica_sync_core::{trash, volume};
@@ -85,12 +85,8 @@ fn print_summary(p: &Prepared) {
         p.elapsed_ms as f64 / 1000.0
     );
     println!(
-        "plan: {} create, {} update, {} move, {} delete, {} folders, {} skipped · {} to copy",
-        t.creates,
-        t.updates,
-        t.moves,
-        t.deletes,
-        t.folders,
+        "plan: {}, {} skipped · {} to copy",
+        describe_totals(t),
         t.skipped,
         human_bytes(t.bytes_to_copy)
     );
@@ -101,7 +97,7 @@ fn print_summary(p: &Prepared) {
 fn refusals(p: &Prepared, replica: &Path) -> Vec<String> {
     let approved = p.plan.actionable_ids();
     let mut why = Vec::new();
-    if let Some(g) = mass_change_guard(&p.plan, &approved, p.replica_files, true) {
+    if let Some(g) = mass_change_guard(&p.plan, &approved, p.replica.files, true) {
         why.push(format!(
             "{} of the replica's {} files would be removed or replaced: is this the right pair of folders?",
             g.affected, g.replica_files

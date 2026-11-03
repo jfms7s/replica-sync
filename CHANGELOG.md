@@ -4,6 +4,12 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
+
+### Fixed
+- Changing a pair's folder no longer skips the "one folder inside the other" check when the other drive can't be queried; the error is shown instead.
+
 ## 0.6.0 — 2026-11-02
 
 Supersedes the unpublished 0.5.1 draft (and through it 0.5.0, 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.

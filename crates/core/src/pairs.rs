@@ -254,8 +254,14 @@ pub fn relink(
         SideKind::Source => (&pair.replica, SideKind::Replica),
         SideKind::Replica => (&pair.source, SideKind::Source),
     };
-    if let Ok(other_path) = resolve_side(other.0, other.1, volumes) {
-        check_folders(&new_path, &canonical(&other_path)?)?;
+    match resolve_side(other.0, other.1, volumes) {
+        Ok(other_path) => check_folders(&new_path, &canonical(&other_path)?)?,
+        // The other side can't be checked while it is away; resolve checks again.
+        Err(ResolveError::NotConnected { .. } | ResolveError::FolderMissing(_)) => {}
+        Err(ResolveError::Io(e)) => return Err(PairError::Io(e)),
+        Err(e @ ResolveError::WrongVolume(_)) => {
+            unreachable!("resolve_side never checks the drive: {e}")
+        }
     }
     match side {
         SideKind::Source => pair.source = new_side,
@@ -266,6 +272,9 @@ pub fn relink(
     Ok(())
 }
 
+/// The `pairs.json` format this build reads and writes.
+const STORE_VERSION: u32 = 1;
+
 #[derive(Serialize)]
 struct StoreOut<'a> {
     version: u32,
@@ -274,7 +283,14 @@ struct StoreOut<'a> {
 
 #[derive(Deserialize)]
 struct StoreIn {
+    /// A store without it is read as format 1.
+    #[serde(default = "first_store_version")]
+    version: u32,
     pairs: Vec<Pair>,
+}
+
+fn first_store_version() -> u32 {
+    1
 }
 
 #[derive(Debug)]
@@ -287,9 +303,15 @@ impl PairStore {
     pub fn load(path: &Path) -> io::Result<PairStore> {
         let pairs = match fs::read_to_string(path) {
             Ok(text) => {
-                serde_json::from_str::<StoreIn>(&text)
-                    .map_err(io::Error::other)?
-                    .pairs
+                let store = serde_json::from_str::<StoreIn>(&text).map_err(io::Error::other)?;
+                if store.version > STORE_VERSION {
+                    return Err(io::Error::other(format!(
+                        "{} was written by a newer replica-sync (format {})",
+                        path.display(),
+                        store.version
+                    )));
+                }
+                store.pairs
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
@@ -306,7 +328,7 @@ impl PairStore {
         }
         let tmp = self.path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(&StoreOut {
-            version: 1,
+            version: STORE_VERSION,
             pairs: &self.pairs,
         })
         .map_err(io::Error::other)?;
@@ -620,6 +642,69 @@ mod tests {
         assert!(p.is_first_sync());
     }
 
+    /// Fails `find` for one drive id, as a drive that can't be queried does.
+    struct FindFails<'a>(&'a FakeVolumes, &'static str);
+
+    impl Volumes for FindFails<'_> {
+        fn volume_of(&self, path: &Path) -> io::Result<VolumeInfo> {
+            self.0.volume_of(path)
+        }
+        fn find(&self, id: &str) -> io::Result<Option<VolumeInfo>> {
+            if id == self.1 {
+                return Err(io::Error::other("drive query failed"));
+            }
+            self.0.find(id)
+        }
+    }
+
+    #[test]
+    fn relink_reports_an_io_error_on_the_other_side_instead_of_skipping_the_check() {
+        let (t, v) = setup();
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
+        v.mount("C", &t.path().join("diskC"));
+        let before = p.clone();
+        let r = relink(
+            &mut p,
+            SideKind::Replica,
+            &t.path().join("diskC/Photos"),
+            &FindFails(&v, "A"),
+        );
+        assert!(matches!(r, Err(PairError::Io(_))), "{r:?}");
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn relink_skips_the_nested_check_while_the_other_side_is_away() {
+        let (t, v) = setup();
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        v.0.borrow_mut().retain(|x| x.id != "A");
+        fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
+        v.mount("C", &t.path().join("diskC"));
+        relink(
+            &mut p,
+            SideKind::Replica,
+            &t.path().join("diskC/Photos"),
+            &v,
+        )
+        .unwrap();
+        assert_eq!(p.replica.volume_id, "C");
+    }
+
     #[test]
     fn last_sync_from_before_stopped_existed_reads_as_not_stopped() {
         let old: LastSync =
@@ -700,6 +785,21 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn a_store_from_a_newer_format_is_refused_and_one_without_a_version_loads() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pairs.json");
+        fs::write(
+            &path,
+            STORE_0_4.replace(r#""version": 1"#, r#""version": 2"#),
+        )
+        .unwrap();
+        let e = PairStore::load(&path).unwrap_err();
+        assert!(e.to_string().contains("newer replica-sync"), "{e}");
+        fs::write(&path, STORE_0_4.replace("  \"version\": 1,\n", "")).unwrap();
+        assert_eq!(PairStore::load(&path).unwrap().pairs.len(), 1);
     }
 
     #[test]

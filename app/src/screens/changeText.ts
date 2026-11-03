@@ -17,7 +17,7 @@ export function changeDetail(t: T, tx: Tx, c: Change): string {
     case 'move': {
       const sameName = c.from.toLowerCase() === c.to.toLowerCase();
       if (sameName) return t('detail.renamedFrom', { from: c.from });
-      return c.kind.kind === 'dir' && c.kind.files > 0
+      return c.kind.kind === 'dir'
         ? t('detail.movedFolder', { from: c.from, files: c.kind.files })
         : t('detail.movedFrom', { from: c.from });
     }

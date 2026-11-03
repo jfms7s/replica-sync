@@ -462,7 +462,7 @@ impl Session {
         let selected = selected_totals(plan, &c.selection);
         let free_space = volume::free_space(&c.resolved.replica_root).unwrap_or(c.free_space);
         let shortfall = space_shortfall(selected.bytes_to_copy, free_space);
-        let guard = mass_change_guard(plan, &c.selection, c.prepared.replica_files, c.first_sync);
+        let guard = mass_change_guard(plan, &c.selection, c.prepared.replica.files, c.first_sync);
         Ok(PreviewSummary {
             pair_id: c.pair_id.clone(),
             pair_name: pair.name.clone(),

@@ -2,7 +2,7 @@
 
 use crate::execute::{Durability, Outcome, RunReport, StopReason};
 use crate::model::{Change, MoveKind, SideKind};
-use crate::plan::{ChangeId, Plan, selected_totals};
+use crate::plan::{ChangeId, Plan, Totals, selected_totals};
 use crate::reason::{FailReason, SkipReason};
 use crate::session::Prepared;
 use crate::verify::SpotCheck;
@@ -104,7 +104,7 @@ pub fn describe(c: &Change) -> String {
             from,
             to,
             kind: MoveKind::Dir { files, .. },
-        } if *files > 0 => format!("move     {from} -> {to} ({files} files)"),
+        } => format!("move     {from} -> {to} ({files} files)"),
         Change::Move { from, to, .. } => format!("move     {from} -> {to}"),
         Change::MkDir { path } => format!("mkdir    {path}"),
         Change::RmDir { path } => format!("rmdir    {path}"),
@@ -125,16 +125,20 @@ pub fn render_plan(plan: &Plan, approved: &HashSet<ChangeId>) -> String {
     let t = selected_totals(plan, approved);
     let _ = writeln!(
         out,
-        "selected: {} create, {} update, {} move, {} delete, {} folders; {} to copy; {} skipped",
-        t.creates,
-        t.updates,
-        t.moves,
-        t.deletes,
-        t.folders,
+        "selected: {}; {} to copy; {} skipped",
+        describe_totals(&t),
         human_bytes(t.bytes_to_copy),
         plan.totals.skipped
     );
     out
+}
+
+/// The change counts of a plan, as the plan log and the CLI summary print them.
+pub fn describe_totals(t: &Totals) -> String {
+    format!(
+        "{} create, {} update, {} move, {} delete, {} folders",
+        t.creates, t.updates, t.moves, t.deletes, t.folders
+    )
 }
 
 pub fn render_run(
@@ -330,6 +334,16 @@ mod tests {
         assert!(text.contains("[x] create   a.txt (3 B)"));
         assert!(text.contains("[ ] delete   old.txt"));
         assert!(text.contains(" -  skipped  lnk: link (not followed)"));
+    }
+
+    #[test]
+    fn a_case_only_folder_rename_is_a_plain_move_line() {
+        let c = Change::Move {
+            from: rel("Photos"),
+            to: rel("photos"),
+            kind: MoveKind::DirCaseOnly,
+        };
+        assert_eq!(describe(&c), "move     Photos -> photos");
     }
 
     #[test]

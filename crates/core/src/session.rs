@@ -36,7 +36,6 @@ pub struct Prepared {
     pub plan: Plan,
     pub source: ScanStats,
     pub replica: ScanStats,
-    pub replica_files: u64,
     pub elapsed_ms: u64,
 }
 
@@ -110,7 +109,6 @@ pub fn prepare(
         plan,
         source: stats(&src, src_t),
         replica: stats(&rep, rep_t),
-        replica_files: rep.file_count(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -164,7 +162,7 @@ mod tests {
         );
         assert_eq!(p.plan.totals.creates, 1);
         assert_eq!(p.plan.totals.deletes, 2);
-        assert_eq!((p.source.files, p.replica_files), (1, 0));
+        assert_eq!((p.source.files, p.replica.files), (1, 0));
     }
 
     #[test]

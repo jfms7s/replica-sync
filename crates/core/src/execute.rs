@@ -1582,7 +1582,7 @@ fn move_entry(
         (MoveKind::File { size, mtime_ns }, Ok(m)) => {
             m.is_file() && m.len() == *size && modified_ns(&m) == *mtime_ns
         }
-        (MoveKind::Dir { .. }, Ok(m)) => m.is_dir(),
+        (MoveKind::Dir { .. } | MoveKind::DirCaseOnly, Ok(m)) => m.is_dir(),
         (_, Err(e)) if e.kind() == io::ErrorKind::NotFound => false,
         (_, Err(e)) => return Err(source_stop(&e, ctx)),
     };

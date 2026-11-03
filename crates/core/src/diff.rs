@@ -1,8 +1,8 @@
 //! Compare two snapshots into the raw list of changes that make the replica match.
 
 use crate::model::{
-    Change, Entry, Kind, MTIME_TOLERANCE_NS, MoveKind, Problem, ProblemKind, RelPath, SideKind,
-    Snapshot,
+    Change, Entry, Kind, MoveKind, Problem, ProblemKind, RelPath, SideKind, Snapshot,
+    newer_beyond_tolerance, times_match,
 };
 use crate::reason::SkipReason;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -12,7 +12,7 @@ pub use crate::model::CaseMode;
 
 /// The equality rule: same size and modified times within 2 seconds.
 pub fn unchanged(src: &Entry, rep: &Entry) -> bool {
-    src.size == rep.size && src.mtime_ns.abs_diff(rep.mtime_ns) <= MTIME_TOLERANCE_NS as u64
+    src.size == rep.size && times_match(src.mtime_ns, rep.mtime_ns)
 }
 
 fn index<'a>(
@@ -215,7 +215,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                 let carries_pinned = s.kind == Kind::Dir && pinned.contains(k);
                 if s.rel.name() != r.rel.name() && !carries_pinned {
                     let kind = match s.kind {
-                        Kind::Dir => MoveKind::Dir { files: 0, bytes: 0 },
+                        Kind::Dir => MoveKind::DirCaseOnly,
                         _ => MoveKind::File {
                             size: s.size,
                             mtime_ns: s.mtime_ns,
@@ -232,7 +232,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                         path: s.rel.clone(),
                         size: s.size,
                         mtime_ns: s.mtime_ns,
-                        replica_newer: r.mtime_ns > s.mtime_ns.saturating_add(MTIME_TOLERANCE_NS),
+                        replica_newer: newer_beyond_tolerance(r.mtime_ns, s.mtime_ns),
                     });
                 }
             }
@@ -245,7 +245,7 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Change, MoveKind};
+    use crate::model::{Change, MTIME_TOLERANCE_NS, MoveKind};
     use crate::testutil::{T0, dir, file, link, ns, rel, snap};
 
     fn d(src: Vec<Entry>, rep: Vec<Entry>) -> Vec<Change> {
@@ -399,7 +399,7 @@ mod tests {
             vec![Change::Move {
                 from: rel("Photos"),
                 to: rel("photos"),
-                kind: MoveKind::Dir { files: 0, bytes: 0 },
+                kind: MoveKind::DirCaseOnly,
             }]
         );
     }
