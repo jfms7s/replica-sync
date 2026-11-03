@@ -155,4 +155,37 @@ describe('Tree', () => {
     expect(await screen.findByText(/1 folders with deletes are past/)).toBeInTheDocument();
     expect(screen.getByRole('treeitem', { name: 'a' })).toHaveAttribute('aria-expanded', 'true');
   });
+
+  it('ArrowDown and ArrowUp walk across an open folder into the next one', async () => {
+    vi.mocked(api.treeChildren).mockImplementation(async (p) =>
+      page(p === '' ? [folder('a', 'on'), folder('z', 'on')] : [{ ...file, name: 'x.txt', path: `${p}/x.txt` }]));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    const a = await screen.findByRole('treeitem', { name: 'a' });
+    a.focus();
+    await userEvent.keyboard('{ArrowRight}');
+    await screen.findByRole('treeitem', { name: 'x.txt' });
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(screen.getByRole('treeitem', { name: 'x.txt' })).toHaveFocus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(screen.getByRole('treeitem', { name: 'z' })).toHaveFocus());
+    await userEvent.keyboard('{ArrowUp}{ArrowUp}');
+    await waitFor(() => expect(a).toHaveFocus());
+  });
+
+  it('collapses a folder with the mouse', async () => {
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    const open = await screen.findByRole('button', { name: /a\// });
+    await userEvent.click(open);
+    expect(await screen.findByText('x.txt')).toBeInTheDocument();
+    expect(screen.getByRole('treeitem', { name: 'a' })).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(open);
+    expect(screen.queryByText('x.txt')).not.toBeInTheDocument();
+    expect(screen.getByRole('treeitem', { name: 'a' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows a "more" row under a folder with more children than were sent', async () => {
+    vi.mocked(api.treeChildren).mockImplementation(async (p) => page(p === '' ? [folder('a', 'on')] : [file], p === '' ? 1 : 2500));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a']} /></I18nProvider>);
+    expect(await screen.findByText(/2,499 more not shown — use the folder's checkbox/)).toBeInTheDocument();
+  });
 });

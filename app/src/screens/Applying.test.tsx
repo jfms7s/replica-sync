@@ -77,4 +77,30 @@ describe('Applying', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('USB is not connected.');
   });
+
+  it('shows the error of a run that ends with one', async () => {
+    const navigate = vi.fn();
+    render(<I18nProvider lang="en"><Applying mode="apply" pairName="Photos" navigate={navigate} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.apply).toHaveBeenCalled());
+    act(() => handlers['apply-done']({ ok: null, error: { code: 'drive.notConnected', params: { label: 'USB' } } }));
+    expect(screen.getByRole('alert')).toHaveTextContent('USB is not connected.');
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('unmounting between the two listener awaits never starts an apply and drops both listeners', async () => {
+    const unlisten = [vi.fn(), vi.fn()];
+    const resolvers: (() => void)[] = [];
+    vi.mocked(onEvent).mockImplementation((() => {
+      const off = unlisten[resolvers.length];
+      return new Promise((res) => { resolvers.push(() => res(off)); });
+    }) as never);
+    const { unmount } = render(<I18nProvider lang="en"><Applying mode="apply" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    resolvers[0]();
+    await vi.waitFor(() => expect(resolvers.length).toBe(2));
+    unmount();
+    expect(unlisten[0]).toHaveBeenCalled();
+    resolvers[1]();
+    await vi.waitFor(() => expect(unlisten[1]).toHaveBeenCalled());
+    expect(api.apply).not.toHaveBeenCalled();
+  });
 });

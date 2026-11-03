@@ -115,4 +115,15 @@ describe('Pairs', () => {
     await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
     await vi.waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
+
+  it('re-links the source when only the source drive is missing', async () => {
+    vi.mocked(api.listPairs).mockResolvedValue([view({ sourceConnected: false })]);
+    vi.mocked(pickFolder).mockResolvedValue('/media/int/Photos');
+    vi.mocked(api.relink).mockResolvedValue(view().pair);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    const card = (await screen.findByText('Photos')).closest('article')!;
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    expect(pickFolder).toHaveBeenCalledWith('Choose the source folder on Internal');
+    expect(api.relink).toHaveBeenCalledWith('p1', 'Source', '/media/int/Photos', false);
+  });
 });

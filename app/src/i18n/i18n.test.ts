@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import en from './en.json';
 import pt from './pt-PT.json';
 import { translate } from './index';
@@ -9,7 +9,11 @@ describe('translate', () => {
   it('fills placeholders and falls back to English, then to the key', () => {
     expect(translate('en', 'pairs.notConnected', { label: 'USB' })).toBe('⚠ USB not connected');
     expect(translate('pt-PT', 'pairs.notConnected', { label: 'USB' })).toBe('⚠ USB não está ligado');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(translate('pt-PT', 'no.such.key')).toBe('no.such.key');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0])).toContain('no.such.key');
+    warn.mockRestore();
   });
 
   it('has the same keys in both languages', () => {
