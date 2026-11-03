@@ -91,4 +91,39 @@ describe('PairEditor', () => {
     render(<I18nProvider lang="en"><PairEditor pair={null} navigate={vi.fn()} /></I18nProvider>);
     expect(await screen.findByText(/default could not be read/)).toBeInTheDocument();
   });
+
+  const existing = {
+    pair: {
+      id: 'p1', name: 'Photos',
+      source: { volume_id: 'a', rel_path: 'Photos', label: 'Internal' },
+      replica: { volume_id: 'b', rel_path: 'Backup', label: 'USB' },
+      user_rules: ['*.tmp'], trash_days: 14, last_sync: null, last_scan_files: null,
+    },
+    sourceConnected: true, replicaConnected: true,
+  };
+
+  it('deletes a pair only after confirming', async () => {
+    vi.mocked(api.deletePair).mockResolvedValue(undefined as never);
+    const navigate = vi.fn();
+    render(<I18nProvider lang="en"><PairEditor pair={existing} navigate={navigate} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Delete pair' }));
+    expect(api.deletePair).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('dialog', { name: 'Delete pair' });
+    expect(dialog).toHaveTextContent('Delete the pair Photos?');
+    await userEvent.click(screen.getAllByRole('button', { name: 'Delete pair' }).at(-1)!);
+    expect(api.deletePair).toHaveBeenCalledWith('p1');
+    expect(navigate).toHaveBeenCalledWith({ name: 'pairs' });
+  });
+
+  it('editing without changing folders sends both as null', async () => {
+    vi.mocked(api.savePair).mockResolvedValue({} as never);
+    render(<I18nProvider lang="en"><PairEditor pair={existing} navigate={vi.fn()} /></I18nProvider>);
+    const name = screen.getByLabelText('Name');
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Pictures');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.savePair).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'p1', name: 'Pictures', source: null, replica: null, userRules: ['*.tmp'], trashDays: 14,
+    }));
+  });
 });
