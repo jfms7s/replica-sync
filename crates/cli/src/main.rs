@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
 use replica_sync_core::execute::{Control, ExecContext, execute};
 use replica_sync_core::plan::{mass_change_guard, space_shortfall};
 use replica_sync_core::rules::SkipRules;
@@ -10,6 +11,7 @@ use replica_sync_core::safety::ReplicaRoot;
 use replica_sync_core::session::{Prepared, SessionCounters, check_roots, prepare};
 use replica_sync_core::{trash, volume};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -77,11 +79,13 @@ fn prepared(source: &Path, replica: &Path, skip: &[String]) -> Result<Prepared> 
 fn print_summary(p: &Prepared) {
     let t = &p.plan.totals;
     println!(
-        "source {} files ({}) · replica {} files ({}) · scan+diff {:.1} s",
+        "source {} files ({}) · replica {} files ({}) · scan source {} ms · scan replica {} ms · scan+diff {:.1} s",
         p.source.files,
         human_bytes(p.source.bytes),
         p.replica.files,
         human_bytes(p.replica.bytes),
+        p.source.elapsed_ms,
+        p.replica.elapsed_ms,
         p.elapsed_ms as f64 / 1000.0
     );
     println!(
@@ -120,28 +124,43 @@ fn refusals(p: &Prepared, replica: &Path) -> Vec<String> {
     why
 }
 
+/// Writes `path` with `content` and modified time `secs`, through one handle.
+fn write_with_mtime(path: &Path, content: &[u8], secs: i64) -> Result<()> {
+    let mut f = fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(content)
+        .with_context(|| format!("writing {}", path.display()))?;
+    let t = filetime::FileTime::from_unix_time(secs, 0);
+    filetime::set_file_handle_times(&f, None, Some(t))
+        .with_context(|| format!("setting the time of {}", path.display()))
+}
+
+/// `files` small files, 1,000 per folder `dNNNN`, written one folder per
+/// thread; then `large` 64 MiB files. The same tree every time.
 fn gen_tree(dir: &Path, files: u64, large: u32) -> Result<()> {
     const T0: i64 = 1_700_000_000;
-    for i in 0..files {
-        let folder = dir.join(format!("d{:04}", i / 1000));
-        if i % 1000 == 0 {
+    const PER_FOLDER: u64 = 1000;
+    (0..files.div_ceil(PER_FOLDER))
+        .into_par_iter()
+        .try_for_each(|d| -> Result<()> {
+            let folder = dir.join(format!("d{d:04}"));
             fs::create_dir_all(&folder)
                 .with_context(|| format!("creating {}", folder.display()))?;
-        }
-        let path = folder.join(format!("f{i:07}.txt"));
-        fs::write(&path, i.to_string()).with_context(|| format!("writing {}", path.display()))?;
-        filetime::set_file_mtime(
-            &path,
-            filetime::FileTime::from_unix_time(T0 + (i % 1000) as i64, 0),
-        )
-        .with_context(|| format!("setting the time of {}", path.display()))?;
+            for i in d * PER_FOLDER..((d + 1) * PER_FOLDER).min(files) {
+                let path = folder.join(format!("f{i:07}.txt"));
+                write_with_mtime(
+                    &path,
+                    i.to_string().as_bytes(),
+                    T0 + (i % PER_FOLDER) as i64,
+                )?;
+            }
+            Ok(())
+        })?;
+    if large == 0 {
+        return Ok(());
     }
     let big = vec![0u8; 64 * 1024 * 1024];
     for k in 0..large {
-        let path = dir.join(format!("large-{k}.bin"));
-        fs::write(&path, &big).with_context(|| format!("writing {}", path.display()))?;
-        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(T0, 0))
-            .with_context(|| format!("setting the time of {}", path.display()))?;
+        write_with_mtime(&dir.join(format!("large-{k}.bin")), &big, T0)?;
     }
     Ok(())
 }

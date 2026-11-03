@@ -91,6 +91,54 @@ fn gen_tree_copies_plan_as_in_sync() {
         text.contains("plan: 0 create, 0 update, 0 move, 0 delete, 0 folders"),
         "{text}"
     );
+    assert!(
+        text.contains(" ms · scan replica ") && text.contains("scan source "),
+        "{text}"
+    );
+}
+
+/// The tree's layout, contents and times are fixed (the bench compares
+/// trees made by different builds).
+#[test]
+fn gen_tree_makes_the_same_tree_every_time() {
+    let t = tempfile::tempdir().unwrap();
+    let out = cli(&[
+        &"gen-tree",
+        &t.path().join("g"),
+        &"--files",
+        &"2001",
+        &"--large",
+        &"0",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let snap = snapshot(&t.path().join("g"));
+    assert_eq!(snap.len(), 2001);
+    let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    let sep = std::path::MAIN_SEPARATOR;
+    assert_eq!(
+        snap[0],
+        (
+            format!("d0000{sep}f0000000.txt"),
+            b"0".to_vec(),
+            at(1_700_000_000)
+        )
+    );
+    assert_eq!(
+        snap[1999],
+        (
+            format!("d0001{sep}f0001999.txt"),
+            b"1999".to_vec(),
+            at(1_700_000_999)
+        )
+    );
+    assert_eq!(
+        snap[2000],
+        (
+            format!("d0002{sep}f0002000.txt"),
+            b"2000".to_vec(),
+            at(1_700_000_000)
+        )
+    );
 }
 
 #[cfg(unix)]

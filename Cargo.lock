@@ -3051,6 +3051,7 @@ dependencies = [
  "anyhow",
  "clap",
  "filetime",
+ "rayon",
  "replica-sync-core",
  "tempfile",
 ]
