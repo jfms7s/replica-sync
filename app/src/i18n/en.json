@@ -133,6 +133,7 @@
   "trash.replaceBody": "{path} already exists in the backup. Replace it? The current file goes to the trash.",
   "trash.replace": "Replace",
   "trash.unrecorded": "Unrecorded (can't be restored automatically)",
+  "trash.openFolder": "Show in the file manager",
   "trash.reason.deleted": "deleted",
   "trash.reason.replaced": "older version",
   "trash.nothingRecorded": "Nothing in this run is recorded, so there is nothing to restore here.",

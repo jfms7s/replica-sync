@@ -330,6 +330,17 @@ pub async fn trash_contents(app: AppHandle, id: String, run: String) -> Res<Tras
     .await
 }
 
+/// Shows a trash run's `files` folder in the file manager (for files its
+/// manifest does not list). Takes ids only; the folder itself is never run.
+#[tauri::command]
+pub async fn open_trash_run(app: AppHandle, id: String, run: String) -> Res<()> {
+    let folder = blocking(&app, move |st| {
+        with_session(st, |s| s.trash_files_folder(&id, &run, &st.volumes))
+    })
+    .await?;
+    open_path_raw(&app, &folder)
+}
+
 #[tauri::command]
 pub async fn restore(
     app: AppHandle,

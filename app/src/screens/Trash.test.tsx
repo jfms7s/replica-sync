@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 
 vi.mock('../api', () => ({
-  api: { trashRuns: vi.fn(), trashContents: vi.fn(), restore: vi.fn(), emptyRun: vi.fn() },
+  api: { trashRuns: vi.fn(), trashContents: vi.fn(), restore: vi.fn(), emptyRun: vi.fn(), openTrashRun: vi.fn() },
 }));
 import { api } from '../api';
 import Trash from './Trash';
@@ -106,5 +106,29 @@ describe('Trash', () => {
     expect(screen.getByRole('button', { name: 'Empty' })).toBeDisabled();
     await act(async () => finish(1));
     await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Restore all' })).toBeEnabled());
+  });
+
+  it('offers to show the run folder only when it holds unrecorded files, by ids', async () => {
+    vi.mocked(api.openTrashRun).mockResolvedValue(undefined);
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: /2 files/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Show in the file manager' }));
+    expect(api.openTrashRun).toHaveBeenCalledWith('p1', runId);
+  });
+
+  it('shows no folder button for a run with every file recorded', async () => {
+    vi.mocked(api.trashContents).mockResolvedValue({ items: [{ path: 'a.txt', size: 1, mtime_ns: 0, reason: 'deleted' }], unrecorded: [], bytes: 1 });
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: /2 files/ }));
+    await screen.findByText(/a\.txt/);
+    expect(screen.queryByRole('button', { name: 'Show in the file manager' })).not.toBeInTheDocument();
+  });
+
+  it('shows an error when the folder cannot be opened', async () => {
+    vi.mocked(api.openTrashRun).mockRejectedValue({ code: 'io', params: { detail: 'no opener' } });
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: /2 files/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Show in the file manager' }));
+    expect(await screen.findByText(/no opener/)).toBeInTheDocument();
   });
 });

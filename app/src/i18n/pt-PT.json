@@ -133,6 +133,7 @@
   "trash.replaceBody": "{path} já existe na cópia. Substituir? O ficheiro atual vai para o lixo.",
   "trash.replace": "Substituir",
   "trash.unrecorded": "Sem registo (não pode ser recuperado automaticamente)",
+  "trash.openFolder": "Mostrar no gestor de ficheiros",
   "trash.reason.deleted": "apagado",
   "trash.reason.replaced": "versão anterior",
   "trash.nothingRecorded": "Nada neste lixo tem registo, por isso não há nada a recuperar aqui.",
