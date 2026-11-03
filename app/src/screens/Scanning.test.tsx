@@ -4,7 +4,7 @@ import { I18nProvider } from '../i18n';
 
 const handlers: Record<string, (p: unknown) => void> = {};
 vi.mock('../api', () => ({
-  api: { startScan: vi.fn().mockResolvedValue(undefined), cancelScan: vi.fn() },
+  api: { startScan: vi.fn().mockResolvedValue(undefined), cancelScan: vi.fn(), listPairs: vi.fn() },
   onEvent: vi.fn(async (name: string, cb: (p: unknown) => void) => { handlers[name] = cb; return () => {}; }),
 }));
 import { api, onEvent } from '../api';
@@ -14,6 +14,9 @@ describe('Scanning', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     for (const k of Object.keys(handlers)) delete handlers[k]; // no stale listeners from a previous test
+    // A test below swaps in listeners that never resolve; put the default back.
+    vi.mocked(onEvent).mockImplementation((async (name: string, cb: (p: unknown) => void) => { handlers[name] = cb; return () => {}; }) as never);
+    vi.mocked(api.startScan).mockResolvedValue(undefined);
   });
 
   it('listens before starting, shows progress, then goes to the preview', async () => {
@@ -52,5 +55,22 @@ describe('Scanning', () => {
     await vi.waitFor(() => expect(unlisten[0]).toHaveBeenCalled());
     expect(resolvers.length).toBe(1);
     expect(api.startScan).not.toHaveBeenCalled();
+  });
+
+  it('goes back to the pairs list when the start itself is cancelled', async () => {
+    vi.mocked(api.startScan).mockRejectedValueOnce({ code: 'scan.cancelled', params: {} });
+    const navigate = vi.fn();
+    render(<I18nProvider lang="en"><Scanning pairId="p1" pairName="Photos" navigate={navigate} /></I18nProvider>);
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith({ name: 'pairs' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows an error when Edit pair cannot load the pair', async () => {
+    vi.mocked(api.startScan).mockRejectedValueOnce({ code: 'scan.nested', params: {} });
+    vi.mocked(api.listPairs).mockRejectedValueOnce({ code: 'io', params: { detail: 'store gone' } });
+    render(<I18nProvider lang="en"><Scanning pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    const edit = await screen.findByRole('button', { name: 'Edit pair' });
+    edit.click();
+    expect(await screen.findByText(/store gone/)).toBeInTheDocument();
   });
 });

@@ -3,7 +3,7 @@ import type { Navigate } from '../App';
 import { api, onEvent, type AppError, type JobDone, type PreviewSummary, type ScanProgress } from '../api';
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
-import { errorText } from '../reasons';
+import { errorText, isAppError } from '../reasons';
 
 export default function Scanning({ pairId, pairName, navigate }: { pairId: string; pairName: string; navigate: Navigate }) {
   const { t, tx, lang } = useT();
@@ -28,7 +28,10 @@ export default function Scanning({ pairId, pairName, navigate }: { pairId: strin
       try {
         await api.startScan(pairId); // only after both listeners are in place
       } catch (e) {
-        if (alive) setError(e as AppError);
+        if (!alive) return;
+        // Cancelled before it started: like a cancelled scan, back to the list.
+        if (isAppError(e) && e.code === 'scan.cancelled') navigate({ name: 'pairs' });
+        else setError(e as AppError);
       }
     })();
     return () => {
@@ -58,7 +61,7 @@ export default function Scanning({ pairId, pairName, navigate }: { pairId: strin
           <button onClick={() => void api.listPairs().then((ps) => {
             const v = ps.find((p) => p.pair.id === pairId);
             navigate(v ? { name: 'editor', pair: v } : { name: 'pairs' });
-          })}>{t('scan.editPair')}</button>
+          }).catch((e) => setError(e as AppError))}>{t('scan.editPair')}</button>
         )}</div>
         {error ? (
           <button onClick={() => navigate({ name: 'pairs' })}>{t('common.back')}</button>

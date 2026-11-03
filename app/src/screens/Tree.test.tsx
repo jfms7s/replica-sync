@@ -128,4 +128,31 @@ describe('Tree', () => {
     expect(await screen.findByText(
       "2,499 more not shown — use the folder's checkbox to include or exclude them all.")).toBeInTheDocument();
   });
+
+  it('keeps a row tabbable after a mouse collapse hides the focused child, and ArrowLeft on a file goes to its folder', async () => {
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+    const a = await screen.findByRole('treeitem', { name: /a/ });
+    a.focus();
+    await userEvent.keyboard('{ArrowRight}');
+    const x = await screen.findByRole('treeitem', { name: 'x.txt' });
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(x).toHaveFocus());
+    await userEvent.keyboard('{ArrowLeft}');
+    await waitFor(() => expect(screen.getByRole('treeitem', { name: /a/ })).toHaveFocus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(screen.getByRole('treeitem', { name: 'x.txt' })).toHaveFocus());
+    await userEvent.click(screen.getByRole('button', { name: /a\// }));
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'x.txt' })).not.toBeInTheDocument());
+    (document.activeElement as HTMLElement | null)?.blur();
+    await userEvent.tab();
+    expect(screen.getByRole('treeitem', { name: /a/ })).toHaveFocus();
+  });
+
+  it('does not open "Show them" folders past their parent\'s first page, and says how many', async () => {
+    vi.mocked(api.treeChildren).mockImplementation(async (p) =>
+      page(p === '' ? [folder('a', 'on')] : p === 'a' ? [file] : [], p === 'a' ? 3000 : undefined));
+    render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a', 'a/far']} /></I18nProvider>);
+    expect(await screen.findByText(/1 folders with deletes are past/)).toBeInTheDocument();
+    expect(screen.getByRole('treeitem', { name: 'a' })).toHaveAttribute('aria-expanded', 'true');
+  });
 });

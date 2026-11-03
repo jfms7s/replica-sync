@@ -8,7 +8,7 @@ vi.mock('../api', () => ({
   api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), deleteFolders: vi.fn(), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
   pickSaveFile: vi.fn(),
 }));
-import { api } from '../api';
+import { api, pickSaveFile } from '../api';
 import Preview from './Preview';
 
 const totals = { creates: 2, updates: 0, moves: 0, deletes: 3, folders: 0, skipped: 1, bytes_to_copy: 2048 };
@@ -126,5 +126,12 @@ describe('Preview', () => {
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(51));
     const asked = vi.mocked(api.treeChildren).mock.calls.slice(1).map(([p]) => p);
     expect(asked).toEqual(many.slice(0, 50));
+  });
+
+  it('shows a save-dialog failure', async () => {
+    vi.mocked(pickSaveFile).mockRejectedValue({ code: 'io', params: { detail: 'no dialog' } });
+    render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Save preview' }));
+    expect(await screen.findByText(/no dialog/)).toBeInTheDocument();
   });
 });

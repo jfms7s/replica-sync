@@ -12,7 +12,8 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    api.listPairs().then(setPairs).catch((e) => setError(errorText(tx, lang, e)));
+    // A later success clears an earlier error (a re-link that failed, then worked).
+    api.listPairs().then((ps) => { setPairs(ps); setError(null); }).catch((e) => setError(errorText(tx, lang, e)));
   }, [tx, lang]);
   useEffect(load, [load]);
 
@@ -33,7 +34,14 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
     const title = side === 'Source'
       ? t('pairs.relinkSource', { label: v.pair.source.label })
       : t('pairs.relinkReplica', { label: v.pair.replica.label });
-    const folder = await pickFolder(title);
+    setError(null);
+    let folder: string | null;
+    try {
+      folder = await pickFolder(title);
+    } catch (e) {
+      setError(errorText(tx, lang, e));
+      return;
+    }
     if (!folder) return;
     await link(v.pair.id, side, folder, false);
   };
@@ -97,6 +105,7 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
       )}
       {sameVolume && (
         <Modal
+          onClose={() => setSameVolume(null)}
           title={t('pairs.sameVolumeTitle')}
           actions={<>
             <button onClick={() => setSameVolume(null)}>{t('common.cancel')}</button>

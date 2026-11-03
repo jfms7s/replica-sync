@@ -62,4 +62,12 @@ describe('Trash', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(navigate).toHaveBeenCalledWith(back);
   });
+
+  it('Restore all on a run with nothing recorded never calls restore', async () => {
+    vi.mocked(api.trashContents).mockResolvedValue({ items: [], unrecorded: ['lost.bin'], bytes: 10 });
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: 'Restore all' }));
+    expect(await screen.findByText(/nothing to restore/)).toBeInTheDocument();
+    expect(api.restore).not.toHaveBeenCalled();
+  });
 });

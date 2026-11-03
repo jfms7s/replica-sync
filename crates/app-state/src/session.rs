@@ -249,9 +249,7 @@ impl Session {
     }
 
     pub fn set_settings(&mut self, settings: Settings) -> Result<(), AppError> {
-        if settings.default_trash_days == 0 {
-            return Err(AppError::new("pair.badTrashDays"));
-        }
+        check_trash_days(settings.default_trash_days)?;
         settings.save(&self.paths.settings_file())?;
         self.settings = settings;
         Ok(())
@@ -296,10 +294,7 @@ impl Session {
         if input.name.trim().is_empty() {
             return Err(AppError::new("pair.nameRequired"));
         }
-        // An age of 0 would offer to empty the trash run the next apply makes.
-        if input.trash_days == 0 {
-            return Err(AppError::new("pair.badTrashDays"));
-        }
+        check_trash_days(input.trash_days)?;
         SkipRules::new(&input.user_rules)?;
         let pair = match &input.id {
             None => {
@@ -775,6 +770,18 @@ impl Session {
     }
 }
 
+/// The longest trash age (100 years); the UI caps its fields at the same value.
+pub const MAX_TRASH_DAYS: u32 = 36_500;
+
+/// An age of 0 would offer to empty the trash run the next apply makes; a
+/// larger one than [`MAX_TRASH_DAYS`] is a typo.
+fn check_trash_days(days: u32) -> Result<(), AppError> {
+    if days == 0 || days > MAX_TRASH_DAYS {
+        return Err(AppError::new("pair.badTrashDays").with("max", MAX_TRASH_DAYS));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,6 +1121,34 @@ mod tests {
             ..bad
         };
         assert_eq!(w.s.save_pair(bad, &w.v).err().unwrap().code, "pair.badRule");
+    }
+
+    #[test]
+    fn a_trash_age_past_the_maximum_is_refused() {
+        let mut w = world();
+        let input = PairInput {
+            id: Some(w.id.clone()),
+            name: "Photos".into(),
+            source: None,
+            replica: None,
+            user_rules: vec![],
+            trash_days: MAX_TRASH_DAYS + 1,
+            allow_same_volume: false,
+        };
+        assert_eq!(
+            w.s.save_pair(input.clone(), &w.v).unwrap_err().code,
+            "pair.badTrashDays"
+        );
+        let ok = PairInput {
+            trash_days: MAX_TRASH_DAYS,
+            ..input
+        };
+        assert_eq!(w.s.save_pair(ok, &w.v).unwrap().trash_days, MAX_TRASH_DAYS);
+        let bad = Settings {
+            default_trash_days: MAX_TRASH_DAYS + 1,
+            ..Settings::default()
+        };
+        assert_eq!(w.s.set_settings(bad).unwrap_err().code, "pair.badTrashDays");
     }
 
     #[test]

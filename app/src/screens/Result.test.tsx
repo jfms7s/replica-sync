@@ -38,7 +38,7 @@ describe('Result', () => {
     const stopped: RunView = { ...run, notDone: 4, report: { ...run.report, stopped: { code: 'replicaDisconnected' } } };
     render(<I18nProvider lang="pt-PT"><Result run={stopped} pairName="Photos" navigate={navigate} /></I18nProvider>);
     expect(screen.getByText('Parou: o disco da cópia foi desligado')).toBeInTheDocument();
-    expect(screen.getByText('4 alterações não foram feitas. Sincronize de novo para terminar a cópia.')).toBeInTheDocument();
+    expect(screen.getByText('Por fazer: 4. Sincronize de novo para terminar a cópia.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Tentar de novo as que falharam' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Sincronizar de novo' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos' });
@@ -80,5 +80,11 @@ describe('Result', () => {
     const bad: RunView = { ...run, report: { ...run.report, results: [{ id: 0, path: 'a.txt', outcome: { kind: 'failed', reason: { code: 'verifyMismatch' } } }] } };
     render(<I18nProvider lang="en"><Result run={bad} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByText('a.txt: the copy, read back, differs from the source')).toBeInTheDocument();
+  });
+
+  it('titles a stopped run "Sync stopped"', () => {
+    const stopped: RunView = { ...run, report: { ...run.report, stopped: { code: 'internal' } } };
+    render(<I18nProvider lang="en"><Result run={stopped} pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Sync stopped');
   });
 });

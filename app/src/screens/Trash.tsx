@@ -27,6 +27,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
   useEffect(loadRuns, [loadRuns]);
 
   const expand = async (run: string) => {
+    setMessage(null);
     if (open === run) {
       setOpen(null);
       return;
@@ -45,6 +46,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
 
   const restore = async (run: string, paths: string[], replace: boolean) => {
     setConflict(null);
+    setMessage(null);
     setBusy(true);
     try {
       const n = await api.restore(pairId, run, paths, replace);
@@ -60,10 +62,15 @@ export default function Trash({ pairId, pairName, back, navigate }: {
   };
 
   const restoreAll = async (run: string) => {
-    setBusy(true);
+    setMessage(null);
+    setBusy(true); // `restore` keeps it set until it is done: no flicker in between
     try {
       const c = await api.trashContents(pairId, run);
-      setBusy(false);
+      if (c.items.length === 0) {
+        setMessage(t('trash.nothingRecorded'));
+        setBusy(false);
+        return;
+      }
       await restore(run, c.items.map((i) => i.path), false);
     } catch (e) {
       setBusy(false);
@@ -73,6 +80,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
 
   const empty = async (run: TrashRunInfo) => {
     setEmptying(null);
+    setMessage(null);
     setBusy(true);
     try {
       await api.emptyRun(pairId, run.id);
@@ -140,6 +148,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
       </div>
       {conflict && (
         <Modal
+          onClose={() => setConflict(null)}
           title={t('trash.replaceTitle')}
           actions={<>
             <button onClick={() => setConflict(null)}>{t('common.cancel')}</button>
@@ -151,6 +160,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
       )}
       {emptying && (
         <Modal
+          onClose={() => setEmptying(null)}
           title={t('trash.emptyRun')}
           actions={<>
             <button onClick={() => setEmptying(null)}>{t('common.cancel')}</button>

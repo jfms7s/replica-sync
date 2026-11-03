@@ -37,9 +37,9 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
   const run = (f: () => Promise<PreviewSummary>) => f().then((next) => { update(next); setRefreshToken((n) => n + 1); }).catch((e) => setMessage(errorText(tx, lang, e)));
 
   const savePreview = async () => {
-    const file = await pickSaveFile(`${s.pairName}-preview.txt`);
-    if (!file) return;
     try {
+      const file = await pickSaveFile(`${s.pairName}-preview.txt`);
+      if (!file) return;
       await api.savePreview(file);
       setMessage(t('preview.saved'));
     } catch (e) {
@@ -109,6 +109,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
       </div>
       {guardOpen && s.guard && (
         <Modal
+          onClose={() => navigate({ name: 'pairs' })}
           title={t(s.guard.first_sync ? 'preview.guardTitle' : 'preview.guardLaterTitle')}
           actions={<>
             <button onClick={() => navigate({ name: 'pairs' })}>{t('common.back')}</button>
