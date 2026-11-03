@@ -168,6 +168,7 @@
   "reason.stop.replicaDisconnected": "o disco da cópia foi desligado",
   "reason.stop.sourceDisconnected": "o disco de origem foi desligado",
   "reason.stop.replicaFull": "o disco da cópia está cheio",
+  "reason.stop.internal": "um erro interno; analise de novo para ver o que falta",
 
   "error.pair.sameFolder": "A origem e a cópia são a mesma pasta.",
   "error.pair.nested": "Uma pasta está dentro da outra. Escolha duas pastas separadas.",

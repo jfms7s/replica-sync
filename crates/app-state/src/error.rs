@@ -187,12 +187,30 @@ mod tests {
             replica_sync_core::session::PrepareError::Nested.into(),
             RestoreError::Conflict(RelPath::new("a").unwrap()).into(),
             RestoreError::NotInRun(RelPath::new("a").unwrap()).into(),
+            RestoreError::Unsafe(replica_sync_core::safety::SafetyError::Escapes(
+                PathBuf::from("/c"),
+            ))
+            .into(),
+            replica_sync_core::scan::ScanError::Root {
+                path: PathBuf::from("/d"),
+                source: std::io::Error::other("gone"),
+            }
+            .into(),
+            replica_sync_core::session::PrepareError::Plan(PlanError::DuplicateTarget(
+                RelPath::new("a").unwrap(),
+            ))
+            .into(),
+            replica_sync_core::session::PrepareError::Plan(PlanError::TooManyChanges).into(),
             std::io::Error::other("boom").into(),
         ]
     }
 
     #[test]
     fn every_conversion_uses_a_listed_code() {
+        let codes: std::collections::HashSet<_> = samples().iter().map(|e| e.code).collect();
+        for code in ["scan.unreadableRoot", "scan.planConflict", "trash.unsafe"] {
+            assert!(codes.contains(code), "no sample makes {code}");
+        }
         for e in samples() {
             assert!(
                 ERROR_CODES.contains(&e.code),

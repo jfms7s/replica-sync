@@ -3,7 +3,7 @@
 use crate::AppState;
 use app_state::error::AppError;
 use app_state::paths::AppPaths;
-use app_state::progress::{JobDone, ScanProgressView, Throttle};
+use app_state::progress::{JobDone, ScanProgressView, Throttle, should_emit};
 use app_state::session::{ApplyJob, PairInput, PairView, PreviewSummary, Session};
 use app_state::settings::{self, Settings};
 use app_state::tree::ChildrenPage;
@@ -17,7 +17,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -216,13 +216,15 @@ fn spawn_apply(app: AppHandle, job: ApplyJob) {
         // A panic must still reach `finish_apply`, or the session stays busy.
         let report = catch_unwind(AssertUnwindSafe(|| {
             job.run(&mut |p: &Progress| {
-                if throttle.ready() || p.changes_done == p.changes_total {
+                if should_emit(&mut throttle, p.changes_done, p.changes_total) {
                     let _ = app.emit("apply-progress", p);
                 }
             })
         }))
+        // The run's own report is lost: say so, and count every approved
+        // change as not done so the Result screen offers a new scan.
         .unwrap_or_else(|_| RunReport {
-            stopped: Some(StopReason::Cancelled),
+            stopped: Some(StopReason::Internal),
             ..RunReport::default()
         });
         let state = app.state::<AppState>();
@@ -269,6 +271,9 @@ pub fn cancel(state: State<'_, AppState>) -> Res<()> {
     })
 }
 
+/// How long "Stop and close" waits for the current file before exiting.
+const STOP_AND_CLOSE_DEADLINE: Duration = Duration::from_secs(60);
+
 /// "A sync is running. Stop after the current file?" -> Yes.
 #[tauri::command]
 pub fn stop_and_close(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
@@ -277,7 +282,13 @@ pub fn stop_and_close(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
         Ok(())
     })?;
     std::thread::spawn(move || {
-        loop {
+        // Exit anyway after the deadline: a file that never finishes (a hung
+        // drive) must not keep the app open forever, and the engine is
+        // crash-safe (an exit mid-copy leaves only temps, which the next
+        // preview plans as deletes). That run's log and last-sync record are
+        // then not written.
+        let deadline = Instant::now() + STOP_AND_CLOSE_DEADLINE;
+        while Instant::now() < deadline {
             let busy = app
                 .state::<AppState>()
                 .session

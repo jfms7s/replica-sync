@@ -58,6 +58,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
           })}
         </span>
       </header>
+      {s.warnings.map((w, i) => <p key={i} className="warn">{t('result.warning', { text: errorText(tx, lang, w) })}</p>)}
       {s.isEmpty ? (
         <>
           <p className="panel">{t('preview.inSync')}</p>

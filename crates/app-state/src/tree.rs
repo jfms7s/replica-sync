@@ -5,6 +5,7 @@
 use replica_sync_core::model::{Change, RelPath};
 use replica_sync_core::plan::{ChangeId, Plan};
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -56,44 +57,44 @@ pub struct ChildrenPage {
 }
 
 struct Row {
-    key: String,
     idx: usize,
 }
 
+/// The plan's change indexes in tree order, so each folder's rows are one
+/// contiguous range.
 pub struct PlanTree {
     rows: Vec<Row>,
 }
 
-fn key_of(p: &RelPath) -> String {
-    p.as_str().replace('/', "\0")
+/// Paths in tree order: byte order with `/` sorting before every other byte,
+/// so `a/x` comes before `a-c` and a folder's rows are never split.
+fn tree_order(a: &RelPath, b: &RelPath) -> Ordering {
+    let key = |c: u8| if c == b'/' { 0 } else { c };
+    a.as_str().bytes().map(key).cmp(b.as_str().bytes().map(key))
+}
+
+fn path_of<'a>(plan: &'a Plan, r: &Row) -> &'a RelPath {
+    plan.changes[r.idx].change.path()
 }
 
 impl PlanTree {
     pub fn new(plan: &Plan) -> PlanTree {
-        let mut rows: Vec<Row> = plan
-            .changes
-            .iter()
-            .enumerate()
-            .map(|(idx, p)| Row {
-                key: key_of(p.change.path()),
-                idx,
-            })
-            .collect();
-        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut rows: Vec<Row> = (0..plan.changes.len()).map(|idx| Row { idx }).collect();
+        rows.sort_by(|a, b| tree_order(path_of(plan, a), path_of(plan, b)));
         PlanTree { rows }
     }
 
     /// Rows at `folder` or inside it, as an index range (the whole tree for the root).
-    fn range(&self, folder: &RelPath) -> (usize, usize) {
+    fn range(&self, plan: &Plan, folder: &RelPath) -> (usize, usize) {
         if folder.is_root() {
             return (0, self.rows.len());
         }
-        let k = key_of(folder);
-        let inside = format!("{k}\0");
-        let lo = self.rows.partition_point(|r| r.key < k);
+        let lo = self
+            .rows
+            .partition_point(|r| tree_order(path_of(plan, r), folder) == Ordering::Less);
         let len = self.rows[lo..]
             .iter()
-            .take_while(|r| r.key == k || r.key.starts_with(&inside))
+            .take_while(|r| path_of(plan, r).is_within(folder))
             .count();
         (lo, lo + len)
     }
@@ -110,7 +111,7 @@ impl PlanTree {
         sel: &HashSet<ChangeId>,
         limit: usize,
     ) -> ChildrenPage {
-        let (lo, hi) = self.range(folder);
+        let (lo, hi) = self.range(plan, folder);
         let skip = if folder.is_root() {
             0
         } else {
@@ -131,7 +132,7 @@ impl PlanTree {
                 .unwrap_or_default()
                 .to_owned();
             let child = folder.join(&name);
-            let (clo, chi) = self.range(&child);
+            let (clo, chi) = self.range(plan, &child);
             if out.len() < limit {
                 out.push(self.node(plan, &child, name, clo, chi, sel));
             }
@@ -196,7 +197,7 @@ impl PlanTree {
     }
 
     pub fn toggle(&self, plan: &Plan, path: &RelPath, sel: &mut HashSet<ChangeId>) {
-        let (lo, hi) = self.range(path);
+        let (lo, hi) = self.range(plan, path);
         let ids: Vec<ChangeId> = self.rows[lo..hi]
             .iter()
             .filter(|r| Self::actionable(plan, r.idx))
@@ -361,6 +362,96 @@ mod tests {
     fn folders_with_deletes_lists_every_ancestor() {
         let (plan, tree) = fixture();
         assert_eq!(tree.folders_with_deletes(&plan), vec![rel("a")]);
+    }
+
+    #[test]
+    fn folders_with_deletes_lists_each_level_of_deep_nesting_once() {
+        let del = |p: &str| Change::Delete {
+            path: rel(p),
+            size: 1,
+            mtime_ns: 0,
+        };
+        let plan = build_plan(
+            vec![
+                del("a/b/c/d/1.txt"),
+                del("a/b/2.txt"),
+                del("x/3.txt"),
+                del("top.txt"),
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        assert_eq!(
+            tree.folders_with_deletes(&plan),
+            vec![rel("a"), rel("a/b"), rel("a/b/c"), rel("a/b/c/d"), rel("x")]
+        );
+    }
+
+    #[test]
+    fn a_folder_that_is_itself_a_change_shows_it_and_its_children() {
+        let plan = build_plan(
+            vec![
+                Change::MkDir { path: rel("n") },
+                create("n/x.txt", 4),
+                create("n/sub/y.txt", 2),
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        assert_eq!(names(&root), vec!["n"]);
+        let n = &root[0];
+        assert!(n.is_folder);
+        assert!(matches!(
+            n.changes.as_slice(),
+            [RowChange {
+                change: Change::MkDir { .. },
+                ..
+            }]
+        ));
+        assert_eq!(
+            (n.counts.folders, n.counts.create, n.bytes_to_copy),
+            (1, 2, 6)
+        );
+        // The folder's own change is on its parent's row, not among its children.
+        let inside = tree.children(&plan, &rel("n"), &sel, ALL).nodes;
+        assert_eq!(names(&inside), vec!["sub", "x.txt"]);
+    }
+
+    #[test]
+    fn an_update_and_a_case_only_rename_of_one_file_share_its_row() {
+        let plan = build_plan(
+            vec![
+                Change::Move {
+                    from: rel("Top.txt"),
+                    to: rel("top.txt"),
+                    kind: MoveKind::File {
+                        size: 5,
+                        mtime_ns: 0,
+                    },
+                },
+                Change::Update {
+                    path: rel("top.txt"),
+                    size: 5,
+                    mtime_ns: 0,
+                    replica_newer: false,
+                },
+            ],
+            CaseMode::Insensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        let mut sel = plan.actionable_ids();
+        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        assert_eq!(names(&root), vec!["top.txt"]);
+        assert!(!root[0].is_folder);
+        assert_eq!((root[0].counts.moves, root[0].counts.update), (1, 1));
+        assert_eq!(root[0].changes.len(), 2);
+        tree.toggle(&plan, &rel("top.txt"), &mut sel);
+        assert!(sel.is_empty(), "one tick covers both changes");
     }
 
     #[test]

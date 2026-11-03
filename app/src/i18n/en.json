@@ -168,6 +168,7 @@
   "reason.stop.replicaDisconnected": "the backup drive was disconnected",
   "reason.stop.sourceDisconnected": "the source drive was disconnected",
   "reason.stop.replicaFull": "the backup drive is full",
+  "reason.stop.internal": "an internal error; scan again to see what is left",
 
   "error.pair.sameFolder": "The source and the backup are the same folder.",
   "error.pair.nested": "One folder is inside the other. Pick two separate folders.",

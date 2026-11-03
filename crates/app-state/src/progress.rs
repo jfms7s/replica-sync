@@ -29,6 +29,12 @@ impl Throttle {
     }
 }
 
+/// Whether an apply progress event goes to the UI: at most one per throttle
+/// interval, and always the last one, so the bar ends full.
+pub fn should_emit(throttle: &mut Throttle, done: usize, total: usize) -> bool {
+    done == total || throttle.ready()
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SideProgress {
@@ -94,6 +100,14 @@ mod tests {
         assert!(!t.ready());
         std::thread::sleep(Duration::from_millis(60));
         assert!(t.ready());
+    }
+
+    #[test]
+    fn the_last_apply_event_is_emitted_even_when_the_throttle_is_closed() {
+        let mut t = Throttle::new(Duration::from_secs(3600));
+        assert!(should_emit(&mut t, 1, 10));
+        assert!(!should_emit(&mut t, 2, 10));
+        assert!(should_emit(&mut t, 10, 10));
     }
 
     #[test]

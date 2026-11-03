@@ -51,6 +51,7 @@
     "stop.cancelled",
     "stop.replicaDisconnected",
     "stop.sourceDisconnected",
-    "stop.replicaFull"
+    "stop.replicaFull",
+    "stop.internal"
   ]
 }
