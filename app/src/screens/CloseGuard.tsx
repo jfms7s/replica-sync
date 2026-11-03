@@ -42,6 +42,7 @@ export default function CloseGuard() {
   if (!open) return null;
   return (
     <Modal
+      onClose={() => { if (!busy && !stopping) { setError(null); setOpen(false); } }}
       title={t('close.title')}
       actions={<>
         <button disabled={busy || stopping} onClick={() => { setError(null); setOpen(false); }}>{t('close.keep')}</button>

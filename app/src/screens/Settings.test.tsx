@@ -36,4 +36,39 @@ describe('Settings', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(api.setSettings).toHaveBeenCalledWith({ language: 'en', defaultTrashDays: 5 });
   });
+
+  it('shows an error when the logs folder cannot be opened', async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ settings: { language: 'en', defaultTrashDays: 30 }, resolvedLanguage: 'en' });
+    vi.mocked(api.openLogsFolder).mockRejectedValue({ code: 'io', params: { detail: 'no opener' } });
+    render(<I18nProvider lang="en"><Settings navigate={vi.fn()} onLanguage={vi.fn()} /></I18nProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: 'Open logs folder' }));
+    expect(await screen.findByText(/no opener/)).toBeInTheDocument();
+  });
+
+  it('refuses a trash age past the maximum without calling the API', async () => {
+    vi.mocked(api.setSettings).mockClear();
+    vi.mocked(api.getSettings).mockResolvedValue({ settings: { language: 'en', defaultTrashDays: 30 }, resolvedLanguage: 'en' });
+    render(<I18nProvider lang="en"><Settings navigate={vi.fn()} onLanguage={vi.fn()} /></I18nProvider>);
+    const days = await screen.findByDisplayValue('30');
+    await userEvent.clear(days);
+    await userEvent.type(days, '5000000000');
+    expect(days).toHaveAttribute('aria-invalid', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.setSettings).not.toHaveBeenCalled();
+  });
+
+  it('loads once: a save that changes the language does not refetch over later edits', async () => {
+    vi.mocked(api.getSettings).mockClear();
+    vi.mocked(api.getSettings).mockResolvedValue({ settings: { language: 'en', defaultTrashDays: 30 }, resolvedLanguage: 'en' });
+    vi.mocked(api.setSettings).mockResolvedValue({ settings: { language: 'pt-PT', defaultTrashDays: 30 }, resolvedLanguage: 'pt-PT' });
+    const { rerender } = render(<I18nProvider lang="en"><Settings navigate={vi.fn()} onLanguage={vi.fn()} /></I18nProvider>);
+    await userEvent.selectOptions(await screen.findByLabelText('Language'), 'pt-PT');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    rerender(<I18nProvider lang="pt-PT"><Settings navigate={vi.fn()} onLanguage={vi.fn()} /></I18nProvider>);
+    const days = screen.getByDisplayValue('30');
+    await userEvent.clear(days);
+    await userEvent.type(days, '12');
+    expect(api.getSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByDisplayValue('12')).toBeInTheDocument();
+  });
 });

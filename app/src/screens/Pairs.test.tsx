@@ -90,4 +90,29 @@ describe('Pairs', () => {
     render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
     expect(await screen.findByText(/3 applied, 0 failed · incomplete$/)).toBeInTheDocument();
   });
+
+  it('shows a folder-picker failure, and a later successful re-link clears the error', async () => {
+    vi.mocked(api.listPairs).mockResolvedValue([view({ replicaConnected: false })]);
+    vi.mocked(pickFolder).mockRejectedValueOnce({ code: 'io', params: { detail: 'no dialog' } }).mockResolvedValueOnce('/x');
+    vi.mocked(api.relink).mockResolvedValue(view().pair);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    const card = (await screen.findByText('Photos')).closest('article')!;
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('no dialog');
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    await vi.waitFor(() => expect(api.relink).toHaveBeenCalled());
+    await vi.waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('a failed re-link then a successful one leaves no error', async () => {
+    vi.mocked(api.listPairs).mockResolvedValue([view({ replicaConnected: false })]);
+    vi.mocked(pickFolder).mockResolvedValue('/x');
+    vi.mocked(api.relink).mockRejectedValueOnce({ code: 'drive.notConnected', params: { label: 'USB' } }).mockResolvedValueOnce(view().pair);
+    render(<I18nProvider lang="en"><Pairs navigate={vi.fn()} /></I18nProvider>);
+    const card = (await screen.findByText('Photos')).closest('article')!;
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: 'Re-link drive' }));
+    await vi.waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
 });

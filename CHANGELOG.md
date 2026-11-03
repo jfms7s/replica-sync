@@ -9,6 +9,13 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 - A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
 
 ### Fixed
+- Opening the logs or data folder, the folder and save dialogs, and "Edit pair" after a failed scan now show an error when they fail instead of doing nothing.
+- The pairs list clears an old error once a later action works; the "same drive" answer in the pair editor is forgotten when a folder is changed.
+- Dialogs close with Escape, start with focus on their first button and keep Tab inside.
+- Settings no longer reload over what you typed after saving a new language; the trash age is limited to 36,500 days (in the app and in the engine).
+- Preview tree: keyboard focus survives collapsing a folder with the mouse, Left arrow on a file goes to its folder, and "Show them" says how many folders it could not open because they are past the first rows.
+- A scan cancelled before it started goes back to the pairs list; "Restore all" on a trash run with nothing recorded says so instead of "Restored: 0"; the trash buttons no longer flicker.
+- Clearer texts: the Result title says "Sync stopped" for a stopped run, the not-done line reads "Not done: N", and the top-level "more not shown" note no longer mentions a checkbox the root does not have.
 - Changing or re-linking a pair's folder onto the drive of its other side now asks first, as creating a pair does.
 - A pair folder deleted while its drive is plugged in is reported as missing, not as "drive not connected".
 - A folder whose name is not valid Unicode is refused when the pair is created, instead of being saved with a replacement character and later reported missing.

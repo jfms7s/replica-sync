@@ -36,7 +36,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
 
   return (
     <main className="screen">
-      <h1>{t('result.title')} · {pairName}</h1>
+      <h1>{t(report.stopped ? 'result.titleStopped' : 'result.title')} · {pairName}</h1>
       <p>{t('result.summary', { applied: count('applied'), skipped: count('skipped'), failed: count('failed') })}</p>
       {report.stopped && <p className="warn">{t('result.stopped', { reason: stopText(tx, report.stopped) })}</p>}
       {report.stopped && run.notDone > 0 && <p className="warn">{t('result.notDone', { count: run.notDone })}</p>}
@@ -71,6 +71,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
       </div>
       {confirmEmpty && (
         <Modal
+          onClose={() => setConfirmEmpty(false)}
           title={t('result.emptyOld')}
           actions={<>
             <button onClick={() => setConfirmEmpty(false)}>{t('common.cancel')}</button>

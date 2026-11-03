@@ -30,8 +30,10 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   const { t, tx, lang } = useT();
   const [children, setChildren] = useState<Map<string, ChildrenPage>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [focus, setFocus] = useState(0);
+  /** The row that keeps keyboard focus, by path, so collapsing or reloading never loses it. */
+  const [focusPath, setFocusPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notShown, setNotShown] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef(new Map<number, HTMLDivElement>());
   /** A row the keyboard moved to: focused once it is rendered. */
@@ -48,6 +50,7 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
       for (const [p, nodes] of loaded) next.set(p, nodes);
       return next;
     });
+    return loaded;
   }, []);
 
   useEffect(() => {
@@ -63,17 +66,39 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     if (!expandRequest) return;
     const paths = [...expandRequest].sort((a, b) => a.split('/').length - b.split('/').length);
     load(paths.filter((p) => !children.has(p)))
-      .then(() => setExpanded((prev) => new Set([...prev, ...paths])))
+      .then((loaded) => {
+        // A folder past its parent's first page is never drawn, so it is not
+        // opened; the note says how many were left out. (A parent page not
+        // loaded yet, the root while it loads, can't tell: open it.)
+        const pages = new Map([...childrenRef.current, ...loaded]);
+        const shown = new Set<string>(['']);
+        for (const p of paths) {
+          const parent = ancestors(p).at(-1)!;
+          const page = pages.get(parent);
+          if (shown.has(parent) && (!page || page.nodes.some((n) => n.path === p))) shown.add(p);
+        }
+        setNotShown(paths.filter((p) => !shown.has(p)).length);
+        setExpanded((prev) => new Set([...prev, ...paths.filter((p) => shown.has(p))]));
+      })
       .catch((e) => setError(errorText(tx, lang, e)));
     // Only react to a new request, not to every load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expandRequest]);
 
-  /** Reload the root and the open folders; every other cached folder is dropped so a later expand refetches. */
+  /**
+   * Reload the root and the open folders. Other folders cached before the reload began are dropped, so a later
+   * expand refetches them; pages loaded meanwhile (an in-flight "Show them") are kept.
+   */
   const refresh = useCallback(async () => {
     const paths = ['', ...expandedRef.current];
+    const before = [...childrenRef.current.keys()];
     const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
-    setChildren(new Map(loaded));
+    setChildren((prev) => {
+      const next = new Map(prev);
+      for (const p of before) if (!paths.includes(p) && !expandedRef.current.has(p)) next.delete(p);
+      for (const [p, page] of loaded) next.set(p, page);
+      return next;
+    });
   }, []);
 
   /**
@@ -165,19 +190,21 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   latest.current = { rows, lineOf, expanded, expand, collapse, toggle, virtualizer };
 
   const onKey = useCallback((e: KeyboardEvent, i: number) => {
-    const { rows, lineOf, expand, collapse, toggle, virtualizer } = latest.current;
+    const { rows, lineOf, expanded, expand, collapse, toggle, virtualizer } = latest.current;
     const row = rows[i];
     const move = (to: number) => {
       const j = Math.max(0, Math.min(rows.length - 1, to));
-      setFocus(j);
+      setFocusPath(rows[j].node.path);
       pendingFocus.current = j;
       virtualizer.scrollToIndex(lineOf[j]);
       itemRefs.current.get(j)?.focus();
     };
+    const parent = ancestors(row.node.path).at(-1)!;
     if (e.key === 'ArrowDown') move(i + 1);
     else if (e.key === 'ArrowUp') move(i - 1);
     else if (e.key === 'ArrowRight' && row.node.isFolder) void expand(row.node.path);
-    else if (e.key === 'ArrowLeft' && row.node.isFolder) collapse(row.node.path);
+    else if (e.key === 'ArrowLeft' && row.node.isFolder && expanded.has(row.node.path)) collapse(row.node.path);
+    else if (e.key === 'ArrowLeft' && parent !== '') move(rows.findIndex((r) => r.node.path === parent));
     else if (e.key === ' ' && row.node.tick !== 'none') void toggle(row.node.path);
     else return;
     e.preventDefault();
@@ -197,16 +224,27 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   }, []);
 
   const items = virtualizer.getVirtualItems();
+  // The focused row, or its nearest ancestor still shown once a collapse hid it.
+  const focus = useMemo(() => {
+    if (focusPath === null) return 0;
+    const at = (p: string) => rows.findIndex((r) => r.node.path === p);
+    const i = at(focusPath);
+    if (i >= 0) return i;
+    const parent = ancestors(focusPath).reverse().map(at).find((j) => j >= 0);
+    return parent ?? 0;
+  }, [rows, focusPath]);
   // Keep one row tabbable: the focused one, or the first in view once it has scrolled away.
   const rendered = items.flatMap((v) => {
     const line = lines[v.index];
     return line && 'row' in line ? [line.index] : [];
   });
   const tabbable = rendered.includes(focus) ? focus : rendered[0];
+  const onFocusRow = useCallback((i: number) => setFocusPath(latest.current.rows[i]?.node.path ?? null), []);
 
   return (
     <div className="tree panel" role="tree" aria-label={t('tree.label')} ref={scrollRef}>
       {error && <p className="error" role="alert">{error}</p>}
+      {notShown > 0 && <p className="muted">{t('tree.notShown', { count: formatCount(lang, notShown) })}</p>}
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {items.map((v) => {
           const line = lines[v.index];
@@ -215,7 +253,7 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
             return (
               <div key={`${line.path}\0more`} role="treeitem" aria-level={line.depth} aria-disabled tabIndex={-1}
                 className="muted" style={{ ...style, paddingLeft: line.depth * 16 }}>
-                {t('tree.more', { count: formatCount(lang, line.more) })}
+                {t(line.path === '' ? 'tree.moreRoot' : 'tree.more', { count: formatCount(lang, line.more) })}
               </div>
             );
           }
@@ -231,7 +269,7 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
               tabbable={index === tabbable}
               setItemRef={setItemRef}
               onKey={onKey}
-              onFocusRow={setFocus}
+              onFocusRow={onFocusRow}
               onOpenClick={onOpenClick}
               onToggle={onToggle}
             />

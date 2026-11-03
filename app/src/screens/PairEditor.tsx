@@ -4,6 +4,7 @@ import { api, pickFolder, type PairView } from '../api';
 import { useT } from '../i18n';
 import Modal from '../components/Modal';
 import { errorText, isAppError } from '../reasons';
+import { MAX_TRASH_DAYS, parseTrashDays } from '../trashDays';
 
 export default function PairEditor({ pair, navigate }: { pair: PairView | null; navigate: Navigate }) {
   const { t, tx, lang } = useT();
@@ -18,18 +19,32 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
   const [builtins, setBuiltins] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [noDefaults, setNoDefaults] = useState(false);
 
   useEffect(() => {
-    api.builtinRules().then(setBuiltins).catch(() => {});
-    if (!existing) api.getSettings().then((s) => setTrashDays(String(s.settings.defaultTrashDays))).catch(() => {});
+    api.builtinRules().then(setBuiltins).catch((e) => console.error('builtin rules', e));
+    if (!existing) {
+      api.getSettings().then((s) => setTrashDays(String(s.settings.defaultTrashDays))).catch((e) => {
+        console.error('settings', e);
+        setNoDefaults(true);
+      });
+    }
   }, [existing]);
 
-  // Empty, fractional or below 1 is never sent (0 would offer to empty the run just made).
-  const days = Number(trashDays);
-  const daysValid = trashDays.trim() !== '' && Number.isInteger(days) && days >= 1;
+  // Empty, fractional, below 1 (0 would offer to empty the run just made) or
+  // above the maximum is never sent.
+  const days = parseTrashDays(trashDays);
+  const daysValid = days !== null;
+
+  // A same-drive answer is for the folders it was given for.
+  const pickedFolder = (set: (v: string) => void) => (f: string) => {
+    set(f);
+    setSameVolumeOk(false);
+    setAskSameVolume(false);
+  };
 
   const save = async () => {
-    if (!daysValid) return;
+    if (days === null) return;
     setError(null);
     try {
       await api.savePair({
@@ -63,7 +78,14 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       <span>{label}</span>
       <div className="row">
         <span className="muted">{value ?? current ?? t('editor.notChosen')}</span>
-        <button onClick={async () => { const f = await pickFolder(label); if (f) set(f); }}>
+        <button onClick={async () => {
+          try {
+            const f = await pickFolder(label);
+            if (f) set(f);
+          } catch (e) {
+            setError(errorText(tx, lang, e));
+          }
+        }}>
           {existing ? t('editor.change') : t('common.browse')}
         </button>
       </div>
@@ -77,9 +99,9 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
         {t('editor.name')}
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </label>
-      {folderField(t('editor.source'), source, setSource,
+      {folderField(t('editor.source'), source, pickedFolder(setSource),
         existing ? t('editor.current', { label: existing.source.label, path: existing.source.rel_path || '/' }) : null)}
-      {folderField(t('editor.replica'), replica, setReplica,
+      {folderField(t('editor.replica'), replica, pickedFolder(setReplica),
         existing ? t('editor.current', { label: existing.replica.label, path: existing.replica.rel_path || '/' }) : null)}
       <label>
         {t('editor.rules')}
@@ -89,8 +111,9 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       <p className="muted">{t('editor.builtins')}: {builtins.join(', ')}</p>
       <label>
         {t('editor.trashDays')}
-        <input type="number" min={1} step={1} value={trashDays} aria-invalid={!daysValid}
+        <input type="number" min={1} max={MAX_TRASH_DAYS} step={1} value={trashDays} aria-invalid={!daysValid}
           onChange={(e) => setTrashDays(e.target.value)} />
+        {noDefaults && <span className="muted">{t('editor.noDefaults')}</span>}
       </label>
       {askSameVolume && (
         <label className="row" style={{ flexDirection: 'row' }}>
@@ -108,6 +131,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       </div>
       {confirmDelete && existing && (
         <Modal
+          onClose={() => setConfirmDelete(false)}
           title={t('editor.delete')}
           actions={<>
             <button onClick={() => setConfirmDelete(false)}>{t('common.cancel')}</button>

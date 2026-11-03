@@ -62,4 +62,33 @@ describe('PairEditor', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(api.savePair).toHaveBeenCalledWith(expect.objectContaining({ trashDays: 7 }));
   });
+
+  it('forgets the same-drive answer when a folder changes', async () => {
+    vi.mocked(pickFolder).mockResolvedValueOnce('/a').mockResolvedValueOnce('/b').mockResolvedValueOnce('/c');
+    vi.mocked(api.savePair).mockRejectedValueOnce({ code: 'pair.sameVolume', params: {} }).mockResolvedValue({} as never);
+    render(<I18nProvider lang="en"><PairEditor pair={null} navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.type(screen.getByLabelText('Name'), 'Photos');
+    const browse = screen.getAllByRole('button', { name: 'Browse…' });
+    await userEvent.click(browse[0]);
+    await userEvent.click(browse[1]);
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.click(await screen.findByLabelText(/same drive/));
+    await userEvent.click(browse[1]);
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(api.savePair).toHaveBeenLastCalledWith(expect.objectContaining({ replica: '/c', allowSameVolume: false }));
+  });
+
+  it('shows a folder-picker failure', async () => {
+    vi.mocked(pickFolder).mockRejectedValue({ code: 'io', params: { detail: 'no dialog' } });
+    render(<I18nProvider lang="en"><PairEditor pair={null} navigate={vi.fn()} /></I18nProvider>);
+    await userEvent.click(screen.getAllByRole('button', { name: 'Browse…' })[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('no dialog');
+  });
+
+  it('says when the default trash age could not be read', async () => {
+    vi.mocked(api.getSettings).mockRejectedValue({ code: 'io', params: { detail: 'x' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<I18nProvider lang="en"><PairEditor pair={null} navigate={vi.fn()} /></I18nProvider>);
+    expect(await screen.findByText(/default could not be read/)).toBeInTheDocument();
+  });
 });

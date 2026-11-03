@@ -31,7 +31,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    api.getSettings().then((s) => setLang(s.resolvedLanguage)).catch(() => {});
+    // Unreadable settings keep the built-in language; worth a log line, not a screen.
+    api.getSettings().then((s) => setLang(s.resolvedLanguage)).catch((e) => console.error('settings', e));
     api
       .startupStatus()
       .catch((e: unknown) => setBroken({ error: e }))
