@@ -9,6 +9,7 @@ license.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 filetime = "0.2"
+rayon = "1"
 replica-sync-core = { path = "../core" }
 
 [dev-dependencies]
