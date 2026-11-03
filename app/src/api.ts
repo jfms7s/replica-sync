@@ -98,7 +98,8 @@ export const api = {
   listPairs: () => invoke<PairView[]>('list_pairs'),
   savePair: (input: PairInput) => invoke<Pair>('save_pair', { input }),
   deletePair: (id: string) => invoke<void>('delete_pair', { id }),
-  relink: (id: string, side: SideKind, folder: string) => invoke<Pair>('relink', { id, side, folder }),
+  relink: (id: string, side: SideKind, folder: string, allowSameVolume = false) =>
+    invoke<Pair>('relink', { id, side, folder, allowSameVolume }),
   startScan: (id: string) => invoke<void>('start_scan', { id }),
   cancelScan: () => invoke<void>('cancel_scan'),
   previewSummary: () => invoke<PreviewSummary>('preview_summary'),

@@ -117,9 +117,17 @@ pub async fn delete_pair(app: AppHandle, id: String) -> Res<()> {
 }
 
 #[tauri::command]
-pub async fn relink(app: AppHandle, id: String, side: SideKind, folder: PathBuf) -> Res<Pair> {
+pub async fn relink(
+    app: AppHandle,
+    id: String,
+    side: SideKind,
+    folder: PathBuf,
+    allow_same_volume: bool,
+) -> Res<Pair> {
     blocking(&app, move |st| {
-        with_session(st, |s| s.relink(&id, side, &folder, &st.volumes))
+        with_session(st, |s| {
+            s.relink(&id, side, &folder, allow_same_volume, &st.volumes)
+        })
     })
     .await
 }

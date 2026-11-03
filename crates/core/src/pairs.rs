@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_TRASH_DAYS: u32 = 30;
@@ -69,8 +70,6 @@ pub enum PairError {
     SameVolume,
     #[error(transparent)]
     Rule(#[from] RuleError),
-    #[error("no pair with id {0}")]
-    NotFound(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -94,13 +93,17 @@ fn side_for(path: &Path, volumes: &dyn Volumes) -> Result<(Side, PathBuf), PairE
     let rest = canonical_path
         .strip_prefix(&mount_root)
         .map_err(|_| io::Error::other("folder is not under its drive's mount point"))?;
-    let rel_path = RelPath::try_from(
-        rest.components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
-    .map_err(io::Error::other)?;
+    let names = rest
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{}: folder name is not valid Unicode", path.display()),
+            )
+        })?;
+    let rel_path = RelPath::try_from(names.join("/")).map_err(io::Error::other)?;
     Ok((
         Side {
             volume_id: vol.id,
@@ -119,14 +122,20 @@ fn check_folders(a: &Path, b: &Path) -> Result<(), PairError> {
     }
 }
 
+/// The clock in nanoseconds as hex, bumped past the last id this process made,
+/// so a coarse clock (100 ns steps on Windows) never repeats one.
 fn new_id() -> String {
-    format!(
-        "{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    )
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let prev = LAST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            Some(now.max(last + 1))
+        })
+        .expect("the update always returns Some");
+    format!("{:x}", now.max(prev + 1))
 }
 
 pub fn create_pair(req: NewPair, volumes: &dyn Volumes) -> Result<Pair, PairError> {
@@ -201,10 +210,14 @@ fn verify_side(
     match volumes.volume_of(root) {
         Ok(v) if volume::id_matches(&side.volume_id, &v.id) => Ok(()),
         Ok(_) => Err(ResolveError::WrongVolume(root.to_path_buf())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ResolveError::NotConnected {
-            side: kind,
-            label: side.label.clone(),
-        }),
+        // The folder is gone: missing if its drive is still there.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match volumes.find(&side.volume_id)? {
+            Some(_) => Err(ResolveError::FolderMissing(root.to_path_buf())),
+            None => Err(ResolveError::NotConnected {
+                side: kind,
+                label: side.label.clone(),
+            }),
+        },
         Err(e) => Err(e.into()),
     }
 }
@@ -243,10 +256,13 @@ pub fn resolve_replica(pair: &Pair, volumes: &dyn Volumes) -> Result<PathBuf, Re
     resolve_side(&pair.replica, SideKind::Replica, volumes)
 }
 
+/// Points one side of `pair` at `folder`. Like [`create_pair`], a folder on the
+/// other side's drive is refused unless `allow_same_volume`.
 pub fn relink(
     pair: &mut Pair,
     side: SideKind,
     folder: &Path,
+    allow_same_volume: bool,
     volumes: &dyn Volumes,
 ) -> Result<(), PairError> {
     let (new_side, new_path) = side_for(folder, volumes)?;
@@ -254,6 +270,7 @@ pub fn relink(
         SideKind::Source => (&pair.replica, SideKind::Replica),
         SideKind::Replica => (&pair.source, SideKind::Source),
     };
+    let same_volume = other.0.volume_id == new_side.volume_id;
     match resolve_side(other.0, other.1, volumes) {
         Ok(other_path) => check_folders(&new_path, &canonical(&other_path)?)?,
         // The other side can't be checked while it is away; resolve checks again.
@@ -262,6 +279,9 @@ pub fn relink(
         Err(e @ ResolveError::WrongVolume(_)) => {
             unreachable!("resolve_side never checks the drive: {e}")
         }
+    }
+    if same_volume && !allow_same_volume {
+        return Err(PairError::SameVolume);
     }
     match side {
         SideKind::Source => pair.source = new_side,
@@ -635,6 +655,7 @@ mod tests {
             &mut p,
             SideKind::Replica,
             &t.path().join("diskC/Photos"),
+            false,
             &v,
         )
         .unwrap();
@@ -675,6 +696,7 @@ mod tests {
             &mut p,
             SideKind::Replica,
             &t.path().join("diskC/Photos"),
+            false,
             &FindFails(&v, "A"),
         );
         assert!(matches!(r, Err(PairError::Io(_))), "{r:?}");
@@ -699,10 +721,74 @@ mod tests {
             &mut p,
             SideKind::Replica,
             &t.path().join("diskC/Photos"),
+            false,
             &v,
         )
         .unwrap();
         assert_eq!(p.replica.volume_id, "C");
+    }
+
+    #[test]
+    fn relinking_onto_the_other_sides_drive_asks_first() {
+        let (t, v) = setup();
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        fs::create_dir_all(t.path().join("diskA/Backup")).unwrap();
+        let onto_a = t.path().join("diskA/Backup");
+        let r = relink(&mut p, SideKind::Replica, &onto_a, false, &v);
+        assert!(matches!(r, Err(PairError::SameVolume)), "{r:?}");
+        assert_eq!(p.replica.volume_id, "B");
+        relink(&mut p, SideKind::Replica, &onto_a, true, &v).unwrap();
+        assert_eq!(p.replica.volume_id, "A");
+    }
+
+    #[test]
+    fn a_folder_deleted_on_a_connected_drive_is_missing_not_disconnected() {
+        let (t, v) = setup();
+        let p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let resolved = resolve(&p, &v).unwrap();
+        fs::remove_dir(t.path().join("diskB/Backup/Photos")).unwrap();
+        let r = verify_replica(&p, &resolved, &v);
+        assert!(matches!(r, Err(ResolveError::FolderMissing(_))), "{r:?}");
+        v.0.borrow_mut().retain(|x| x.id != "B");
+        let r = verify_replica(&p, &resolved, &v);
+        assert!(matches!(r, Err(ResolveError::NotConnected { .. })), "{r:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_name_that_is_not_unicode_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let (t, v) = setup();
+        let bad = t
+            .path()
+            .join("diskB")
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir(&bad).unwrap();
+        let r = create_pair(req(&t.path().join("diskA/Photos"), &bad), &v);
+        let Err(PairError::Io(e)) = r else {
+            panic!("{r:?}");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn pair_ids_never_repeat() {
+        let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_id()).collect();
+        assert_eq!(ids.len(), 1000);
     }
 
     #[test]

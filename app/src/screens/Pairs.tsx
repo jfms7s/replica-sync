@@ -3,7 +3,8 @@ import type { Navigate } from '../App';
 import { api, pickFolder, type PairView, type SideKind } from '../api';
 import { formatDate } from '../format';
 import { useT } from '../i18n';
-import { errorText } from '../reasons';
+import Modal from '../components/Modal';
+import { errorText, isAppError } from '../reasons';
 
 export default function Pairs({ navigate }: { navigate: Navigate }) {
   const { t, tx, lang } = useT();
@@ -15,18 +16,26 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
   }, [tx, lang]);
   useEffect(load, [load]);
 
+  // A folder on the other side's drive: asked like a new pair, then retried.
+  const [sameVolume, setSameVolume] = useState<{ id: string; side: SideKind; folder: string } | null>(null);
+
+  const link = async (id: string, side: SideKind, folder: string, allowSameVolume: boolean) => {
+    try {
+      await api.relink(id, side, folder, allowSameVolume);
+      load();
+    } catch (e) {
+      if (!allowSameVolume && isAppError(e) && e.code === 'pair.sameVolume') setSameVolume({ id, side, folder });
+      else setError(errorText(tx, lang, e));
+    }
+  };
+
   const relink = async (v: PairView, side: SideKind) => {
     const title = side === 'Source'
       ? t('pairs.relinkSource', { label: v.pair.source.label })
       : t('pairs.relinkReplica', { label: v.pair.replica.label });
     const folder = await pickFolder(title);
     if (!folder) return;
-    try {
-      await api.relink(v.pair.id, side, folder);
-      load();
-    } catch (e) {
-      setError(errorText(tx, lang, e));
-    }
+    await link(v.pair.id, side, folder, false);
   };
 
   return (
@@ -85,6 +94,19 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
             );
           })}
         </div>
+      )}
+      {sameVolume && (
+        <Modal
+          title={t('pairs.sameVolumeTitle')}
+          actions={<>
+            <button onClick={() => setSameVolume(null)}>{t('common.cancel')}</button>
+            <button className="primary" onClick={() => { const s = sameVolume; setSameVolume(null); void link(s.id, s.side, s.folder, true); }}>
+              {t('editor.sameVolume')}
+            </button>
+          </>}
+        >
+          {t('pairs.sameVolumeBody')}
+        </Modal>
       )}
     </main>
   );

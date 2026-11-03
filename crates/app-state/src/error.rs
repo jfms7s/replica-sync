@@ -96,7 +96,6 @@ impl From<PairError> for AppError {
             PairError::Nested => AppError::new("pair.nested"),
             PairError::SameVolume => AppError::new("pair.sameVolume"),
             PairError::Rule(r) => r.into(),
-            PairError::NotFound(id) => AppError::new("pair.notFound").with("id", id),
             PairError::Io(e) => e.into(),
         }
     }
@@ -175,7 +174,6 @@ mod tests {
                 message: "bad".into(),
             })
             .into(),
-            PairError::NotFound("x".into()).into(),
             ResolveError::NotConnected {
                 side: SideKind::Replica,
                 label: "USB".into(),
