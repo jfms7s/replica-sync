@@ -34,7 +34,10 @@ export type FailReason =
   | { code: 'io'; detail: string };
 export interface StopReason { code: 'cancelled' | 'replicaDisconnected' | 'sourceDisconnected' | 'replicaFull' }
 
-export type MoveKind = { kind: 'file'; size: number; mtime_ns: number } | { kind: 'dir'; files: number; bytes: number };
+export type MoveKind =
+  | { kind: 'file'; size: number; mtime_ns: number }
+  | { kind: 'dir'; files: number; bytes: number }
+  | { kind: 'dirCaseOnly' };
 export type Change =
   | { type: 'create'; path: RelPath; size: number; mtime_ns: number }
   | { type: 'update'; path: RelPath; size: number; mtime_ns: number; replica_newer: boolean }

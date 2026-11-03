@@ -10,6 +10,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Modified times this close count as equal (exFAT/FAT32 store 2-second steps).
 pub const MTIME_TOLERANCE_NS: i64 = 2_000_000_000;
 
+/// Two modified times are the same time: at most [`MTIME_TOLERANCE_NS`] apart.
+pub fn times_match(a: i64, b: i64) -> bool {
+    a.abs_diff(b) <= MTIME_TOLERANCE_NS as u64
+}
+
+/// `a` is later than `b` by more than [`MTIME_TOLERANCE_NS`].
+pub fn newer_beyond_tolerance(a: i64, b: i64) -> bool {
+    a > b.saturating_add(MTIME_TOLERANCE_NS)
+}
+
 /// A path relative to a pair's folder, `/`-separated. The empty path is the folder itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -219,11 +229,13 @@ pub enum MoveKind {
         size: u64,
         mtime_ns: i64,
     },
-    /// `files == 0` is a folder rename that only changes capital letters.
+    /// A folder moved with the files under it (move detection).
     Dir {
         files: u32,
         bytes: u64,
     },
+    /// A folder renamed in place, only changing capital letters (`diff`).
+    DirCaseOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

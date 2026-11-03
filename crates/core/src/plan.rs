@@ -66,7 +66,7 @@ fn is_leftover_delete(c: &Change) -> bool {
 fn rank(c: &Change) -> u8 {
     match c {
         Change::Move {
-            kind: MoveKind::Dir { .. },
+            kind: MoveKind::Dir { .. } | MoveKind::DirCaseOnly,
             ..
         } => 0,
         Change::Move { .. } => 1,

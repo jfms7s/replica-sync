@@ -1,7 +1,7 @@
 //! Turn Delete+Create pairs into renames, and whole moved folders into one rename.
 
 use crate::model::CaseMode;
-use crate::model::{Change, Kind, MTIME_TOLERANCE_NS, MoveKind, RelPath, Snapshot};
+use crate::model::{Change, Kind, MoveKind, RelPath, Snapshot, times_match};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn detect_moves(
@@ -40,9 +40,8 @@ fn pair_file_moves(changes: Vec<Change>) -> Vec<Change> {
             v
         };
         let window = |sorted: &[usize], m: i64| {
-            let t = MTIME_TOLERANCE_NS;
-            let lo = sorted.partition_point(|&i| mtime(i) < m.saturating_sub(t));
-            let hi = sorted.partition_point(|&i| mtime(i) <= m.saturating_add(t));
+            let lo = sorted.partition_point(|&i| mtime(i) < m && !times_match(mtime(i), m));
+            let hi = sorted.partition_point(|&i| mtime(i) <= m || times_match(mtime(i), m));
             lo..hi
         };
         let mut pairs = Vec::new();
