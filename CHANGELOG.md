@@ -4,6 +4,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+## 0.7.0 — 2026-11-03
+
+Supersedes the unpublished 0.6.0 draft (and through it 0.5.1, 0.5.0, 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
+
 ### Added
 - The Trash screen offers "Show in the file manager" for a trash run that holds files its record does not list, so they can be found and copied back by hand (spec §6.5). Only that run's `files` folder is shown; nothing in it is opened or run.
 
