@@ -133,7 +133,12 @@ export default function Trash({ pairId, pairName, back, navigate }: {
                   ))}
                 </ul>
                 {contents.unrecorded.length > 0 && (
-                  <p className="muted">{t('trash.unrecorded')}: {contents.unrecorded.join(', ')}</p>
+                  <p className="muted">
+                    {t('trash.unrecorded')}: {contents.unrecorded.join(', ')}{' '}
+                    <button className="link" onClick={() => { setMessage(null); api.openTrashRun(pairId, r.id).catch(fail); }}>
+                      {t('trash.openFolder')}
+                    </button>
+                  </p>
                 )}
                 <button disabled={busy || picked.size === 0} onClick={() => void restore(r.id, [...picked], false)}>
                   {t('trash.restoreSelected')}

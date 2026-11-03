@@ -759,6 +759,17 @@ impl Session {
         Ok(trash::restore(&root, run, paths, mode)?)
     }
 
+    /// The `files` folder of one trash run, for the file manager (the UI sends
+    /// ids only, never a path).
+    pub fn trash_files_folder(
+        &self,
+        id: &str,
+        run: &str,
+        volumes: &dyn Volumes,
+    ) -> Result<PathBuf, AppError> {
+        Ok(trash::files_dir(&self.replica_of(id, volumes)?, run)?)
+    }
+
     pub fn empty_run(
         &mut self,
         id: &str,
@@ -1215,6 +1226,27 @@ mod tests {
         assert_eq!(report.trash_run.as_deref(), Some("2020-01-01_000000"));
         let run = w.s.finish_apply(job, report).unwrap();
         assert_eq!(run.old_trash_runs, vec!["2019-01-01_000000".to_string()]);
+    }
+
+    #[test]
+    fn the_trash_files_folder_is_found_by_ids_only() {
+        let mut w = world();
+        write(&w.rep(), "old.txt", b"x");
+        w.scan();
+        w.s.confirm_guard().unwrap();
+        let run = w.apply().report.trash_run.expect("the delete made a run");
+        let folder = w.s.trash_files_folder(&w.id, &run, &w.v).unwrap();
+        assert!(folder.ends_with(Path::new(".sync-trash").join(&run).join("files")));
+        assert!(folder.join("old.txt").is_file());
+        assert!(w.s.trash_files_folder(&w.id, "../x", &w.v).is_err());
+        assert!(
+            w.s.trash_files_folder(&w.id, "2020-01-01_000000", &w.v)
+                .is_err()
+        );
+        assert_eq!(
+            w.s.trash_files_folder("nope", &run, &w.v).unwrap_err().code,
+            "pair.notFound"
+        );
     }
 
     #[test]

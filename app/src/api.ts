@@ -117,6 +117,8 @@ export const api = {
   stopAndClose: () => invoke<void>('stop_and_close'),
   trashRuns: (id: string) => invoke<TrashRunInfo[]>('trash_runs', { id }),
   trashContents: (id: string, run: string) => invoke<TrashRunContents>('trash_contents', { id, run }),
+  /** Shows the run's `files` folder in the file manager. */
+  openTrashRun: (id: string, run: string) => invoke<void>('open_trash_run', { id, run }),
   restore: (id: string, run: string, paths: RelPath[], replace: boolean) =>
     invoke<number>('restore', { id, run, paths, replace }),
   emptyRun: (id: string, run: string) => invoke<void>('empty_run', { id, run }),

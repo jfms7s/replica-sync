@@ -519,6 +519,21 @@ fn read_manifest(run: &Path) -> io::Result<Vec<TrashItem>> {
     Ok(items.into_iter().map(|(_, item)| item).collect())
 }
 
+/// The `files` folder of trash run `run_id`, for showing in the file manager:
+/// refused for a bad run id, a missing folder, or a run, `files` or manifest
+/// that is a link (it would show a folder outside the replica).
+pub fn files_dir(replica_root: &Path, run_id: &str) -> io::Result<PathBuf> {
+    let RunPaths { files, .. } = run_paths(replica_root, run_id)?;
+    match fs::symlink_metadata(&files) {
+        Ok(m) if m.is_dir() => Ok(files),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("trash run {run_id} has no files folder"),
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn run_contents(replica_root: &Path, run_id: &str) -> io::Result<TrashRunContents> {
     let RunPaths { run, files, .. } = run_paths(replica_root, run_id)?;
     let present = list_files(&files)?;
@@ -1283,6 +1298,21 @@ mod tests {
         assert_eq!(fs::read(run.join("notes.txt")).unwrap(), b"keep me");
         assert!(run.join(MANIFEST).exists());
     }
+    #[test]
+    fn files_dir_is_the_runs_files_folder_and_refuses_bad_or_unknown_runs() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"one", T0);
+        trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        assert_eq!(
+            files_dir(d.path(), STAMP).unwrap(),
+            d.path().join(TRASH_DIR).join(STAMP).join(FILES_DIR)
+        );
+        let bad = files_dir(d.path(), "../x").unwrap_err();
+        assert_eq!(bad.kind(), io::ErrorKind::InvalidInput);
+        let unknown = files_dir(d.path(), "2020-01-01_000000").unwrap_err();
+        assert_eq!(unknown.kind(), io::ErrorKind::NotFound);
+    }
+
     fn is_run_link_err(e: &io::Error) -> bool {
         e.kind() == io::ErrorKind::InvalidInput && e.to_string().ends_with("is a link")
     }
@@ -1371,6 +1401,7 @@ mod tests {
         ));
         assert!(is_run_link_err(&run_contents(d.path(), STAMP).unwrap_err()));
         assert!(is_run_link_err(&list_runs(d.path()).unwrap_err()));
+        assert!(is_run_link_err(&files_dir(d.path(), STAMP).unwrap_err()));
         assert_eq!(fs::read(outside_secret(o.path())).unwrap(), b"abc");
         assert!(
             o.path()
@@ -1390,6 +1421,7 @@ mod tests {
         let d = replica_with_linked_files(o.path(), |link, target| {
             crate::testutil::junction(link, target)
         });
+        assert!(is_run_link_err(&files_dir(d.path(), STAMP).unwrap_err()));
         assert!(matches!(
             restore(d.path(), STAMP, &[rel("secret.txt")], OnConflict::Refuse),
             Err(RestoreError::Io(e)) if is_run_link_err(&e)

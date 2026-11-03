@@ -156,6 +156,7 @@ pub fn run() {
             commands::trash_runs,
             commands::trash_contents,
             commands::restore,
+            commands::open_trash_run,
             commands::empty_run,
             commands::open_logs_folder,
             commands::open_path,

@@ -4,6 +4,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Added
+- The Trash screen offers "Show in the file manager" for a trash run that holds files its record does not list, so they can be found and copied back by hand (spec §6.5). Only that run's `files` folder is shown; nothing in it is opened or run.
+
 ### Changed
 - A file moved to another folder and renamed only in capital letters (`A.jpg` → `other/a.jpg`) is planned as one move on a backup that ignores capital letters (Windows, exFAT), instead of a delete and a full copy.
 - A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
