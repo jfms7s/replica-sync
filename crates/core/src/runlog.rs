@@ -25,6 +25,11 @@ pub fn human_bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
+    // 1,048,575 B is 1023.999 KB, which rounds to "1024.0 KB": one unit up.
+    if (v * 10.0).round() / 10.0 >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
     format!("{v:.1} {}", UNITS[i])
 }
 
@@ -254,6 +259,8 @@ pub fn write_log(dir: &Path, pair_name: &str, stamp: &str, text: &str) -> io::Re
     }
 }
 
+/// Removes the logs older than `max_age` and returns how many went. An entry
+/// that can't be read or removed is left for the next run; the others still go.
 pub fn prune(dir: &Path, max_age: Duration, now: SystemTime) -> io::Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -261,16 +268,17 @@ pub fn prune(dir: &Path, max_age: Duration, now: SystemTime) -> io::Result<usize
         Err(e) => return Err(e),
     };
     let mut removed = 0;
-    for e in entries {
-        let e = e?;
+    for e in entries.flatten() {
         let old = e
-            .metadata()?
-            .modified()
+            .metadata()
             .ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age > max_age);
-        if old && e.path().extension().is_some_and(|x| x == "log") {
-            fs::remove_file(e.path())?;
+        if old
+            && e.path().extension().is_some_and(|x| x == "log")
+            && fs::remove_file(e.path()).is_ok()
+        {
             removed += 1;
         }
     }
@@ -291,6 +299,9 @@ mod tests {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(1536), "1.5 KB");
         assert_eq!(human_bytes(6_396_000), "6.1 MB");
+        assert_eq!(human_bytes(1_048_575), "1.0 MB");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(u64::MAX), "16777216.0 TB");
     }
 
     #[test]
@@ -387,6 +398,17 @@ mod tests {
         );
         assert!(p.exists() && !old.exists());
         assert_eq!(fs::read_to_string(p).unwrap(), "hello");
+    }
+
+    #[test]
+    fn prune_keeps_going_past_a_log_it_cannot_remove() {
+        let d = tempfile::tempdir().unwrap();
+        // A folder named like a log: `remove_file` fails on it.
+        fs::create_dir(d.path().join("a-stuck.log")).unwrap();
+        let old = write_log(d.path(), "old", "2026-01-01_000000", "x").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(100 * 86_400);
+        assert_eq!(prune(d.path(), LOG_RETENTION, later).unwrap(), 1);
+        assert!(!old.exists() && d.path().join("a-stuck.log").is_dir());
     }
 
     #[test]

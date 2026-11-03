@@ -44,6 +44,9 @@ pub enum ScanError {
     Root { path: PathBuf, source: io::Error },
 }
 
+/// How many names `walk` lists between two looks at the cancel flag.
+const CANCEL_CHECK_EVERY: usize = 1024;
+
 #[derive(Default)]
 struct Collected {
     entries: Mutex<Vec<Entry>>,
@@ -105,16 +108,26 @@ fn walk<'s>(
     };
     let (mut entries, mut problems) = (Vec::new(), Vec::new());
     let (mut leftovers, mut unlisted) = (Vec::new(), Vec::new());
-    for item in read {
+    let mut listing_failed = false;
+    for (n, item) in read.enumerate() {
+        // A folder can hold hundreds of thousands of names: Cancel can't wait
+        // for the whole listing.
+        if n % CANCEL_CHECK_EVERY == CANCEL_CHECK_EVERY - 1 && counters.is_cancelled() {
+            return;
+        }
         let entry = match item {
             Ok(e) => e,
             Err(e) => {
-                // A listing that fails part-way: block the whole folder.
-                problems.push(Problem {
-                    rel: dir.clone(),
-                    kind: ProblemKind::Unreadable,
-                    detail: e.to_string(),
-                });
+                // A listing that fails part-way blocks the whole folder, with
+                // one row however many items failed.
+                if !listing_failed {
+                    listing_failed = true;
+                    problems.push(Problem {
+                        rel: dir.clone(),
+                        kind: ProblemKind::Unreadable,
+                        detail: e.to_string(),
+                    });
+                }
                 continue;
             }
         };
@@ -238,6 +251,28 @@ mod tests {
 
     fn no_rules() -> SkipRules {
         SkipRules::new(&[]).unwrap()
+    }
+
+    #[test]
+    fn cancel_stops_the_listing_of_one_big_folder_part_way() {
+        const N: u64 = 50_000;
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..N {
+            fs::File::create(d.path().join(format!("{i}"))).unwrap();
+        }
+        let c = ScanCounters::default();
+        let r = std::thread::scope(|s| {
+            s.spawn(|| {
+                while c.files.load(Ordering::Relaxed) < 2 * CANCEL_CHECK_EVERY as u64 {
+                    std::hint::spin_loop();
+                }
+                c.cancel();
+            });
+            scan(d.path(), &no_rules(), &c)
+        });
+        assert!(matches!(r, Err(ScanError::Cancelled)));
+        let listed = c.files.load(Ordering::Relaxed);
+        assert!(listed < N, "listed all {listed} files before stopping");
     }
 
     #[test]

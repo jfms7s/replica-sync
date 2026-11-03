@@ -5,9 +5,15 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Changed
+- A file moved to another folder and renamed only in capital letters (`A.jpg` → `other/a.jpg`) is planned as one move on a backup that ignores capital letters (Windows, exFAT), instead of a delete and a full copy.
 - A saved-pairs file written by a newer replica-sync is refused with a clear error instead of being read as if it were this version's format.
 
 ### Fixed
+- Cancel stops a scan quickly even inside one folder with hundreds of thousands of files.
+- A folder whose listing fails part-way shows one problem row, not one per failed item.
+- Sizes just under a unit boundary print as `1.0 MB`, not `1024.0 KB`.
+- Old run logs are still pruned when one of them can't be removed.
+- A failed move into the trash no longer leaves empty folders in that trash run.
 - Changing a pair's folder no longer skips the "one folder inside the other" check when the other drive can't be queried; the error is shown instead.
 
 ## 0.6.0 — 2026-11-02

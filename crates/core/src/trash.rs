@@ -144,30 +144,47 @@ impl TrashWriter {
             e @ SafetyError::Escapes(_) => io::Error::new(io::ErrorKind::InvalidInput, e),
         })?;
         let (_, run_dir, manifest) = self.run.as_mut().expect("opened by move_in");
+        let files_dir = run_dir.join(FILES_DIR);
+        let dest = rel.to_path(&files_dir);
+        let dest_dir = dest.parent().expect("a trashed path is never the root");
+        fs::create_dir_all(dest_dir)?;
         let manifest_path = run_dir.join(MANIFEST);
-        let dest = rel.to_path(&run_dir.join(FILES_DIR));
-        fs::create_dir_all(dest.parent().expect("a trashed path is never the root"))?;
-        if fs::symlink_metadata(&dest).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{rel} is already in trash run {run_dir:?}"),
-            ));
+        let mut attempt = || -> io::Result<()> {
+            if fs::symlink_metadata(&dest).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{rel} is already in trash run {run_dir:?}"),
+                ));
+            }
+            let line = serde_json::to_string(&ManifestLine::Item(TrashItem {
+                path: rel.clone(),
+                size,
+                mtime_ns,
+                reason,
+            }))
+            .map_err(io::Error::other)?;
+            let recorded = manifest.metadata()?.len();
+            fs::rename(&from, &dest)?;
+            if let Err(e) = append_line(manifest, &manifest_path, &line) {
+                // Undo, so a full or failing disk never leaves a trashed file the
+                // manifest does not list (or a torn line that hides later ones).
+                return Err(undo_move(&manifest_path, recorded, &dest, &from, e));
+            }
+            Ok(())
+        };
+        let result = attempt();
+        if result.is_err() {
+            // The folders made for `dest` above, if nothing else is in them.
+            for dir in dest_dir
+                .ancestors()
+                .take_while(|d| *d != files_dir.as_path())
+            {
+                if fs::remove_dir(dir).is_err() {
+                    break;
+                }
+            }
         }
-        let line = serde_json::to_string(&ManifestLine::Item(TrashItem {
-            path: rel.clone(),
-            size,
-            mtime_ns,
-            reason,
-        }))
-        .map_err(io::Error::other)?;
-        let recorded = manifest.metadata()?.len();
-        fs::rename(&from, &dest)?;
-        if let Err(e) = append_line(manifest, &manifest_path, &line) {
-            // Undo, so a full or failing disk never leaves a trashed file the
-            // manifest does not list (or a torn line that hides later ones).
-            return Err(undo_move(&manifest_path, recorded, &dest, &from, e));
-        }
-        Ok(())
+        result
     }
 
     fn open_run(&self) -> io::Result<(String, PathBuf, File)> {
@@ -969,6 +986,21 @@ mod tests {
         );
         assert!(w.run_id().is_none());
         assert!(list_runs(d.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_move_into_an_open_run_leaves_no_empty_folders() {
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "x.txt", b"one", T0);
+        let mut w = trash_one(d.path(), "x.txt", TrashReason::Deleted);
+        let run = d.path().join(TRASH_DIR).join(w.run_id().unwrap());
+        // Nothing at a/b/missing.txt: the rename into the open run fails.
+        assert!(
+            w.move_in(&rel("a/b/missing.txt"), 3, ns(T0), TrashReason::Deleted)
+                .is_err()
+        );
+        assert!(run.join(FILES_DIR).join("x.txt").is_file());
+        assert!(!run.join(FILES_DIR).join("a").exists());
     }
 
     #[test]

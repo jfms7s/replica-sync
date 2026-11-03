@@ -4,7 +4,8 @@
 //! Copies go through a [`Batch`]: each is written to a temp name, a whole batch
 //! is made durable with one flush, and only then are its temps renamed into place
 //! (in plan order). A crash or unplug at any point leaves at most temps, never a
-//! partial file under a real name; the next run's scan removes leftover temps.
+//! partial file under a real name; the next preview lists those temps and plans
+//! each as a delete into the trash.
 
 use crate::model::{Change, MoveKind, RelPath, modified_ns};
 use crate::plan::{ChangeId, Plan, Planned};

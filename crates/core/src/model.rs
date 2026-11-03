@@ -58,12 +58,21 @@ impl RelPath {
     }
 
     /// Appends `name`, which may itself contain `/`-separated components.
+    /// The caller passes valid components (a directory listing's names, or
+    /// another `RelPath`): no empty, `.` or `..` parts. Not checked in release
+    /// builds; debug builds panic.
     pub fn join(&self, name: &str) -> RelPath {
-        if self.0.is_empty() {
+        let joined = if self.0.is_empty() {
             RelPath(name.to_owned())
         } else {
             RelPath(format!("{}/{}", self.0, name))
-        }
+        };
+        debug_assert!(
+            joined.is_root() || RelPath::new(&joined.0).is_ok(),
+            "join made an invalid path {:?}",
+            joined.0
+        );
+        joined
     }
 
     pub fn name(&self) -> &str {
@@ -316,6 +325,13 @@ pub fn modified_ns(md: &fs::Metadata) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "join made an invalid path")]
+    fn join_of_a_dot_dot_component_panics_in_debug_builds() {
+        let _ = super::RelPath::new("a").unwrap().join("..");
+    }
+
     use super::*;
 
     #[test]
