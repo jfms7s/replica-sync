@@ -13,7 +13,7 @@ const summary: PreviewSummary = {
   pairId: 'p1', pairName: 'Photos', totals, selected: totals, selectedCount: 2, actionableCount: 2,
   isEmpty: false, guard: null, guardConfirmed: false, shortfall: null,
   source: { files: 2, bytes: 8, elapsed_ms: 1 }, replica: { files: 0, bytes: 0, elapsed_ms: 1 },
-  warnings: [],
+  warnings: [], replicaIndex: 0, disks: [],
 };
 
 const file = (path: string, tick: NodeView['tick'] = 'on'): NodeView => ({
