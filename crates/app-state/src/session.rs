@@ -1516,6 +1516,38 @@ mod tests {
     }
 
     #[test]
+    fn loading_never_writes_but_a_scan_saves_the_store_as_format_2() {
+        let w = world();
+        let data = w.t.path().join("data");
+        let file = data.join("pairs.json");
+        // The store as a format-1 build left it.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let pair = &mut json["pairs"][0];
+        let disk = pair["replicas"][0].clone();
+        pair["replica"] = disk["side"].clone();
+        pair["last_sync"] = disk["last_sync"].clone();
+        pair["last_scan_files"] = disk["last_scan_files"].clone();
+        pair.as_object_mut().unwrap().remove("replicas");
+        json["version"] = 1.into();
+        let old = serde_json::to_string_pretty(&json).unwrap();
+        fs::write(&file, &old).unwrap();
+
+        let mut s = Session::open(AppPaths::new(data)).unwrap();
+        let id = s.pair_views(&w.v)[0].pair.id.clone();
+        assert_eq!(fs::read_to_string(&file).unwrap(), old, "load alone");
+        // Recording the scan size after a Preview is a save.
+        write(&w.src(), "a.txt", b"a");
+        let job = s.begin_scan(&id, &w.v).unwrap();
+        let r = job.run();
+        s.finish_scan(job, r, &w.v).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(after["version"], 2);
+        assert_eq!(after["pairs"][0]["replicas"][0]["last_scan_files"], 1);
+    }
+
+    #[test]
     fn a_v0_2_0_store_opens_untouched_and_the_first_save_makes_it_format_2() {
         let t = tempfile::tempdir().unwrap();
         let data = t.path().join("data");

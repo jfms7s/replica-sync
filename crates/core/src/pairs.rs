@@ -59,9 +59,12 @@ impl ReplicaSide {
 
     /// Never synced to this disk: the mass-change guard then suspects the
     /// replica folder rather than the source. Another disk having synced does
-    /// not count.
+    /// not count. A record whose time can't be read proves nothing, so it
+    /// counts as never.
     pub fn is_first_sync(&self) -> bool {
-        self.last_sync.is_none()
+        self.last_sync
+            .as_ref()
+            .is_none_or(|l| chrono::DateTime::parse_from_rfc3339(&l.at).is_err())
     }
 }
 
@@ -1277,6 +1280,15 @@ mod tests {
             Err(PairError::LastReplica)
         ));
         assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_last_sync_with_an_unreadable_time_is_still_a_first_sync() {
+        let (_t, _v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("not a time");
+        assert!(p.replicas()[0].is_first_sync());
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-01T10:00:00+00:00");
+        assert!(!p.replicas()[0].is_first_sync());
     }
 
     #[test]
