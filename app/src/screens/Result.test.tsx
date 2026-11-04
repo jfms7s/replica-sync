@@ -9,7 +9,7 @@ import { api } from '../api';
 import Result from './Result';
 
 const run: RunView = {
-  pairId: 'p1', trashDays: 30, logPath: '/logs/x.log', warnings: [], notDone: 0,
+  pairId: 'p1', replicaIndex: 0, trashDays: 30, logPath: '/logs/x.log', warnings: [], notDone: 0,
   oldTrashRuns: ['2026-08-01_090000'],
   report: {
     trash_run: null,
@@ -41,7 +41,7 @@ describe('Result', () => {
     expect(screen.getByText('Por fazer: 4. Sincronize de novo para terminar a cópia.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Tentar de novo as que falharam' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Sincronizar de novo' }));
-    expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos' });
+    expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos', replica: 0 });
   });
 
   it('empties old trash runs only after confirming', async () => {
@@ -50,7 +50,7 @@ describe('Result', () => {
     expect(screen.getByText("Permanently delete the old trash runs (1)? This can't be undone.")).toBeInTheDocument();
     expect(api.emptyRun).not.toHaveBeenCalled();
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty them' }).at(-1)!); // the modal's button
-    expect(api.emptyRun).toHaveBeenCalledWith('p1', '2026-08-01_090000');
+    expect(api.emptyRun).toHaveBeenCalledWith('p1', 0, '2026-08-01_090000');
   });
 
   it('a_partial_empty_failure_keeps_only_the_runs_not_yet_emptied', async () => {

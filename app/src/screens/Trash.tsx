@@ -7,8 +7,8 @@ import { useT } from '../i18n';
 import { errorText, isAppError } from '../reasons';
 
 /** `back` is where Back goes (the Preview when opened from it); the pairs list by default. */
-export default function Trash({ pairId, pairName, back, navigate }: {
-  pairId: string; pairName: string; back?: Screen; navigate: Navigate;
+export default function Trash({ pairId, pairName, replica, diskName, back, navigate }: {
+  pairId: string; pairName: string; replica?: number; diskName?: string; back?: Screen; navigate: Navigate;
 }) {
   const { t, tx, lang } = useT();
   const [runs, setRuns] = useState<TrashRunInfo[] | null>(null);
@@ -22,8 +22,8 @@ export default function Trash({ pairId, pairName, back, navigate }: {
 
   const fail = useCallback((e: unknown) => setMessage(errorText(tx, lang, e)), [tx, lang]);
   const loadRuns = useCallback(() => {
-    api.trashRuns(pairId).then(setRuns).catch(fail);
-  }, [pairId, fail]);
+    api.trashRuns(pairId, replica).then(setRuns).catch(fail);
+  }, [pairId, replica, fail]);
   useEffect(loadRuns, [loadRuns]);
 
   const expand = async (run: string) => {
@@ -34,7 +34,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
     }
     setBusy(true);
     try {
-      setContents(await api.trashContents(pairId, run));
+      setContents(await api.trashContents(pairId, replica, run));
       setOpen(run);
       setPicked(new Set());
     } catch (e) {
@@ -49,7 +49,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
     setMessage(null);
     setBusy(true);
     try {
-      const n = await api.restore(pairId, run, paths, replace);
+      const n = await api.restore(pairId, replica, run, paths, replace);
       setMessage(t('trash.restored', { count: n }));
       setOpen(null);
       loadRuns();
@@ -65,7 +65,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
     setMessage(null);
     setBusy(true); // `restore` keeps it set until it is done: no flicker in between
     try {
-      const c = await api.trashContents(pairId, run);
+      const c = await api.trashContents(pairId, replica, run);
       if (c.items.length === 0) {
         setMessage(t('trash.nothingRecorded'));
         setBusy(false);
@@ -83,7 +83,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
     setMessage(null);
     setBusy(true);
     try {
-      await api.emptyRun(pairId, run.id);
+      await api.emptyRun(pairId, replica, run.id);
       if (open === run.id) setOpen(null);
       loadRuns();
     } catch (e) {
@@ -95,7 +95,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
 
   return (
     <main className="screen">
-      <h1>{t('trash.title', { name: pairName })}</h1>
+      <h1>{t('trash.title', { name: pairName })}{diskName && <span className="muted"> · {diskName}</span>}</h1>
       {message && <p role="status">{message}</p>}
       {runs === null ? (
         <p className="muted">{t('common.loading')}</p>
@@ -135,7 +135,7 @@ export default function Trash({ pairId, pairName, back, navigate }: {
                 {contents.unrecorded.length > 0 && (
                   <p className="muted">
                     {t('trash.unrecorded')}: {contents.unrecorded.join(', ')}{' '}
-                    <button className="link" onClick={() => { setMessage(null); api.openTrashRun(pairId, r.id).catch(fail); }}>
+                    <button className="link" onClick={() => { setMessage(null); api.openTrashRun(pairId, replica, r.id).catch(fail); }}>
                       {t('trash.openFolder')}
                     </button>
                   </p>

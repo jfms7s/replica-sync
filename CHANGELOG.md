@@ -4,10 +4,11 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Added
+- Rotating backup disks: a pair can have a second backup disk (Disk A and Disk B), for example one at home and one at a relative's. The Pairs card shows each disk's last sync and whether it is connected (a disk that is away is normal, not a warning). Sync goes to the plugged-in disk; with both plugged in it goes to the one synced longest ago (a never-synced disk counts as the oldest), and the Sync button and the Preview header name it. The Preview offers the other disk, which rescans against it. Each disk has its own last sync and its own first-sync wrong-folder check, and the Trash screen is per disk. The pair editor adds, removes and re-links a disk, with a note that one disk beside the PC does not survive theft, fire or ransomware.
+
 ### Changed
-- App state: a pair's backup disks are chosen per scan. Sync goes to the plugged-in disk, and with both plugged in to the one synced longest ago (a never-synced disk counts as the oldest); the Preview data names the target and both disks so the other can be picked. A sync records only its own disk's last sync and scan size, and the Trash follows the disk it was asked for. New commands add, remove and relink a disk; the screens for them come next. The one-way store change below applies.
-- Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk.
-- **One-way store change:** the next save writes `pairs.json` as format 2 (`version: 2`, a `replicas` list). An existing store is read as before and is not touched until something is saved, but a replica-sync older than this change shows its Broken screen on a format 2 file (without overwriting it). Keep the file from before the upgrade if you may go back.
+- **One-way store change:** the next save writes `pairs.json` as format 2 (`version: 2`, each pair with a `replicas` list holding its disks' own history). An existing store is read as before, forever, and is not touched until something is saved, so an upgraded app that changes nothing leaves the file byte for byte as it was. But a replica-sync older than this change shows its Broken screen on a format 2 file (it does not overwrite it). There is no downgrade path: keep a copy of `pairs.json` from before the upgrade if you may go back.
 
 ## 0.7.0 — 2026-11-03
 

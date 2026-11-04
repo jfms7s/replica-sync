@@ -206,5 +206,24 @@
   "error.apply.nothingToRetry": "Nothing failed, so there's nothing to retry.",
   "error.apply.nothingSelected": "Nothing is selected to apply.",
   "error.store.unreadable": "Can't read the saved pairs at {path}: {detail}",
-  "error.io": "Disk error: {detail}"
+  "error.io": "Disk error: {detail}",
+
+  "disk.name": "Disk {letter}",
+  "pairs.syncTo": "Sync to {disk}",
+  "pairs.trashDisk": "Trash ({disk})",
+  "pairs.diskConnected": "connected",
+  "pairs.diskAway": "away",
+  "pairs.diskLine": "{disk}: {label} › {path}",
+  "pairs.noDiskConnected": "⚠ None of the backup disks is connected.",
+  "pairs.relinkDisk": "Re-link {disk}",
+  "editor.advice": "One disk beside the PC survives a disk failure, not theft, fire or ransomware. Keep a second one at a relative's house and swap them.",
+  "editor.diskFolder": "{disk}: backup folder",
+  "editor.addDisk": "Add a second backup disk",
+  "editor.removeDisk": "Remove {disk}",
+  "editor.removeDiskBody": "Remove {disk} ({label}) from this pair? Its sync history is forgotten. The files on the disk are not touched.",
+  "editor.removeDiskConfirm": "Remove disk",
+  "preview.target": "Syncing to {disk} ({label})",
+  "preview.switchDisk": "Use {disk} instead",
+  "preview.otherAway": "{disk} is away.",
+  "trash.disk": "{disk} ({label})"
 }

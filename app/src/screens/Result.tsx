@@ -26,7 +26,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
     setConfirmEmpty(false);
     try {
       for (const id of oldRuns) {
-        await api.emptyRun(run.pairId, id);
+        await api.emptyRun(run.pairId, run.replicaIndex, id);
         setOldRuns((rest) => rest.filter((r) => r !== id));
       }
     } catch (e) {
@@ -62,7 +62,7 @@ export default function Result({ run, pairName, navigate }: { run: RunView; pair
         <div className="row">
           {report.stopped ? (
             // A stopped run left approved changes undone; retrying only the failures would hide them.
-            <button onClick={() => navigate({ name: 'scanning', pairId: run.pairId, pairName })}>{t('result.syncAgain')}</button>
+            <button onClick={() => navigate({ name: 'scanning', pairId: run.pairId, pairName, replica: run.replicaIndex })}>{t('result.syncAgain')}</button>
           ) : failed.length > 0 && (
             <button onClick={() => navigate({ name: 'applying', mode: 'retry', pairName })}>{t('result.retry')}</button>
           )}

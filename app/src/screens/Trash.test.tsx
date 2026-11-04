@@ -32,10 +32,10 @@ describe('Trash', () => {
     expect(await screen.findByText(/Unrecorded/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('checkbox', { name: 'a.txt' }));
     await userEvent.click(screen.getByRole('button', { name: 'Restore selected' }));
-    expect(api.restore).toHaveBeenLastCalledWith('p1', runId, ['a.txt'], false);
+    expect(api.restore).toHaveBeenLastCalledWith('p1', undefined, runId, ['a.txt'], false);
     expect(await screen.findByRole('dialog', { name: 'Something is in the way' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Replace' }));
-    expect(api.restore).toHaveBeenLastCalledWith('p1', runId, ['a.txt'], true);
+    expect(api.restore).toHaveBeenLastCalledWith('p1', undefined, runId, ['a.txt'], true);
     expect(await screen.findByText('Restored: 1')).toBeInTheDocument();
   });
 
@@ -45,7 +45,7 @@ describe('Trash', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Empty' }));
     expect(api.emptyRun).not.toHaveBeenCalled();
     await userEvent.click(screen.getAllByRole('button', { name: 'Empty' }).at(-1)!);
-    expect(api.emptyRun).toHaveBeenCalledWith('p1', runId);
+    expect(api.emptyRun).toHaveBeenCalledWith('p1', undefined, runId);
   });
 
   it('goes back to the pairs list by default', async () => {
@@ -53,6 +53,19 @@ describe('Trash', () => {
     render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={navigate} /></I18nProvider>);
     await userEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'pairs' });
+  });
+
+  it('reads, restores and empties the trash of the disk it was opened for, and names it', async () => {
+    vi.mocked(api.restore).mockResolvedValue(1);
+    vi.mocked(api.emptyRun).mockResolvedValue(undefined as never);
+    render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" replica={1} diskName="Disk B (RELATIVE)" navigate={vi.fn()} /></I18nProvider>);
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Disk B (RELATIVE)');
+    expect(api.trashRuns).toHaveBeenCalledWith('p1', 1);
+    await userEvent.click(await screen.findByRole('button', { name: /2 files/ }));
+    expect(api.trashContents).toHaveBeenCalledWith('p1', 1, runId);
+    await userEvent.click(screen.getByRole('checkbox', { name: 'a.txt' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Restore selected' }));
+    expect(api.restore).toHaveBeenCalledWith('p1', 1, runId, ['a.txt'], false);
   });
 
   it('goes back to the screen it was opened from', async () => {
@@ -75,7 +88,7 @@ describe('Trash', () => {
     vi.mocked(api.restore).mockResolvedValue(1);
     render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
     await userEvent.click(await screen.findByRole('button', { name: 'Restore all' }));
-    expect(api.restore).toHaveBeenCalledWith('p1', runId, ['a.txt'], false);
+    expect(api.restore).toHaveBeenCalledWith('p1', undefined, runId, ['a.txt'], false);
   });
 
   it('cancelling the replace dialog restores nothing more', async () => {
@@ -113,7 +126,7 @@ describe('Trash', () => {
     render(<I18nProvider lang="en"><Trash pairId="p1" pairName="Photos" navigate={vi.fn()} /></I18nProvider>);
     await userEvent.click(await screen.findByRole('button', { name: /2 files/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Show in the file manager' }));
-    expect(api.openTrashRun).toHaveBeenCalledWith('p1', runId);
+    expect(api.openTrashRun).toHaveBeenCalledWith('p1', undefined, runId);
   });
 
   it('shows no folder button for a run with every file recorded', async () => {

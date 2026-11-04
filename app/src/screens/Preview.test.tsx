@@ -16,6 +16,7 @@ const base: PreviewSummary = {
   pairId: 'p1', pairName: 'Photos', totals, selected: totals, selectedCount: 5, actionableCount: 5,
   isEmpty: false, guard: null, guardConfirmed: false, shortfall: null,
   source: { files: 10, bytes: 100, elapsed_ms: 1500 }, replica: { files: 8, bytes: 80, elapsed_ms: 1200 },
+  replicaIndex: 0, disks: [],
   warnings: [],
 };
 
@@ -112,7 +113,45 @@ describe('Preview', () => {
     render(<I18nProvider lang="en"><Preview summary={short} navigate={navigate} /></I18nProvider>);
     await userEvent.click(screen.getByRole('button', { name: 'Open trash' }));
     expect(navigate).toHaveBeenCalledWith({
-      name: 'trash', pairId: 'p1', pairName: 'Photos', back: { name: 'preview', summary: short },
+      name: 'trash', pairId: 'p1', pairName: 'Photos', replica: 0, back: { name: 'preview', summary: short },
+    });
+  });
+
+  describe('with two backup disks', () => {
+    const side = (label: string) => ({ volume_id: label, rel_path: 'Backup', label });
+    const disk = (index: number, label: string, connected: boolean) => ({
+      index, side: side(label), connected, lastSync: null, lastScanFiles: null,
+    });
+    const two = (replicaIndex: number, otherConnected: boolean) => ({
+      ...base, replicaIndex, disks: [disk(0, 'HOME', replicaIndex === 0 || otherConnected), disk(1, 'RELATIVE', replicaIndex === 1 || otherConnected)],
+    });
+
+    it('names the disk Apply writes to and lets the other one be picked', async () => {
+      const navigate = vi.fn();
+      render(<I18nProvider lang="en"><Preview summary={two(1, true)} navigate={navigate} /></I18nProvider>);
+      expect(screen.getByText('Syncing to Disk B (RELATIVE)')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Use Disk A instead' }));
+      expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos', replica: 0 });
+    });
+
+    it('says the other disk is away instead of offering it', () => {
+      render(<I18nProvider lang="en"><Preview summary={two(0, false)} navigate={vi.fn()} /></I18nProvider>);
+      expect(screen.getByText('Syncing to Disk A (HOME)')).toBeInTheDocument();
+      expect(screen.getByText('Disk B is away.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /instead/ })).not.toBeInTheDocument();
+    });
+
+    it('opens the trash of the disk it is syncing to', async () => {
+      const navigate = vi.fn();
+      const short = { ...two(1, true), shortfall: 1048576 };
+      render(<I18nProvider lang="en"><Preview summary={short} navigate={navigate} /></I18nProvider>);
+      await userEvent.click(screen.getByRole('button', { name: 'Open trash' }));
+      expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ name: 'trash', replica: 1, diskName: 'Disk B (RELATIVE)' }));
+    });
+
+    it('shows nothing about disks for a single-disk pair', () => {
+      render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
+      expect(screen.queryByText(/Syncing to/)).not.toBeInTheDocument();
     });
   });
 

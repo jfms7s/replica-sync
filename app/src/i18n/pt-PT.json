@@ -206,5 +206,24 @@
   "error.apply.nothingToRetry": "Nada falhou, por isso não há nada para tentar de novo.",
   "error.apply.nothingSelected": "Não há nada selecionado para aplicar.",
   "error.store.unreadable": "Não é possível ler os pares guardados em {path}: {detail}",
-  "error.io": "Erro do disco: {detail}"
+  "error.io": "Erro do disco: {detail}",
+
+  "disk.name": "Disco {letter}",
+  "pairs.syncTo": "Sincronizar para {disk}",
+  "pairs.trashDisk": "Lixo ({disk})",
+  "pairs.diskConnected": "ligado",
+  "pairs.diskAway": "ausente",
+  "pairs.diskLine": "{disk}: {label} › {path}",
+  "pairs.noDiskConnected": "⚠ Nenhum dos discos de cópia está ligado.",
+  "pairs.relinkDisk": "Religar {disk}",
+  "editor.advice": "Um disco ao lado do PC sobrevive a uma avaria do disco, mas não a um roubo, a um incêndio ou a ransomware. Guarde um segundo em casa de um familiar e troque-os.",
+  "editor.diskFolder": "{disk}: pasta da cópia de segurança",
+  "editor.addDisk": "Adicionar um segundo disco de cópia",
+  "editor.removeDisk": "Remover {disk}",
+  "editor.removeDiskBody": "Remover {disk} ({label}) deste par? O histórico de sincronizações dele é esquecido. Os ficheiros no disco não são tocados.",
+  "editor.removeDiskConfirm": "Remover disco",
+  "preview.target": "A sincronizar para {disk} ({label})",
+  "preview.switchDisk": "Usar {disk} em vez disso",
+  "preview.otherAway": "{disk} está ausente.",
+  "trash.disk": "{disk} ({label})"
 }

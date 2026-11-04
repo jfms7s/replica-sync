@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { Navigate } from '../App';
-import { api, pickFolder, type PairView } from '../api';
+import { api, pickFolder, type Pair, type PairView } from '../api';
+import { diskName } from '../disks';
 import { useT } from '../i18n';
 import Modal from '../components/Modal';
 import { errorText, isAppError } from '../reasons';
@@ -8,10 +9,16 @@ import { MAX_TRASH_DAYS, parseTrashDays } from '../trashDays';
 
 export default function PairEditor({ pair, navigate }: { pair: PairView | null; navigate: Navigate }) {
   const { t, tx, lang } = useT();
-  const existing = pair?.pair ?? null;
+  // The saved pair: given, or the one this editor has saved (the save below is
+  // several steps, so a later one that fails leaves the earlier ones done).
+  const [existing, setExisting] = useState<Pair | null>(pair?.pair ?? null);
   const [name, setName] = useState(existing?.name ?? '');
   const [source, setSource] = useState<string | null>(null);
   const [replica, setReplica] = useState<string | null>(null);
+  // The second backup disk: its folder when one was chosen, and whether its field is open.
+  const [second, setSecond] = useState<string | null>(null);
+  const [addingSecond, setAddingSecond] = useState(false);
+  const [removing, setRemoving] = useState<number | null>(null);
   const [rules, setRules] = useState((existing?.user_rules ?? []).join('\n'));
   const [trashDays, setTrashDays] = useState(String(existing?.trash_days ?? 30));
   const [sameVolumeOk, setSameVolumeOk] = useState(false);
@@ -47,7 +54,7 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
     if (days === null) return;
     setError(null);
     try {
-      await api.savePair({
+      const saved = await api.savePair({
         id: existing?.id ?? null,
         name,
         source,
@@ -56,6 +63,17 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
         trashDays: days,
         allowSameVolume: sameVolumeOk,
       });
+      // Done: a retry after a failure below must not send these folders again.
+      setExisting(saved);
+      setSource(null);
+      setReplica(null);
+      if (second) {
+        const withSecond = saved.replicas.length > 1
+          ? await api.relinkReplica(saved.id, 1, second, sameVolumeOk)
+          : await api.addReplica(saved.id, second, sameVolumeOk);
+        setExisting(withSecond);
+        setSecond(null);
+      }
       navigate({ name: 'pairs' });
     } catch (e) {
       if (isAppError(e) && e.code === 'pair.sameVolume') setAskSameVolume(true);
@@ -73,11 +91,25 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
     }
   };
 
-  const folderField = (label: string, value: string | null, set: (v: string) => void, current: string | null) => (
-    <div className="panel">
+  const removeDisk = async (index: number) => {
+    if (!existing) return;
+    setRemoving(null);
+    try {
+      setExisting(await api.removeReplica(existing.id, index));
+      setSecond(null);
+      setAddingSecond(false);
+      setError(null);
+    } catch (e) {
+      setError(errorText(tx, lang, e));
+    }
+  };
+
+  const folderField = (label: string, value: string | null, set: (v: string) => void, current: string | null, extra?: ReactNode) => (
+    <div className="panel" key={label}>
       <span>{label}</span>
       <div className="row">
         <span className="muted">{value ?? current ?? t('editor.notChosen')}</span>
+        {extra}
         <button onClick={async () => {
           try {
             const f = await pickFolder(label);
@@ -86,11 +118,19 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
             setError(errorText(tx, lang, e));
           }
         }}>
-          {existing ? t('editor.change') : t('common.browse')}
+          {current ? t('editor.change') : t('common.browse')}
         </button>
       </div>
     </div>
   );
+
+  // Two backup disks (named Disk A and Disk B), or one that may get a second.
+  const rotating = (existing?.replicas.length ?? 1) > 1 || addingSecond;
+  const disks = rotating ? [0, 1] : [0];
+  const currentOf = (slot: number) => {
+    const side = existing?.replicas[slot]?.side;
+    return side ? t('editor.current', { label: side.label, path: side.rel_path || '/' }) : null;
+  };
 
   return (
     <main className="screen">
@@ -101,8 +141,22 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
       </label>
       {folderField(t('editor.source'), source, pickedFolder(setSource),
         existing ? t('editor.current', { label: existing.source.label, path: existing.source.rel_path || '/' }) : null)}
-      {folderField(t('editor.replica'), replica, pickedFolder(setReplica),
-        existing ? t('editor.current', { label: existing.replica.label, path: existing.replica.rel_path || '/' }) : null)}
+      {disks.map((slot) => folderField(
+        rotating ? t('editor.diskFolder', { disk: diskName(t, slot) }) : t('editor.replica'),
+        slot === 0 ? replica : second,
+        pickedFolder(slot === 0 ? setReplica : setSecond),
+        currentOf(slot),
+        <>
+          {existing && existing.replicas.length > 1 && (
+            <button onClick={() => setRemoving(slot)}>{t('editor.removeDisk', { disk: diskName(t, slot) })}</button>
+          )}
+          {slot === 1 && addingSecond && existing?.replicas.length === 1 && (
+            <button onClick={() => { setAddingSecond(false); setSecond(null); }}>{t('common.cancel')}</button>
+          )}
+        </>,
+      ))}
+      {!rotating && <button onClick={() => setAddingSecond(true)}>{t('editor.addDisk')}</button>}
+      <p className="muted">{t('editor.advice')}</p>
       <label>
         {t('editor.rules')}
         <textarea rows={4} value={rules} onChange={(e) => setRules(e.target.value)} />
@@ -129,6 +183,18 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
           <button className="primary" disabled={!daysValid} onClick={() => void save()}>{t('common.save')}</button>
         </div>
       </div>
+      {removing !== null && existing?.replicas[removing] && (
+        <Modal
+          onClose={() => setRemoving(null)}
+          title={t('editor.removeDisk', { disk: diskName(t, removing) })}
+          actions={<>
+            <button onClick={() => setRemoving(null)}>{t('common.cancel')}</button>
+            <button className="primary" onClick={() => void removeDisk(removing)}>{t('editor.removeDiskConfirm')}</button>
+          </>}
+        >
+          {t('editor.removeDiskBody', { disk: diskName(t, removing), label: existing.replicas[removing].side.label })}
+        </Modal>
+      )}
       {confirmDelete && existing && (
         <Modal
           onClose={() => setConfirmDelete(false)}

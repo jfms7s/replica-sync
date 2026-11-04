@@ -5,7 +5,9 @@ import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText, isAppError } from '../reasons';
 
-export default function Scanning({ pairId, pairName, navigate }: { pairId: string; pairName: string; navigate: Navigate }) {
+export default function Scanning({ pairId, pairName, replica, navigate }: {
+  pairId: string; pairName: string; replica?: number; navigate: Navigate;
+}) {
   const { t, tx, lang } = useT();
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [error, setError] = useState<AppError | null>(null);
@@ -26,7 +28,7 @@ export default function Scanning({ pairId, pairName, navigate }: { pairId: strin
       offs.push(offDone);
       if (!alive) return offDone();
       try {
-        await api.startScan(pairId); // only after both listeners are in place
+        await api.startScan(pairId, replica); // only after both listeners are in place
       } catch (e) {
         if (!alive) return;
         // Cancelled before it started: like a cancelled scan, back to the list.
@@ -38,7 +40,7 @@ export default function Scanning({ pairId, pairName, navigate }: { pairId: strin
       alive = false;
       offs.forEach((off) => off());
     };
-  }, [pairId, navigate]);
+  }, [pairId, replica, navigate]);
 
   const side = (label: string, p: ScanProgress['source'] | undefined) => (
     <div className="panel">
