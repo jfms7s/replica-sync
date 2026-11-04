@@ -5,8 +5,8 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Changed
-- Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk.
-- **One-way store change:** the next save writes `pairs.json` as format 2 (`version: 2`, a `replicas` list). An existing store is read as before and is not touched until something is saved, but a replica-sync older than this change shows its Broken screen on a format 2 file (without overwriting it). Keep the file from before the upgrade if you may go back.
+- Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk. Re-linking the source resets the history of every disk, so each takes the first-sync wrong-folder check again.
+- **One-way store change:** an existing `pairs.json` is read as before and loading never writes it. But any save writes it as format 2 (`version: 2`, a `replicas` list): editing a pair, finishing a sync, and also recording the scan size after a Preview. A replica-sync older than this change shows its Broken screen on a format 2 file (it does not overwrite it). Keep a copy of the file from before the upgrade if you may go back.
 
 ## 0.7.0 — 2026-11-03
 
