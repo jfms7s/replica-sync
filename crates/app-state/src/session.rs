@@ -1387,6 +1387,7 @@ mod tests {
         assert_eq!(n, 1);
         assert!(w.rep_c().join("gone.txt").exists());
         assert!(!w.rep().join("gone.txt").exists());
+    }
 
     /// 2,500 files in one folder (past the 2,000-row cap); `IMG_2400.jpg` is 7 bytes, the rest 1.
     fn world_with_a_huge_folder() -> (World, PreviewSummary) {
