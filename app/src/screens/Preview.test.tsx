@@ -5,7 +5,7 @@ import { I18nProvider } from '../i18n';
 import type { PreviewSummary } from '../api';
 
 vi.mock('../api', () => ({
-  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), deleteFolders: vi.fn(), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
+  api: { previewSummary: vi.fn(), treeChildren: vi.fn().mockResolvedValue({ nodes: [], total: 0 }), treeFind: vi.fn(), deleteFolders: vi.fn(), toggle: vi.fn(), selectAll: vi.fn(), confirmWrongFolder: vi.fn(), savePreview: vi.fn() },
   pickSaveFile: vi.fn(),
 }));
 import { api, pickSaveFile } from '../api';
@@ -71,7 +71,7 @@ describe('Preview', () => {
     render(<I18nProvider lang="en"><Preview summary={{ ...base, isEmpty: true, totals: skippedOnly }} navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByText('Already in sync. Nothing to do.')).toBeInTheDocument();
     expect(screen.getByRole('tree')).toBeInTheDocument();
-    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith(''));
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('', 'name'));
   });
 
   it('applies the selection', async () => {
@@ -89,7 +89,7 @@ describe('Preview', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Approve all' }));
     expect(api.selectAll).toHaveBeenCalledWith(true);
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(2));
-    expect(api.treeChildren).toHaveBeenLastCalledWith('');
+    expect(api.treeChildren).toHaveBeenLastCalledWith('', 'name');
   });
 
   it('refreshes the summary on mount so space freed in the trash shows', async () => {
@@ -172,5 +172,23 @@ describe('Preview', () => {
     render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
     await userEvent.click(screen.getByRole('button', { name: 'Save preview' }));
     expect(await screen.findByText(/no dialog/)).toBeInTheDocument();
+  });
+
+  it('ticking a find result toggles that path, updates the totals and refreshes the tree', async () => {
+    const node = {
+      name: 'IMG_2400.jpg', path: 'shots/IMG_2400.jpg', isFolder: false, tick: 'on' as const, bytesToCopy: 7,
+      counts: { create: 1, update: 0, delete: 0, moves: 0, folders: 0, skipped: 0 },
+      changes: [{ id: 1, change: { type: 'create' as const, path: 'shots/IMG_2400.jpg', size: 7, mtime_ns: 0 } }],
+    };
+    vi.mocked(api.treeFind).mockResolvedValue({ nodes: [node], totalMatches: 1 });
+    vi.mocked(api.toggle).mockResolvedValue({ ...base, selectedCount: 4 });
+    render(<I18nProvider lang="en"><Preview summary={base} navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(1));
+    await userEvent.type(screen.getByRole('searchbox'), 'img_2400');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'shots/IMG_2400.jpg' }));
+    expect(api.toggle).toHaveBeenCalledWith('shots/IMG_2400.jpg');
+    expect(api.selectAll).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(screen.getByText(/4 of 5/)).toBeInTheDocument());
   });
 });

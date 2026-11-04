@@ -1,17 +1,23 @@
 import type { Change } from '../api';
-import type { Key, Params } from '../i18n';
+import { formatBytes, formatDay } from '../format';
+import type { Key, Lang, Params } from '../i18n';
 import { skipText } from '../reasons';
 
 type T = (key: Key, params?: Params) => string;
 type Tx = (key: string, params?: Params) => string;
 
 /** One line explaining a change row, e.g. "source is newer" or "moved from Old/Trip". */
-export function changeDetail(t: T, tx: Tx, c: Change): string {
+export function changeDetail(t: T, tx: Tx, lang: Lang, c: Change): string {
   switch (c.type) {
     case 'create':
       return '';
     case 'update':
-      return c.replica_newer ? t('detail.replicaNewer') : t('detail.sourceNewer');
+      return t(c.replica_newer ? 'detail.replicaNewer' : 'detail.sourceNewer', {
+        from: formatDay(lang, c.replica_mtime_ns),
+        to: formatDay(lang, c.mtime_ns),
+        fromSize: formatBytes(lang, c.replica_size),
+        toSize: formatBytes(lang, c.size),
+      });
     case 'delete':
       return t('detail.notOnSource');
     case 'move': {

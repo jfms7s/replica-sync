@@ -6,6 +6,7 @@ import { diskName } from '../disks';
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
+import Find from './Find';
 import Tree from './Tree';
 
 /** "Show them" opens at most this many folders, so a huge delete can't freeze the window. */
@@ -100,6 +101,7 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
               </button>
             </p>
           )}
+          <Find summary={s} onToggled={(next) => { update(next); setRefreshToken((n) => n + 1); }} />
           <Tree onSummary={update} expandRequest={expandRequest} refreshToken={refreshToken} />
         </>
       )}
