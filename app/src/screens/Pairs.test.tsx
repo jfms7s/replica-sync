@@ -150,12 +150,12 @@ describe('Pairs', () => {
       expect(card.querySelector('.warn')).toBeNull();
     });
 
-    it('names the due disk on the Sync button and starts the scan without choosing', async () => {
+    it('names the due disk on the Sync button and starts the scan for the disk the button names', async () => {
       vi.mocked(api.listPairs).mockResolvedValue([view({ dueReplica: 1 }, [home, relative])]);
       const navigate = vi.fn();
       render(<I18nProvider lang="en"><Pairs navigate={navigate} /></I18nProvider>);
       await userEvent.click(await screen.findByRole('button', { name: 'Sync to Disk B' }));
-      expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos' });
+      expect(navigate).toHaveBeenCalledWith({ name: 'scanning', pairId: 'p1', pairName: 'Photos', replica: 1 });
     });
 
     it('syncs to the disk that is plugged in, and warns only when none is', async () => {

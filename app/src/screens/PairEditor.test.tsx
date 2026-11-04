@@ -218,6 +218,21 @@ describe('PairEditor', () => {
       expect(screen.queryByRole('button', { name: /Remove Disk/ })).not.toBeInTheDocument();
     });
 
+    it('forgets a folder picked before a disk was removed, so the survivor is not re-linked to it', async () => {
+      vi.mocked(pickFolder).mockResolvedValue('/media/stale');
+      vi.mocked(api.removeReplica).mockResolvedValue(savedPair(['RELATIVE']) as never);
+      vi.mocked(api.savePair).mockResolvedValue(savedPair(['RELATIVE']) as never);
+      render(<I18nProvider lang="en"><PairEditor pair={twoDisks} navigate={vi.fn()} /></I18nProvider>);
+      const fieldA = screen.getByText('Disk A: backup folder').closest('.panel') as HTMLElement;
+      await userEvent.click(within(fieldA).getByRole('button', { name: 'Change…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Disk A' }));
+      await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove disk' }));
+      await screen.findByText('Backup folder');
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      expect(api.savePair).toHaveBeenCalledWith(expect.objectContaining({ replica: null }));
+      expect(api.relinkReplica).not.toHaveBeenCalled();
+    });
+
     it('offers no removal while the pair has one disk', () => {
       render(<I18nProvider lang="en"><PairEditor pair={existing} navigate={vi.fn()} /></I18nProvider>);
       expect(screen.queryByRole('button', { name: /Remove Disk/ })).not.toBeInTheDocument();

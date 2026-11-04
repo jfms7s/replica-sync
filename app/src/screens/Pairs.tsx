@@ -84,7 +84,11 @@ export default function Pairs({ navigate }: { navigate: Navigate }) {
                 <div className="row spread">
                   <h2>{pair.name}</h2>
                   <div className="row">
-                    <button className="primary" disabled={!ok} onClick={() => navigate({ name: 'scanning', pairId: pair.id, pairName: pair.name })}>
+                    <button className="primary" disabled={!ok} onClick={() => navigate({
+                      name: 'scanning', pairId: pair.id, pairName: pair.name,
+                      // The disk the button names, not whichever is due by the time it is clicked.
+                      ...(rotating ? { replica: v.dueReplica } : {}),
+                    })}>
                       {rotating ? t('pairs.syncTo', { disk: diskName(t, v.dueReplica) }) : t('pairs.sync')}
                     </button>
                     <button onClick={() => navigate({ name: 'editor', pair: v })}>{t('pairs.edit')}</button>

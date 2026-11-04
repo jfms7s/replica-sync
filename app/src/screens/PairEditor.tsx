@@ -96,8 +96,12 @@ export default function PairEditor({ pair, navigate }: { pair: PairView | null; 
     setRemoving(null);
     try {
       setExisting(await api.removeReplica(existing.id, index));
+      // The slots shift: a folder picked for one now belongs to another disk.
+      setReplica(null);
       setSecond(null);
       setAddingSecond(false);
+      setSameVolumeOk(false);
+      setAskSameVolume(false);
       setError(null);
     } catch (e) {
       setError(errorText(tx, lang, e));
