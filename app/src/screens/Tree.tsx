@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { api, type ChildrenPage, type NodeView, type PreviewSummary } from '../api';
+import { api, type ChildrenPage, type NodeView, type PreviewSummary, type SortOrder } from '../api';
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
@@ -42,16 +42,24 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   expandedRef.current = expanded;
   const childrenRef = useRef(children);
   childrenRef.current = children;
+  /** Each folder's sort order, for this session only; a folder not listed is by name. */
+  const [orders, setOrders] = useState<Map<string, SortOrder>>(new Map());
+  const ordersRef = useRef(orders);
+  ordersRef.current = orders;
+  const fetchPage = useCallback(
+    async (p: string) => [p, await api.treeChildren(p, ordersRef.current.get(p) ?? 'name')] as const,
+    [],
+  );
 
   const load = useCallback(async (paths: string[]) => {
-    const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
+    const loaded = await Promise.all(paths.map(fetchPage));
     setChildren((prev) => {
       const next = new Map(prev);
       for (const [p, nodes] of loaded) next.set(p, nodes);
       return next;
     });
     return loaded;
-  }, []);
+  }, [fetchPage]);
 
   useEffect(() => {
     load(['']).catch((e) => setError(errorText(tx, lang, e)));
@@ -92,14 +100,14 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   const refresh = useCallback(async () => {
     const paths = ['', ...expandedRef.current];
     const before = [...childrenRef.current.keys()];
-    const loaded = await Promise.all(paths.map(async (p) => [p, await api.treeChildren(p)] as const));
+    const loaded = await Promise.all(paths.map(fetchPage));
     setChildren((prev) => {
       const next = new Map(prev);
       for (const p of before) if (!paths.includes(p) && !expandedRef.current.has(p)) next.delete(p);
       for (const [p, page] of loaded) next.set(p, page);
       return next;
     });
-  }, []);
+  }, [fetchPage]);
 
   /**
    * After a toggle at `path` only its ancestors, itself and the folders under it can change. Those that are
@@ -111,14 +119,14 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     const affected = [...childrenRef.current.keys()].filter((p) => p !== '' && isUnder(p, path));
     const refetch = [...ancestors(path), ...affected.filter((p) => open.has(p))];
     const drop = affected.filter((p) => !open.has(p));
-    const loaded = await Promise.all(refetch.map(async (p) => [p, await api.treeChildren(p)] as const));
+    const loaded = await Promise.all(refetch.map(fetchPage));
     setChildren((prev) => {
       const next = new Map(prev);
       for (const p of drop) next.delete(p);
       for (const [p, page] of loaded) next.set(p, page);
       return next;
     });
-  }, []);
+  }, [fetchPage]);
 
   const firstRefresh = useRef(true);
   useEffect(() => {
@@ -147,6 +155,18 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
       setError(errorText(tx, lang, e));
     }
   }, [onSummary, refreshAfterToggle, tx, lang]);
+
+  /** Flip one folder between name order and largest first, and reload just that folder's page. */
+  const setOrder = useCallback(async (path: string, order: SortOrder) => {
+    const next = new Map(ordersRef.current).set(path, order);
+    ordersRef.current = next;
+    setOrders(next);
+    try {
+      await load([path]);
+    } catch (e) {
+      setError(errorText(tx, lang, e));
+    }
+  }, [load, tx, lang]);
 
   const { rows, lines, lineOf } = useMemo(() => {
     const rows: Row[] = [];
@@ -186,8 +206,8 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   });
 
   // Handlers read the latest state through a ref, so the memoised rows get stable callbacks.
-  const latest = useRef({ rows, lineOf, expanded, expand, collapse, toggle, virtualizer });
-  latest.current = { rows, lineOf, expanded, expand, collapse, toggle, virtualizer };
+  const latest = useRef({ rows, lineOf, expanded, expand, collapse, toggle, virtualizer, setOrder });
+  latest.current = { rows, lineOf, expanded, expand, collapse, toggle, virtualizer, setOrder };
 
   const onKey = useCallback((e: KeyboardEvent, i: number) => {
     const { rows, lineOf, expanded, expand, collapse, toggle, virtualizer } = latest.current;
@@ -218,6 +238,8 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
 
   const onToggle = useCallback((path: string) => void latest.current.toggle(path), []);
 
+  const onSort = useCallback((path: string, order: SortOrder) => void latest.current.setOrder(path, order), []);
+
   const setItemRef = useCallback((i: number, el: HTMLDivElement | null) => {
     if (el) itemRefs.current.set(i, el);
     else itemRefs.current.delete(i);
@@ -242,6 +264,10 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   const onFocusRow = useCallback((i: number) => setFocusPath(latest.current.rows[i]?.node.path ?? null), []);
 
   return (
+    <>
+    <div className="tree-tools">
+      <SortButton path="" name="" order={orders.get('') ?? 'name'} onSort={onSort} />
+    </div>
     <div className="tree panel" role="tree" aria-label={t('tree.label')} ref={scrollRef}>
       {error && <p className="error" role="alert">{error}</p>}
       {notShown > 0 && <p className="muted">{t('tree.notShown', { count: formatCount(lang, notShown) })}</p>}
@@ -267,31 +293,36 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
               top={v.start}
               expanded={node.isFolder && expanded.has(node.path)}
               tabbable={index === tabbable}
+              order={orders.get(node.path) ?? 'name'}
               setItemRef={setItemRef}
               onKey={onKey}
               onFocusRow={onFocusRow}
               onOpenClick={onOpenClick}
               onToggle={onToggle}
+              onSort={onSort}
             />
           );
         })}
       </div>
     </div>
+    </>
   );
 }
 
-const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabbable, setItemRef, onKey, onFocusRow, onOpenClick, onToggle }: {
+const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabbable, order, setItemRef, onKey, onFocusRow, onOpenClick, onToggle, onSort }: {
   node: NodeView;
   depth: number;
   index: number;
   top: number;
   expanded: boolean;
   tabbable: boolean;
+  order: SortOrder;
   setItemRef: (i: number, el: HTMLDivElement | null) => void;
   onKey: (e: KeyboardEvent, i: number) => void;
   onFocusRow: (i: number) => void;
   onOpenClick: (path: string) => void;
   onToggle: (path: string) => void;
+  onSort: (path: string, order: SortOrder) => void;
 }) {
   const { t, tx, lang } = useT();
   const counts = (n: NodeView) => {
@@ -335,6 +366,7 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
       ) : (
         <span>{node.name}</span>
       )}
+      {node.isFolder && expanded && <SortButton path={node.path} name={node.name} order={order} onSort={onSort} row />}
       {node.changes.map(({ id, change }) => (
         <span key={id} className="row">
           <span className={`badge ${change.type}`}>{tx(`change.${change.type}`)}</span>
@@ -346,3 +378,27 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
     </div>
   );
 });
+
+/** "Largest first" for one folder: pressed = that folder's children are by size, not by name. */
+function SortButton({ path, name, order, onSort, row = false }: {
+  path: string;
+  name: string;
+  order: SortOrder;
+  onSort: (path: string, order: SortOrder) => void;
+  /** Inside a tree row (kept out of the tab order like the row's other controls). */
+  row?: boolean;
+}) {
+  const { t } = useT();
+  return (
+    <button
+      type="button"
+      className="link"
+      tabIndex={row ? -1 : undefined}
+      aria-pressed={order === 'size'}
+      aria-label={row ? t('tree.sortBySizeIn', { name }) : undefined}
+      onClick={() => onSort(path, order === 'size' ? 'name' : 'size')}
+    >
+      {t('tree.sortBySize')}
+    </button>
+  );
+}

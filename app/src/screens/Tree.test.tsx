@@ -37,7 +37,7 @@ describe('Tree', () => {
     a.focus();
     await userEvent.keyboard('{ArrowRight}');
     expect(await screen.findByText('x.txt')).toBeInTheDocument();
-    expect(api.treeChildren).toHaveBeenCalledWith('a');
+    expect(api.treeChildren).toHaveBeenCalledWith('a', 'name');
     await userEvent.keyboard(' ');
     expect(api.toggle).toHaveBeenCalledWith('a');
     await waitFor(() => expect(onSummary).toHaveBeenCalled());
@@ -144,6 +144,7 @@ describe('Tree', () => {
     await userEvent.click(screen.getByRole('button', { name: /a\// }));
     await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'x.txt' })).not.toBeInTheDocument());
     (document.activeElement as HTMLElement | null)?.blur();
+    await userEvent.tab(); // the sort button above the tree
     await userEvent.tab();
     expect(screen.getByRole('treeitem', { name: /a/ })).toHaveFocus();
   });
@@ -187,5 +188,55 @@ describe('Tree', () => {
     vi.mocked(api.treeChildren).mockImplementation(async (p) => page(p === '' ? [folder('a', 'on')] : [file], p === '' ? 1 : 2500));
     render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a']} /></I18nProvider>);
     expect(await screen.findByText(/2,499 more not shown — use the folder's checkbox/)).toBeInTheDocument();
+  });
+
+  describe('sort by size', () => {
+    const big: NodeView = { ...file, name: 'big.bin', path: 'a/big.bin', bytesToCopy: 100 };
+    const small: NodeView = { ...file, name: 'small.txt', path: 'a/small.txt', bytesToCopy: 1 };
+    const serve = () =>
+      vi.mocked(api.treeChildren).mockImplementation(async (p, order) =>
+        page(p === '' ? [folder('a', 'on'), folder('b', 'on')]
+          : p === 'a' ? (order === 'size' ? [big, small] : [small, big])
+            : [file]));
+    const rowNames = () => screen.getAllByRole('treeitem').map((el) => el.getAttribute('aria-label'));
+
+    it('asks Rust for that folder only in size order and redraws it largest first', async () => {
+      serve();
+      render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a', 'b']} /></I18nProvider>);
+      await screen.findByText('small.txt');
+      expect(rowNames().filter((n) => n === 'small.txt' || n === 'big.bin')).toEqual(['small.txt', 'big.bin']);
+      vi.mocked(api.treeChildren).mockClear();
+      await userEvent.click(screen.getByRole('button', { name: 'Largest first in a' }));
+      await waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('a', 'size'));
+      await waitFor(() =>
+        expect(rowNames().filter((n) => n === 'small.txt' || n === 'big.bin')).toEqual(['big.bin', 'small.txt']));
+      expect(api.treeChildren).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Largest first in a' })).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByRole('button', { name: 'Largest first in b' })).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('keeps the folder in size order across a tick and flips back to name order', async () => {
+      serve();
+      vi.mocked(api.toggle).mockResolvedValue({} as never);
+      render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a']} /></I18nProvider>);
+      await screen.findByText('small.txt');
+      await userEvent.click(screen.getByRole('button', { name: 'Largest first in a' }));
+      await waitFor(() => expect(rowNames()).toContain('big.bin'));
+      vi.mocked(api.treeChildren).mockClear();
+      await userEvent.click(screen.getByRole('checkbox', { name: 'small.txt' }));
+      await waitFor(() => expect(api.toggle).toHaveBeenCalledWith('a/small.txt'));
+      await waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('a', 'size'));
+      expect(vi.mocked(api.treeChildren).mock.calls.filter(([p]) => p === 'a').every(([, o]) => o === 'size')).toBe(true);
+      await userEvent.click(screen.getByRole('button', { name: 'Largest first in a' }));
+      await waitFor(() => expect(api.treeChildren).toHaveBeenLastCalledWith('a', 'name'));
+    });
+
+    it('sorts the root with the button above the tree', async () => {
+      serve();
+      render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);
+      await screen.findByRole('treeitem', { name: 'a' });
+      await userEvent.click(screen.getByRole('button', { name: 'Largest first' }));
+      await waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('', 'size'));
+    });
   });
 });

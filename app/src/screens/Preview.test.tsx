@@ -70,7 +70,7 @@ describe('Preview', () => {
     render(<I18nProvider lang="en"><Preview summary={{ ...base, isEmpty: true, totals: skippedOnly }} navigate={vi.fn()} /></I18nProvider>);
     expect(screen.getByText('Already in sync. Nothing to do.')).toBeInTheDocument();
     expect(screen.getByRole('tree')).toBeInTheDocument();
-    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith(''));
+    await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('', 'name'));
   });
 
   it('applies the selection', async () => {
@@ -88,7 +88,7 @@ describe('Preview', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Approve all' }));
     expect(api.selectAll).toHaveBeenCalledWith(true);
     await vi.waitFor(() => expect(api.treeChildren).toHaveBeenCalledTimes(2));
-    expect(api.treeChildren).toHaveBeenLastCalledWith('');
+    expect(api.treeChildren).toHaveBeenLastCalledWith('', 'name');
   });
 
   it('refreshes the summary on mount so space freed in the trash shows', async () => {
