@@ -455,4 +455,56 @@ mod tests {
             }]
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_unicode_name_is_an_unreadable_problem_not_an_entry() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "ok.txt", b"1", T0);
+        let bad = d.path().join(std::ffi::OsStr::from_bytes(b"bad\xff.txt"));
+        fs::write(&bad, b"x").unwrap();
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        let names: Vec<_> = s.entries.iter().map(|e| e.rel.as_str()).collect();
+        assert_eq!(names, vec!["ok.txt"]);
+        assert_eq!(s.problems.len(), 1, "{:?}", s.problems);
+        assert_eq!(s.problems[0].kind, ProblemKind::Unreadable);
+        assert_eq!(s.problems[0].rel.as_str(), "bad\u{fffd}.txt");
+        assert_eq!(s.problems[0].detail, "name is not valid Unicode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_symlink_is_a_link_entry_not_a_problem() {
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("does-not-exist", d.path().join("dangling")).unwrap();
+        let c = ScanCounters::default();
+        let s = scan(d.path(), &no_rules(), &c).unwrap();
+        assert_eq!(s.entries.len(), 1, "{:?}", s.entries);
+        assert_eq!(s.entries[0].rel.as_str(), "dangling");
+        assert_eq!(s.entries[0].kind, Kind::Link);
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        assert_eq!(c.read().0, 0, "a link is not counted as a file");
+    }
+
+    /// A folder that can be listed but not searched (`r--`): the names come
+    /// back with a type, but reading their metadata fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_error_on_one_name_is_an_unreadable_problem() {
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        assert!(euid != 0, "permission tests must not run as root");
+        let d = tempfile::tempdir().unwrap();
+        write_file(d.path(), "ok.txt", b"1", T0);
+        write_file(d.path(), "listed/a.txt", b"1", T0);
+        let _restore = crate::testutil::ModeGuard::set(&d.path().join("listed"), 0o444);
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
+        let names: Vec<_> = s.entries.iter().map(|e| e.rel.as_str()).collect();
+        assert_eq!(names, vec!["listed", "ok.txt"]);
+        assert_eq!(s.problems.len(), 1, "{:?}", s.problems);
+        assert_eq!(s.problems[0].rel.as_str(), "listed/a.txt");
+        assert_eq!(s.problems[0].kind, ProblemKind::Unreadable);
+        assert!(!s.problems[0].detail.is_empty());
+    }
 }
