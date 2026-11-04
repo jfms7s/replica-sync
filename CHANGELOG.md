@@ -4,6 +4,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- An Update row in the Preview now shows both sides, translated: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. The CLI plan and run log lines (English only, as before) show both as `2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB`. `Change::Update` carries the backup's size and modified time.
+
 ## 0.7.0 — 2026-11-03
 
 Supersedes the unpublished 0.6.0 draft (and through it 0.5.1, 0.5.0, 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.

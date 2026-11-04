@@ -338,7 +338,7 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
       {node.changes.map(({ id, change }) => (
         <span key={id} className="row">
           <span className={`badge ${change.type}`}>{tx(`change.${change.type}`)}</span>
-          <span className="muted">{changeDetail(t, tx, change)}</span>
+          <span className="muted">{changeDetail(t, tx, lang, change)}</span>
         </span>
       ))}
       {node.isFolder && counts(node)}

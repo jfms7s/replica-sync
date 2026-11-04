@@ -40,7 +40,15 @@ export type MoveKind =
   | { kind: 'dirCaseOnly' };
 export type Change =
   | { type: 'create'; path: RelPath; size: number; mtime_ns: number }
-  | { type: 'update'; path: RelPath; size: number; mtime_ns: number; replica_newer: boolean }
+  | {
+      type: 'update';
+      path: RelPath;
+      size: number;
+      mtime_ns: number;
+      replica_size: number;
+      replica_mtime_ns: number;
+      replica_newer: boolean;
+    }
   | { type: 'delete'; path: RelPath; size: number; mtime_ns: number }
   | { type: 'move'; from: RelPath; to: RelPath; kind: MoveKind }
   | { type: 'mkDir'; path: RelPath }
