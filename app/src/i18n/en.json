@@ -86,6 +86,7 @@
   "detail.renamedFrom": "renamed from {from}",
   "tree.label": "Changes",
   "tree.sortBySize": "Largest first",
+  "tree.sortKeyHint": "Press S on the folder row to switch",
   "tree.sortBySizeIn": "Largest first in {name}",
   "tree.more": "{count} more not shown — use the folder's checkbox to include or exclude them all.",
   "tree.moreRoot": "{count} more not shown — Approve all includes them too.",

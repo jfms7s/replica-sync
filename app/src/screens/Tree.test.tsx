@@ -231,6 +231,38 @@ describe('Tree', () => {
       await waitFor(() => expect(api.treeChildren).toHaveBeenLastCalledWith('a', 'name'));
     });
 
+    it('Space on the sort button does not tick the folder', async () => {
+      serve();
+      vi.mocked(api.toggle).mockResolvedValue({} as never);
+      render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a']} /></I18nProvider>);
+      const btn = await screen.findByRole('button', { name: 'Largest first in a' });
+      btn.focus();
+      await userEvent.keyboard(' ');
+      await waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('a', 'size'));
+      expect(api.toggle).not.toHaveBeenCalled();
+    });
+
+    it('S on a focused open folder row flips its sort, and does nothing on a closed one or a file', async () => {
+      serve();
+      render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={['a']} /></I18nProvider>);
+      await screen.findByText('small.txt');
+      screen.getByRole('treeitem', { name: 'b' }).focus();
+      await userEvent.keyboard('s');
+      screen.getByRole('treeitem', { name: 'small.txt' }).focus();
+      await userEvent.keyboard('s');
+      expect(vi.mocked(api.treeChildren).mock.calls.some(([, o]) => o === 'size')).toBe(false);
+      const a = screen.getByRole('treeitem', { name: 'a' });
+      expect(a).toHaveAttribute('aria-keyshortcuts', 'S');
+      a.focus();
+      await userEvent.keyboard('s');
+      await waitFor(() => expect(api.treeChildren).toHaveBeenCalledWith('a', 'size'));
+      await waitFor(() =>
+        expect(rowNames().filter((n) => n === 'small.txt' || n === 'big.bin')).toEqual(['big.bin', 'small.txt']));
+      a.focus();
+      await userEvent.keyboard('S');
+      await waitFor(() => expect(api.treeChildren).toHaveBeenLastCalledWith('a', 'name'));
+    });
+
     it('sorts the root with the button above the tree', async () => {
       serve();
       render(<I18nProvider lang="en"><Tree onSummary={vi.fn()} expandRequest={null} /></I18nProvider>);

@@ -210,7 +210,9 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
   latest.current = { rows, lineOf, expanded, expand, collapse, toggle, virtualizer, setOrder };
 
   const onKey = useCallback((e: KeyboardEvent, i: number) => {
-    const { rows, lineOf, expanded, expand, collapse, toggle, virtualizer } = latest.current;
+    const { rows, lineOf, expanded, expand, collapse, toggle, virtualizer, setOrder } = latest.current;
+    // Keys pressed on a control inside the row (the sort button) belong to that control.
+    if (e.target !== e.currentTarget) return;
     const row = rows[i];
     const move = (to: number) => {
       const j = Math.max(0, Math.min(rows.length - 1, to));
@@ -225,7 +227,9 @@ export default function Tree({ onSummary, expandRequest, refreshToken = 0 }: {
     else if (e.key === 'ArrowRight' && row.node.isFolder) void expand(row.node.path);
     else if (e.key === 'ArrowLeft' && row.node.isFolder && expanded.has(row.node.path)) collapse(row.node.path);
     else if (e.key === 'ArrowLeft' && parent !== '') move(rows.findIndex((r) => r.node.path === parent));
-    else if (e.key === ' ' && row.node.tick !== 'none') void toggle(row.node.path);
+    else if (e.key.toLowerCase() === 's' && !e.ctrlKey && !e.metaKey && !e.altKey && row.node.isFolder && expanded.has(row.node.path)) {
+      void setOrder(row.node.path, ordersRef.current.get(row.node.path) === 'size' ? 'name' : 'size');
+    } else if (e.key === ' ' && row.node.tick !== 'none') void toggle(row.node.path);
     else return;
     e.preventDefault();
   }, []);
@@ -344,6 +348,7 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
       aria-label={node.name}
       aria-level={depth}
       aria-expanded={node.isFolder ? expanded : undefined}
+      aria-keyshortcuts={node.isFolder && expanded ? 'S' : undefined}
       aria-checked={node.tick === 'mixed' ? 'mixed' : node.tick === 'on'}
       tabIndex={tabbable ? 0 : -1}
       style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${top}px)`, paddingLeft: depth * 16 }}
@@ -395,6 +400,7 @@ function SortButton({ path, name, order, onSort, row = false }: {
       className="link"
       tabIndex={row ? -1 : undefined}
       aria-pressed={order === 'size'}
+      title={row ? t('tree.sortKeyHint') : undefined}
       aria-label={row ? t('tree.sortBySizeIn', { name }) : undefined}
       onClick={() => onSort(path, order === 'size' ? 'name' : 'size')}
     >
