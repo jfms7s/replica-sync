@@ -5,6 +5,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Changed
+- App state: a pair's backup disks are chosen per scan. Sync goes to the plugged-in disk, and with both plugged in to the one synced longest ago (a never-synced disk counts as the oldest); the Preview data names the target and both disks so the other can be picked. A sync records only its own disk's last sync and scan size, and the Trash follows the disk it was asked for. New commands add, remove and relink a disk; the screens for them come next. The one-way store change below applies.
 - Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk.
 - **One-way store change:** the next save writes `pairs.json` as format 2 (`version: 2`, a `replicas` list). An existing store is read as before and is not touched until something is saved, but a replica-sync older than this change shows its Broken screen on a format 2 file (without overwriting it). Keep the file from before the upgrade if you may go back.
 

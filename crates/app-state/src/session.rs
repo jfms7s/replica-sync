@@ -41,6 +41,38 @@ pub struct PairView {
     pub pair: PairJson,
     pub source_connected: bool,
     pub replica_connected: bool,
+    /// Every backup disk with its own state, in the pair's order.
+    pub replicas: Vec<ReplicaView>,
+    /// The disk a sync goes to unless the user picks the other: the connected
+    /// one that was synced longest ago (see [`pairs::due_replica`]).
+    pub due_replica: usize,
+}
+
+/// One backup disk of a pair, as the cards and the Preview show it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaView {
+    pub index: usize,
+    pub side: pairs::Side,
+    /// Plugged in right now. A disk that is away is the normal state of a
+    /// rotated one, not a fault.
+    pub connected: bool,
+    pub last_sync: Option<LastSync>,
+    pub last_scan_files: Option<u64>,
+}
+
+fn replica_views(pair: &Pair, volumes: &dyn Volumes) -> Vec<ReplicaView> {
+    pair.replicas()
+        .iter()
+        .enumerate()
+        .map(|(index, r)| ReplicaView {
+            index,
+            side: r.side.clone(),
+            connected: pairs::side_connected(&r.side, volumes),
+            last_sync: r.last_sync.clone(),
+            last_scan_files: r.last_scan_files,
+        })
+        .collect()
 }
 
 /// A pair as the UI reads it: one backup disk, its history on the pair. The
@@ -74,8 +106,8 @@ impl From<&Pair> for PairJson {
     }
 }
 
-/// The backup disk every command works on until the connected one is chosen
-/// per scan.
+/// The backup disk the editor's single "backup folder" field and the old
+/// `relink` command mean.
 const FIRST_REPLICA: usize = 0;
 
 fn first_replica(pair: &Pair) -> &ReplicaSide {
@@ -111,6 +143,12 @@ pub struct PreviewSummary {
     pub shortfall: Option<u64>,
     pub source: ScanStats,
     pub replica: ScanStats,
+    /// Which backup disk (index into `disks`) this preview, and so the Sync,
+    /// is for.
+    pub replica_index: usize,
+    /// The pair's backup disks as they were when the scan began, so the
+    /// Preview can name the target and offer the other one.
+    pub disks: Vec<ReplicaView>,
     /// Problems during the scan that did not stop it (store not written, free
     /// space unknown).
     pub warnings: Vec<AppError>,
@@ -134,6 +172,7 @@ struct Current {
     pair_id: String,
     /// Index of the backup disk this preview is for.
     replica: usize,
+    disks: Vec<ReplicaView>,
     resolved: Resolved,
     prepared: Arc<Prepared>,
     tree: PlanTree,
@@ -153,6 +192,7 @@ struct Current {
 pub struct ScanJob {
     pair_id: String,
     replica: usize,
+    disks: Vec<ReplicaView>,
     resolved: Resolved,
     rules: SkipRules,
     case: CaseMode,
@@ -259,10 +299,6 @@ pub struct Session {
     scanning: bool,
 }
 
-fn connected(side: &pairs::Side, volumes: &dyn Volumes) -> bool {
-    volumes.find(&side.volume_id).ok().flatten().is_some()
-}
-
 impl Session {
     /// Fails with `store.unreadable` if `pairs.json` exists but can't be read;
     /// in that case nothing ever writes to it.
@@ -329,8 +365,10 @@ impl Session {
             .iter()
             .map(|p| PairView {
                 pair: p.into(),
-                source_connected: connected(&p.source, volumes),
-                replica_connected: connected(&first_replica(p).side, volumes),
+                source_connected: pairs::side_connected(&p.source, volumes),
+                replica_connected: pairs::side_connected(&first_replica(p).side, volumes),
+                replicas: replica_views(p, volumes),
+                due_replica: pairs::due_replica(p, volumes),
             })
             .collect()
     }
@@ -373,7 +411,7 @@ impl Session {
                 }
                 let moved = input.source.is_some() || input.replica.is_some();
                 if moved
-                    && pair.source.volume_id == first_replica(&pair).side.volume_id
+                    && (pair.replicas().iter()).any(|r| r.side.volume_id == pair.source.volume_id)
                     && !input.allow_same_volume
                 {
                     return Err(AppError::new("pair.sameVolume"));
@@ -412,16 +450,57 @@ impl Session {
         allow_same_volume: bool,
         volumes: &dyn Volumes,
     ) -> Result<Pair, AppError> {
+        self.edit_pair(id, |pair| match side {
+            SideKind::Source => pairs::relink_source(pair, folder, allow_same_volume, volumes),
+            SideKind::Replica => {
+                pairs::relink_replica(pair, FIRST_REPLICA, folder, allow_same_volume, volumes)
+            }
+        })
+    }
+
+    /// Points backup disk `replica` at another folder; its history is dropped
+    /// and the other disk's is kept.
+    pub fn relink_replica(
+        &mut self,
+        id: &str,
+        replica: usize,
+        folder: &Path,
+        allow_same_volume: bool,
+        volumes: &dyn Volumes,
+    ) -> Result<Pair, AppError> {
+        self.edit_pair(id, |pair| {
+            pairs::relink_replica(pair, replica, folder, allow_same_volume, volumes)
+        })
+    }
+
+    /// Adds the pair's second backup disk.
+    pub fn add_replica(
+        &mut self,
+        id: &str,
+        folder: &Path,
+        allow_same_volume: bool,
+        volumes: &dyn Volumes,
+    ) -> Result<Pair, AppError> {
+        self.edit_pair(id, |pair| {
+            pairs::add_replica(pair, folder, allow_same_volume, volumes)
+        })
+    }
+
+    /// Removes backup disk `replica` and its history; the last one stays.
+    pub fn remove_replica(&mut self, id: &str, replica: usize) -> Result<Pair, AppError> {
+        self.edit_pair(id, |pair| pairs::remove_replica(pair, replica))
+    }
+
+    /// Changes a copy of the pair, then stores it and drops a preview that no
+    /// longer matches it.
+    fn edit_pair(
+        &mut self,
+        id: &str,
+        edit: impl FnOnce(&mut Pair) -> Result<(), pairs::PairError>,
+    ) -> Result<Pair, AppError> {
         self.ensure_idle()?;
         let mut pair = self.pair(id)?.clone();
-        match side {
-            SideKind::Source => {
-                pairs::relink_source(&mut pair, folder, allow_same_volume, volumes)?
-            }
-            SideKind::Replica => {
-                pairs::relink_replica(&mut pair, FIRST_REPLICA, folder, allow_same_volume, volumes)?
-            }
-        }
+        edit(&mut pair)?;
         self.store.upsert(pair.clone());
         self.store.save()?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
@@ -430,10 +509,18 @@ impl Session {
         Ok(pair)
     }
 
-    pub fn begin_scan(&mut self, id: &str, volumes: &dyn Volumes) -> Result<ScanJob, AppError> {
+    /// Starts a scan of the pair against backup disk `replica`, or, when
+    /// `None`, against the one that is due (the connected one synced longest
+    /// ago; never synced counts as oldest).
+    pub fn begin_scan(
+        &mut self,
+        id: &str,
+        replica: Option<usize>,
+        volumes: &dyn Volumes,
+    ) -> Result<ScanJob, AppError> {
         self.ensure_idle()?;
         let pair = self.pair(id)?.clone();
-        let replica = FIRST_REPLICA;
+        let replica = replica.unwrap_or_else(|| pairs::due_replica(&pair, volumes));
         let resolved = pairs::resolve(&pair, replica, volumes)?;
         let rules = pair.rules()?;
         // Before the case probe, which writes into the replica.
@@ -443,10 +530,12 @@ impl Session {
         let counters = Arc::new(SessionCounters::default());
         self.scan_counters = Some(counters.clone());
         self.scanning = true;
+        let disks = replica_views(&pair, volumes);
         let approx_files = pair.replica(replica).and_then(|r| r.last_scan_files);
         Ok(ScanJob {
             pair_id: pair.id,
             replica,
+            disks,
             resolved,
             rules,
             case,
@@ -502,6 +591,7 @@ impl Session {
         self.current = Some(Current {
             pair_id: job.pair_id,
             replica: job.replica,
+            disks: job.disks,
             resolved: job.resolved,
             prepared: Arc::new(prepared),
             tree,
@@ -561,6 +651,8 @@ impl Session {
             shortfall,
             source: c.prepared.source.clone(),
             replica: c.prepared.replica.clone(),
+            replica_index: c.replica,
+            disks: c.disks.clone(),
             warnings,
         })
     }
@@ -787,41 +879,56 @@ impl Session {
         })
     }
 
-    fn replica_of(&self, id: &str, volumes: &dyn Volumes) -> Result<PathBuf, AppError> {
-        Ok(pairs::resolve_replica(
-            self.pair(id)?,
-            FIRST_REPLICA,
-            volumes,
-        )?)
+    /// The folder of backup disk `replica` (the first plugged-in one when
+    /// `None`): trash is kept on each disk, so its screens follow the disk.
+    fn replica_of(
+        &self,
+        id: &str,
+        replica: Option<usize>,
+        volumes: &dyn Volumes,
+    ) -> Result<PathBuf, AppError> {
+        let pair = self.pair(id)?;
+        let replica = replica.unwrap_or_else(|| {
+            (0..pair.replicas().len())
+                .find(|&i| pairs::side_connected(&pair.replicas()[i].side, volumes))
+                .unwrap_or(FIRST_REPLICA)
+        });
+        Ok(pairs::resolve_replica(pair, replica, volumes)?)
     }
 
     pub fn trash_runs(
         &self,
         id: &str,
+        replica: Option<usize>,
         volumes: &dyn Volumes,
     ) -> Result<Vec<TrashRunInfo>, AppError> {
-        Ok(trash::list_runs(&self.replica_of(id, volumes)?)?)
+        Ok(trash::list_runs(&self.replica_of(id, replica, volumes)?)?)
     }
 
     pub fn trash_contents(
         &self,
         id: &str,
+        replica: Option<usize>,
         run: &str,
         volumes: &dyn Volumes,
     ) -> Result<TrashRunContents, AppError> {
-        Ok(trash::run_contents(&self.replica_of(id, volumes)?, run)?)
+        Ok(trash::run_contents(
+            &self.replica_of(id, replica, volumes)?,
+            run,
+        )?)
     }
 
     pub fn restore(
         &mut self,
         id: &str,
+        replica: Option<usize>,
         run: &str,
         paths: &[RelPath],
         replace: bool,
         volumes: &dyn Volumes,
     ) -> Result<usize, AppError> {
         self.ensure_idle()?;
-        let root = self.replica_of(id, volumes)?;
+        let root = self.replica_of(id, replica, volumes)?;
         let mode = if replace {
             OnConflict::TrashExisting
         } else {
@@ -835,20 +942,28 @@ impl Session {
     pub fn trash_files_folder(
         &self,
         id: &str,
+        replica: Option<usize>,
         run: &str,
         volumes: &dyn Volumes,
     ) -> Result<PathBuf, AppError> {
-        Ok(trash::files_dir(&self.replica_of(id, volumes)?, run)?)
+        Ok(trash::files_dir(
+            &self.replica_of(id, replica, volumes)?,
+            run,
+        )?)
     }
 
     pub fn empty_run(
         &mut self,
         id: &str,
+        replica: Option<usize>,
         run: &str,
         volumes: &dyn Volumes,
     ) -> Result<(), AppError> {
         self.ensure_idle()?;
-        Ok(trash::empty_run(&self.replica_of(id, volumes)?, run)?)
+        Ok(trash::empty_run(
+            &self.replica_of(id, replica, volumes)?,
+            run,
+        )?)
     }
 }
 
@@ -885,7 +1000,7 @@ mod tests {
             self.t.path().join("diskB/Backup")
         }
         fn scan(&mut self) -> PreviewSummary {
-            let job = self.s.begin_scan(&self.id, &self.v).unwrap();
+            let job = self.s.begin_scan(&self.id, None, &self.v).unwrap();
             let r = job.run();
             self.s.finish_scan(job, r, &self.v).unwrap()
         }
@@ -915,6 +1030,285 @@ mod tests {
         };
         let id = s.save_pair(input, &v).unwrap().id;
         World { t, v, s, id }
+    }
+
+    /// `world()` plus a second backup disk, C (index 1), beside B (index 0).
+    fn rotating_world() -> World {
+        let mut w = world();
+        fs::create_dir_all(w.t.path().join("diskC/Backup")).unwrap();
+        w.v.mount("C", &w.t.path().join("diskC"));
+        let folder = w.t.path().join("diskC/Backup");
+        w.s.add_replica(&w.id, &folder, false, &w.v).unwrap();
+        w
+    }
+
+    impl World {
+        fn rep_c(&self) -> PathBuf {
+            self.t.path().join("diskC/Backup")
+        }
+        fn scan_disk(&mut self, replica: Option<usize>) -> PreviewSummary {
+            let job = self.s.begin_scan(&self.id, replica, &self.v).unwrap();
+            let r = job.run();
+            self.s.finish_scan(job, r, &self.v).unwrap()
+        }
+        fn disk(&self, i: usize) -> ReplicaSide {
+            self.s.pair(&self.id).unwrap().replicas()[i].clone()
+        }
+        fn set_last_sync(&mut self, i: usize, at: &str) {
+            let id = self.id.clone();
+            let pair = self.s.store.pairs.iter_mut().find(|p| p.id == id).unwrap();
+            pair.replica_mut(i).unwrap().last_sync = Some(LastSync {
+                at: at.into(),
+                applied: 1,
+                failed: 0,
+                stopped: false,
+            });
+        }
+    }
+
+    #[test]
+    fn with_disk_a_away_and_b_connected_a_sync_updates_only_b() {
+        let mut w = rotating_world();
+        w.v.unmount("B"); // disk 0 is away, as a rotated disk is
+        write(&w.src(), "a.txt", b"a");
+        let before_away = w.disk(0);
+        let s = w.scan_disk(None);
+        assert_eq!(s.replica_index, 1, "the only disk that is plugged in");
+        w.s.confirm_guard().ok();
+        w.apply();
+        assert!(w.rep_c().join("a.txt").exists());
+        assert!(!w.rep().join("a.txt").exists());
+        assert!(w.disk(1).last_sync.is_some());
+        assert_eq!(w.disk(1).last_scan_files, Some(1));
+        assert_eq!(
+            w.disk(0),
+            before_away,
+            "the away disk's record is untouched"
+        );
+    }
+
+    #[test]
+    fn a_disks_first_sync_guard_fires_even_though_the_other_disk_has_synced() {
+        let mut w = rotating_world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan_disk(Some(0));
+        w.apply();
+        assert!(w.disk(0).last_sync.is_some());
+        // Disk C was never synced to, and holds someone else's files.
+        for i in 0..5 {
+            write(&w.rep_c(), &format!("other{i}.txt"), b"x");
+        }
+        let s = w.scan_disk(Some(1));
+        assert_eq!(s.replica_index, 1);
+        assert!(
+            s.guard.as_ref().is_some_and(|g| g.first_sync),
+            "{:?}",
+            s.guard
+        );
+        assert_eq!(
+            w.s.begin_apply(&w.v).err().unwrap().code,
+            "apply.wrongFolderUnconfirmed"
+        );
+        // And disk B, scanned again, is a later sync: no wrong-folder guard.
+        let s = w.scan_disk(Some(0));
+        assert!(s.guard.is_none(), "{:?}", s.guard);
+    }
+
+    #[test]
+    fn with_both_connected_the_disk_synced_longest_ago_is_chosen() {
+        let mut w = rotating_world();
+        write(&w.src(), "a.txt", b"a");
+        // Neither synced: the first added.
+        assert_eq!(w.scan_disk(None).replica_index, 0);
+        w.set_last_sync(0, "2026-10-02T10:00:00+00:00");
+        assert_eq!(
+            w.scan_disk(None).replica_index,
+            1,
+            "a never-synced disk is the oldest"
+        );
+        w.set_last_sync(1, "2026-10-03T10:00:00+00:00");
+        assert_eq!(w.scan_disk(None).replica_index, 0);
+        w.set_last_sync(1, "2026-10-01T10:00:00+00:00");
+        assert_eq!(w.scan_disk(None).replica_index, 1);
+    }
+
+    #[test]
+    fn the_preview_names_the_disks_and_the_other_one_can_be_picked() {
+        let mut w = rotating_world();
+        w.set_last_sync(0, "2026-10-02T10:00:00+00:00");
+        write(&w.src(), "a.txt", b"a");
+        let s = w.scan_disk(None);
+        assert_eq!(s.replica_index, 1);
+        assert_eq!(s.disks.len(), 2);
+        assert_eq!(s.disks[1].side.label, "Disk C");
+        assert!(s.disks.iter().all(|d| d.connected));
+        assert_eq!(
+            s.disks[0].last_sync.as_ref().unwrap().at,
+            "2026-10-02T10:00:00+00:00"
+        );
+        // Switching is a new scan of the other disk, and Sync follows it.
+        let s = w.scan_disk(Some(0));
+        assert_eq!(s.replica_index, 0);
+        w.s.confirm_guard().ok();
+        w.apply();
+        assert!(w.rep().join("a.txt").exists());
+        assert!(!w.rep_c().join("a.txt").exists());
+        assert!(w.disk(1).last_sync.is_none());
+    }
+
+    #[test]
+    fn a_disk_that_does_not_exist_or_is_away_is_refused_and_nothing_sticks() {
+        let mut w = rotating_world();
+        assert_eq!(
+            w.s.begin_scan(&w.id, Some(2), &w.v).err().unwrap().code,
+            "pair.replicaNotFound"
+        );
+        w.v.unmount("B");
+        let e = w.s.begin_scan(&w.id, Some(0), &w.v).err().unwrap();
+        assert_eq!(e.code, "drive.notConnected");
+        assert_eq!(
+            e.params.get("label").map(String::as_str),
+            Some("Disk B"),
+            "{e:?}"
+        );
+        // A refusal leaves no scan running.
+        assert_eq!(w.scan_disk(None).replica_index, 1);
+        // Neither disk plugged in: the error names the one that is due.
+        w.v.unmount("C");
+        w.set_last_sync(0, "2026-10-05T10:00:00+00:00");
+        w.set_last_sync(1, "2026-10-01T10:00:00+00:00");
+        let e = w.s.begin_scan(&w.id, None, &w.v).err().unwrap();
+        assert_eq!(e.params.get("label").map(String::as_str), Some("Disk C"));
+    }
+
+    #[test]
+    fn pair_views_list_each_disk_and_which_one_is_due() {
+        let mut w = rotating_world();
+        w.set_last_sync(0, "2026-10-02T10:00:00+00:00");
+        w.v.unmount("B");
+        let views = w.s.pair_views(&w.v);
+        let v = &views[0];
+        assert_eq!(v.replicas.len(), 2);
+        assert_eq!(
+            v.replicas.iter().map(|r| r.connected).collect::<Vec<_>>(),
+            [false, true],
+            "A away is a state, not an error"
+        );
+        assert_eq!(v.due_replica, 1);
+        assert!(v.replicas[0].last_sync.is_some() && v.replicas[1].last_sync.is_none());
+        assert!(v.source_connected);
+        w.v.mount("B", &w.t.path().join("diskB"));
+        assert_eq!(
+            w.s.pair_views(&w.v)[0].due_replica,
+            1,
+            "never synced is due first"
+        );
+    }
+
+    #[test]
+    fn disks_are_added_removed_and_relinked_one_at_a_time() {
+        let mut w = world();
+        let c = w.t.path().join("diskC/Backup");
+        fs::create_dir_all(&c).unwrap();
+        w.v.mount("C", &w.t.path().join("diskC"));
+        write(&w.src(), "a.txt", b"a");
+        w.scan();
+        let p = w.s.add_replica(&w.id, &c, false, &w.v).unwrap();
+        assert_eq!(p.replicas().len(), 2);
+        assert!(
+            w.s.summary().is_err(),
+            "the preview no longer matches the pair"
+        );
+        assert_eq!(
+            w.s.add_replica(&w.id, &c, false, &w.v).err().unwrap().code,
+            "pair.tooManyReplicas"
+        );
+        assert_eq!(w.s.pair_views(&w.v)[0].replicas.len(), 2);
+        // It is stored: a reopened session sees two disks.
+        let again = Session::open(AppPaths::new(w.t.path().join("data"))).unwrap();
+        assert_eq!(again.pair(&w.id).unwrap().replicas().len(), 2);
+
+        w.set_last_sync(0, "2026-10-02T10:00:00+00:00");
+        w.set_last_sync(1, "2026-10-03T10:00:00+00:00");
+        fs::create_dir_all(w.t.path().join("diskB/Other")).unwrap();
+        let other = w.t.path().join("diskB/Other");
+        w.s.relink_replica(&w.id, 1, &other, false, &w.v).unwrap();
+        assert!(
+            w.disk(1).last_sync.is_none(),
+            "the relinked disk starts over"
+        );
+        assert!(w.disk(0).last_sync.is_some(), "the other keeps its history");
+        assert_eq!(
+            w.s.relink_replica(&w.id, 9, &other, false, &w.v)
+                .err()
+                .unwrap()
+                .code,
+            "pair.replicaNotFound"
+        );
+
+        w.s.remove_replica(&w.id, 0).unwrap();
+        assert_eq!(w.disk(0).side.rel_path.as_str(), "Other");
+        assert_eq!(
+            w.s.remove_replica(&w.id, 0).err().unwrap().code,
+            "pair.lastReplica"
+        );
+        assert_eq!(w.s.pair(&w.id).unwrap().replicas().len(), 1);
+    }
+
+    #[test]
+    fn editing_the_disks_waits_for_a_running_job() {
+        let mut w = rotating_world();
+        write(&w.src(), "a.txt", b"a");
+        w.scan_disk(Some(0));
+        let _job = w.s.begin_apply(&w.v).unwrap_or_else(|_| {
+            w.s.confirm_guard().unwrap();
+            w.s.begin_apply(&w.v).unwrap()
+        });
+        let c = w.rep_c();
+        assert_eq!(
+            w.s.add_replica(&w.id, &c, false, &w.v).err().unwrap().code,
+            "apply.busy"
+        );
+        assert_eq!(
+            w.s.remove_replica(&w.id, 1).err().unwrap().code,
+            "apply.busy"
+        );
+    }
+
+    #[test]
+    fn trash_follows_the_disk_it_belongs_to() {
+        let mut w = rotating_world();
+        write(&w.rep_c(), "gone.txt", b"g");
+        write(&w.src(), "keep.txt", b"k");
+        w.scan_disk(Some(1));
+        w.s.confirm_guard().unwrap();
+        w.apply();
+        // Disk B is away; C holds the run.
+        w.v.unmount("B");
+        let runs = w.s.trash_runs(&w.id, None, &w.v).unwrap();
+        assert_eq!(runs.len(), 1, "no disk named: the one that is plugged in");
+        assert_eq!(w.s.trash_runs(&w.id, Some(1), &w.v).unwrap().len(), 1);
+        assert_eq!(
+            w.s.trash_runs(&w.id, Some(0), &w.v).err().unwrap().code,
+            "drive.notConnected"
+        );
+        // Plug B back: its own trash is empty, C's is still C's.
+        w.v.mount("B", &w.t.path().join("diskB"));
+        assert!(w.s.trash_runs(&w.id, Some(0), &w.v).unwrap().is_empty());
+        assert_eq!(w.s.trash_runs(&w.id, Some(1), &w.v).unwrap().len(), 1);
+        let n =
+            w.s.restore(
+                &w.id,
+                Some(1),
+                &runs[0].id,
+                &[RelPath::new("gone.txt").unwrap()],
+                false,
+                &w.v,
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(w.rep_c().join("gone.txt").exists());
+        assert!(!w.rep().join("gone.txt").exists());
     }
 
     #[test]
@@ -1049,7 +1443,7 @@ mod tests {
         let data = w.t.path().join("data");
         // No group or other bits: the store would reset those to 0700 itself.
         fs::set_permissions(&data, fs::Permissions::from_mode(0o500)).unwrap();
-        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let job = w.s.begin_scan(&w.id, None, &w.v).unwrap();
         let r = job.run();
         let summary = w.s.finish_scan(job, r, &w.v);
         fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1382,16 +1776,18 @@ mod tests {
         w.scan();
         w.s.confirm_guard().unwrap();
         let run = w.apply().report.trash_run.expect("the delete made a run");
-        let folder = w.s.trash_files_folder(&w.id, &run, &w.v).unwrap();
+        let folder = w.s.trash_files_folder(&w.id, None, &run, &w.v).unwrap();
         assert!(folder.ends_with(Path::new(".sync-trash").join(&run).join("files")));
         assert!(folder.join("old.txt").is_file());
-        assert!(w.s.trash_files_folder(&w.id, "../x", &w.v).is_err());
+        assert!(w.s.trash_files_folder(&w.id, None, "../x", &w.v).is_err());
         assert!(
-            w.s.trash_files_folder(&w.id, "2020-01-01_000000", &w.v)
+            w.s.trash_files_folder(&w.id, None, "2020-01-01_000000", &w.v)
                 .is_err()
         );
         assert_eq!(
-            w.s.trash_files_folder("nope", &run, &w.v).unwrap_err().code,
+            w.s.trash_files_folder("nope", None, &run, &w.v)
+                .unwrap_err()
+                .code,
             "pair.notFound"
         );
     }
@@ -1405,11 +1801,12 @@ mod tests {
         w.s.confirm_guard().unwrap();
         w.apply();
         w.v.unmount("A");
-        let runs = w.s.trash_runs(&w.id, &w.v).unwrap();
+        let runs = w.s.trash_runs(&w.id, None, &w.v).unwrap();
         assert_eq!(runs.len(), 1);
         let n =
             w.s.restore(
                 &w.id,
+                None,
                 &runs[0].id,
                 &[RelPath::new("gone.txt").unwrap()],
                 false,
@@ -1436,9 +1833,9 @@ mod tests {
     #[test]
     fn a_second_scan_is_refused_while_one_runs() {
         let mut w = world();
-        let _job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let _job = w.s.begin_scan(&w.id, None, &w.v).unwrap();
         assert_eq!(
-            w.s.begin_scan(&w.id, &w.v).err().unwrap().code,
+            w.s.begin_scan(&w.id, None, &w.v).err().unwrap().code,
             "apply.busy"
         );
     }
@@ -1447,7 +1844,7 @@ mod tests {
     fn stale_scan_finish_changes_nothing() {
         let mut w = world();
         write(&w.src(), "a.txt", b"a");
-        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let job = w.s.begin_scan(&w.id, None, &w.v).unwrap();
         let twin = clone_job(&job);
         let (r, r2) = (job.run(), twin.run());
         w.s.finish_scan(job, r, &w.v).unwrap();
@@ -1462,6 +1859,7 @@ mod tests {
         ScanJob {
             pair_id: j.pair_id.clone(),
             replica: j.replica,
+            disks: j.disks.clone(),
             resolved: j.resolved.clone(),
             rules: j.rules.clone(),
             case: j.case,
@@ -1475,7 +1873,7 @@ mod tests {
         let mut w = world();
         write(&w.src(), "a.txt", b"a");
         w.scan();
-        let job = w.s.begin_scan(&w.id, &w.v).unwrap();
+        let job = w.s.begin_scan(&w.id, None, &w.v).unwrap();
         assert_eq!(
             w.s.toggle(&RelPath::new("a.txt").unwrap())
                 .err()
