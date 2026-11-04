@@ -531,18 +531,22 @@ mod tests {
                     path: p.clone(),
                     size: 2,
                     mtime_ns: 0,
+                    replica_size: 2,
+                    replica_mtime_ns: 0,
                     replica_newer: false,
                 },
-                "update   a/b.txt (2 B)",
+                "update   a/b.txt (1970-01-01 -> 1970-01-01, 2 B -> 2 B)",
             ),
             (
                 Change::Update {
                     path: p.clone(),
                     size: 2,
                     mtime_ns: 0,
+                    replica_size: 2,
+                    replica_mtime_ns: 0,
                     replica_newer: true,
                 },
-                "update   a/b.txt (2 B) [replica is newer]",
+                "update   a/b.txt (1970-01-01 -> 1970-01-01, 2 B -> 2 B) [replica is newer]",
             ),
             (
                 Change::Delete {
@@ -582,7 +586,7 @@ mod tests {
             ),
         ];
         for (change, line) in lines {
-            assert_eq!(describe(&change), line);
+            assert_eq!(describe_in(&change, &chrono::Utc), line);
         }
     }
 
