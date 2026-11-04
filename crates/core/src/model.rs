@@ -432,4 +432,55 @@ mod tests {
         };
         assert_eq!(up.bytes_to_copy(), 7);
     }
+
+    #[test]
+    fn snapshot_file_count_counts_only_regular_files() {
+        use crate::testutil::{dir, file, link, snap};
+        assert_eq!(Snapshot::default().file_count(), 0);
+        let s = snap(vec![
+            dir("d"),
+            file("d/a", 1, 0),
+            file("b", 2, 0),
+            link("l"),
+        ]);
+        assert_eq!(s.file_count(), 2);
+    }
+
+    #[test]
+    fn bytes_to_copy_is_the_size_for_create_and_update_only() {
+        let p = RelPath::new("a").unwrap();
+        let create = Change::Create {
+            path: p.clone(),
+            size: 5,
+            mtime_ns: 0,
+        };
+        assert_eq!(create.bytes_to_copy(), 5);
+        let delete = Change::Delete {
+            path: p.clone(),
+            size: 11,
+            mtime_ns: 0,
+        };
+        assert_eq!(delete.bytes_to_copy(), 0);
+        assert_eq!(Change::MkDir { path: p.clone() }.bytes_to_copy(), 0);
+        assert_eq!(Change::RmDir { path: p }.bytes_to_copy(), 0);
+    }
+
+    #[test]
+    fn mtime_ns_clamps_times_beyond_i64_nanoseconds() {
+        // i64::MAX ns is about 292 years; 295 years either side overflows it
+        // yet 1675 is still after the FILETIME epoch (1601) on Windows.
+        let far = Duration::from_secs(295 * 365 * 86_400);
+        assert_eq!(mtime_ns(UNIX_EPOCH + far), i64::MAX);
+        assert_eq!(mtime_ns(UNIX_EPOCH - far), -i64::MAX);
+    }
+
+    #[test]
+    fn relpath_try_from_empty_string_is_the_root() {
+        assert_eq!(RelPath::try_from(String::new()).unwrap(), RelPath::root());
+        assert!(RelPath::try_from("a//b".to_string()).is_err());
+        assert_eq!(
+            RelPath::try_from("a/b".to_string()).unwrap().as_str(),
+            "a/b"
+        );
+    }
 }

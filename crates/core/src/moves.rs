@@ -419,28 +419,65 @@ mod tests {
         );
     }
 
+    /// The output has no move and still holds every original change.
+    fn assert_untouched(input: Vec<Change>) {
+        let mut out = run(input.clone());
+        assert!(
+            out.iter().all(|c| !matches!(c, Change::Move { .. })),
+            "{out:?}"
+        );
+        let mut want = input;
+        out.sort_by(|a, b| a.path().cmp(b.path()));
+        want.sort_by(|a, b| a.path().cmp(b.path()));
+        assert_eq!(out, want);
+    }
+
     #[test]
     fn ambiguous_matches_stay_delete_and_create() {
-        let two_deletes = run(vec![
+        assert_untouched(vec![
             delete("x/a", 5, T0),
             delete("y/a", 5, T0),
             create("z/a", 5, T0),
         ]);
-        assert!(
-            two_deletes
-                .iter()
-                .all(|c| !matches!(c, Change::Move { .. }))
-        );
-        let two_creates = run(vec![
+        assert_untouched(vec![
             delete("x/a", 5, T0),
             create("y/a", 5, T0),
             create("z/a", 5, T0),
         ]);
-        assert!(
-            two_creates
-                .iter()
-                .all(|c| !matches!(c, Change::Move { .. }))
-        );
+    }
+
+    #[test]
+    fn mtimes_exactly_the_tolerance_apart_pair_and_one_nanosecond_more_does_not() {
+        let at = |ns_apart: i64| {
+            run(vec![
+                Change::Delete {
+                    path: rel("old/a.jpg"),
+                    size: 5,
+                    mtime_ns: ns(T0),
+                },
+                Change::Create {
+                    path: rel("new/a.jpg"),
+                    size: 5,
+                    mtime_ns: ns(T0) + ns_apart,
+                },
+            ])
+        };
+        let tolerance = ns(2);
+        for apart in [tolerance, -tolerance] {
+            let out = at(apart);
+            assert_eq!(out.len(), 1, "{apart}: {out:?}");
+            assert!(matches!(out[0], Change::Move { .. }), "{out:?}");
+        }
+        for apart in [tolerance + 1, -tolerance - 1] {
+            assert_untouched(vec![
+                delete("old/a.jpg", 5, T0),
+                Change::Create {
+                    path: rel("new/a.jpg"),
+                    size: 5,
+                    mtime_ns: ns(T0) + apart,
+                },
+            ]);
+        }
     }
 
     #[test]
