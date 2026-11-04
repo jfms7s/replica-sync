@@ -4,6 +4,9 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Added
+- Each folder in the Preview can be sorted "Largest first" (a button on the folder's row and one above the tree for the top level). A folder counts its whole subtree, ties go by name. The order is applied before the 2,000-row cap, so in this order the "N more not shown" are the smallest. Ticks and totals do not change. The choice lasts for the session. With the keyboard, press S on an open folder's row.
+
 ### Changed
 - An Update row in the Preview now shows both sides, translated: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. The CLI plan and run log lines (English only, as before) show both as `2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB`. `Change::Update` carries the backup's size and modified time.
 

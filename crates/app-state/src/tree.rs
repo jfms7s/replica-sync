@@ -4,7 +4,7 @@
 
 use replica_sync_core::model::{Change, RelPath};
 use replica_sync_core::plan::{ChangeId, Plan};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
 
@@ -56,6 +56,17 @@ pub struct ChildrenPage {
     pub total: usize,
 }
 
+/// How a folder's children are ordered before the cap is applied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SortOrder {
+    /// Tree order (by name).
+    #[default]
+    Name,
+    /// Largest `bytes_to_copy` first (a folder counts its whole subtree), ties by name.
+    Size,
+}
+
 struct Row {
     idx: usize,
 }
@@ -103,13 +114,16 @@ impl PlanTree {
         !matches!(plan.changes[idx].change, Change::Skipped { .. })
     }
 
-    /// At most `limit` children are built; `total` counts them all.
+    /// At most `limit` children are built; `total` counts them all. With
+    /// [`SortOrder::Size`] the order is applied before the cap, so the cap keeps
+    /// the largest children and "not shown" hides the smallest.
     pub fn children(
         &self,
         plan: &Plan,
         folder: &RelPath,
         sel: &HashSet<ChangeId>,
         limit: usize,
+        order: SortOrder,
     ) -> ChildrenPage {
         let (lo, hi) = self.range(plan, folder);
         let skip = if folder.is_root() {
@@ -117,8 +131,8 @@ impl PlanTree {
         } else {
             folder.as_str().len() + 1
         };
-        let mut out = Vec::new();
-        let mut total = 0;
+        // Each child: its name and its row range, in tree (name) order.
+        let mut kids: Vec<(String, usize, usize)> = Vec::new();
         let mut i = lo;
         while i < hi {
             let path = plan.changes[self.rows[i].idx].change.path();
@@ -131,15 +145,36 @@ impl PlanTree {
                 .next()
                 .unwrap_or_default()
                 .to_owned();
-            let child = folder.join(&name);
-            let (clo, chi) = self.range(plan, &child);
-            if out.len() < limit {
-                out.push(self.node(plan, &child, name, clo, chi, sel));
-            }
-            total += 1;
+            let (clo, chi) = self.range(plan, &folder.join(&name));
+            kids.push((name, clo, chi));
             i = chi.max(i + 1);
         }
-        ChildrenPage { nodes: out, total }
+        let total = kids.len();
+        if order == SortOrder::Size {
+            let mut sized: Vec<(u64, (String, usize, usize))> = kids
+                .into_iter()
+                .map(|k| (self.bytes_in(plan, k.1, k.2), k))
+                .collect();
+            sized.sort_by(|(a, ka), (b, kb)| b.cmp(a).then_with(|| ka.0.cmp(&kb.0)));
+            kids = sized.into_iter().map(|(_, k)| k).collect();
+        }
+        let nodes = kids
+            .into_iter()
+            .take(limit)
+            .map(|(name, clo, chi)| {
+                let child = folder.join(&name);
+                self.node(plan, &child, name, clo, chi, sel)
+            })
+            .collect();
+        ChildrenPage { nodes, total }
+    }
+
+    /// What `node` reports as `bytes_to_copy` for the rows `lo..hi`.
+    fn bytes_in(&self, plan: &Plan, lo: usize, hi: usize) -> u64 {
+        self.rows[lo..hi]
+            .iter()
+            .map(|r| plan.changes[r.idx].change.bytes_to_copy())
+            .sum()
     }
 
     fn node(
@@ -295,7 +330,9 @@ mod tests {
     fn root_children_group_by_first_component() {
         let (plan, tree) = fixture();
         let sel = plan.actionable_ids();
-        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        let root = tree
+            .children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name)
+            .nodes;
         // byte order of the \0-separated keys: uppercase first, "a" before "a-c"
         assert_eq!(names(&root), vec!["New", "a", "a-c", "lnk", "top.txt"]);
         let a = root.iter().find(|n| n.name == "a").unwrap();
@@ -320,7 +357,9 @@ mod tests {
     fn sibling_with_a_shared_prefix_is_not_inside_the_folder() {
         let (plan, tree) = fixture();
         let sel = plan.actionable_ids();
-        let a = tree.children(&plan, &rel("a"), &sel, ALL).nodes;
+        let a = tree
+            .children(&plan, &rel("a"), &sel, ALL, SortOrder::Name)
+            .nodes;
         assert_eq!(names(&a), vec!["b", "old.txt"]);
     }
 
@@ -330,7 +369,7 @@ mod tests {
         let mut sel = plan.actionable_ids();
         tree.toggle(&plan, &rel("a"), &mut sel);
         let tick_a = |sel: &HashSet<ChangeId>| {
-            tree.children(&plan, &RelPath::root(), sel, ALL)
+            tree.children(&plan, &RelPath::root(), sel, ALL, SortOrder::Name)
                 .nodes
                 .into_iter()
                 .find(|n| n.name == "a")
@@ -403,7 +442,9 @@ mod tests {
         .unwrap();
         let tree = PlanTree::new(&plan);
         let sel = plan.actionable_ids();
-        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        let root = tree
+            .children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name)
+            .nodes;
         assert_eq!(names(&root), vec!["n"]);
         let n = &root[0];
         assert!(n.is_folder);
@@ -419,7 +460,9 @@ mod tests {
             (1, 2, 6)
         );
         // The folder's own change is on its parent's row, not among its children.
-        let inside = tree.children(&plan, &rel("n"), &sel, ALL).nodes;
+        let inside = tree
+            .children(&plan, &rel("n"), &sel, ALL, SortOrder::Name)
+            .nodes;
         assert_eq!(names(&inside), vec!["sub", "x.txt"]);
     }
 
@@ -449,7 +492,9 @@ mod tests {
         .unwrap();
         let tree = PlanTree::new(&plan);
         let mut sel = plan.actionable_ids();
-        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        let root = tree
+            .children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name)
+            .nodes;
         assert_eq!(names(&root), vec!["top.txt"]);
         assert!(!root[0].is_folder);
         assert_eq!((root[0].counts.moves, root[0].counts.update), (1, 1));
@@ -466,13 +511,97 @@ mod tests {
         let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
         let tree = PlanTree::new(&plan);
         let sel = plan.actionable_ids();
-        let page = tree.children(&plan, &rel("big"), &sel, 2000);
+        let page = tree.children(&plan, &rel("big"), &sel, 2000, SortOrder::Name);
         assert_eq!((page.nodes.len(), page.total), (2000, 2500));
         assert_eq!(page.nodes[0].name, "f00000.txt");
-        let all = tree.children(&plan, &rel("big"), &sel, ALL);
+        let all = tree.children(&plan, &rel("big"), &sel, ALL, SortOrder::Name);
         assert_eq!((all.nodes.len(), all.total), (2500, 2500));
         let v = serde_json::to_value(&page).unwrap();
         assert_eq!(v["total"], 2500);
+    }
+
+    #[test]
+    fn size_order_lists_children_by_descending_subtree_bytes_ties_by_name() {
+        let plan = build_plan(
+            vec![
+                create("d/small.txt", 5),
+                create("d/big.bin", 100),
+                create("d/b-same.txt", 7),
+                create("d/a-same.txt", 7),
+                create("d/zero.txt", 0),
+                // a folder whose subtree (60 + 70) beats a single 100-byte file
+                create("d/sub/x.bin", 60),
+                create("d/sub/deep/y.bin", 70),
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let by_size = tree.children(&plan, &rel("d"), &sel, ALL, SortOrder::Size);
+        assert_eq!(
+            names(&by_size.nodes),
+            vec![
+                "sub",
+                "big.bin",
+                "a-same.txt",
+                "b-same.txt",
+                "small.txt",
+                "zero.txt"
+            ]
+        );
+        let bytes: Vec<u64> = by_size.nodes.iter().map(|n| n.bytes_to_copy).collect();
+        assert_eq!(bytes, vec![130, 100, 7, 7, 5, 0]);
+        let by_name = tree.children(&plan, &rel("d"), &sel, ALL, SortOrder::Name);
+        assert_eq!(
+            names(&by_name.nodes),
+            vec![
+                "a-same.txt",
+                "b-same.txt",
+                "big.bin",
+                "small.txt",
+                "sub",
+                "zero.txt"
+            ]
+        );
+        assert_eq!(by_size.total, by_name.total);
+    }
+
+    #[test]
+    fn size_order_applies_before_the_cap_and_keeps_the_largest() {
+        let mut changes: Vec<Change> = (0..2500)
+            .map(|i| create(&format!("big/f{i:05}.txt"), 1))
+            .collect();
+        // the five biggest sort last by name
+        changes.extend((0..5).map(|i| create(&format!("big/zz{i}.bin"), 1000 + i)));
+        let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let by_name = tree.children(&plan, &rel("big"), &sel, 2000, SortOrder::Name);
+        assert!(by_name.nodes.iter().all(|n| !n.name.starts_with("zz")));
+        let by_size = tree.children(&plan, &rel("big"), &sel, 2000, SortOrder::Size);
+        assert_eq!((by_size.nodes.len(), by_size.total), (2000, 2505));
+        assert_eq!(
+            names(&by_size.nodes)[..5],
+            ["zz4.bin", "zz3.bin", "zz2.bin", "zz1.bin", "zz0.bin"]
+        );
+        // what is hidden is the smallest: every shown child is at least as big as every hidden one
+        assert!(by_size.nodes.iter().all(|n| n.bytes_to_copy >= 1));
+        assert_eq!(by_size.nodes[1999].name, "f01994.txt");
+    }
+
+    #[test]
+    fn size_order_changes_only_the_order_never_ticks_or_totals() {
+        let (plan, tree) = fixture();
+        let mut sel = plan.actionable_ids();
+        tree.toggle(&plan, &rel("a/b/1.txt"), &mut sel);
+        for folder in [RelPath::root(), rel("a"), rel("a/b")] {
+            let mut n = tree.children(&plan, &folder, &sel, ALL, SortOrder::Name);
+            let mut s = tree.children(&plan, &folder, &sel, ALL, SortOrder::Size);
+            n.nodes.sort_by(|a, b| a.name.cmp(&b.name));
+            s.nodes.sort_by(|a, b| a.name.cmp(&b.name));
+            assert_eq!(n, s);
+        }
     }
 
     #[test]
@@ -484,7 +613,9 @@ mod tests {
         let tree = PlanTree::new(&plan);
         let mut sel = plan.actionable_ids();
         let t = std::time::Instant::now();
-        let root = tree.children(&plan, &RelPath::root(), &sel, ALL).nodes;
+        let root = tree
+            .children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name)
+            .nodes;
         tree.toggle(&plan, &RelPath::root(), &mut sel);
         let elapsed = t.elapsed();
         assert_eq!(root.len(), 500);
@@ -492,6 +623,38 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_order_over_200k_changes_costs_the_same_order_as_name_order() {
+        // One folder with 200k files: Size must look at every child, Name only builds `limit`.
+        let changes: Vec<Change> = (0..200_000u64)
+            .map(|i| create(&format!("big/f{i:06}.txt"), (i * 7919) % 10_007))
+            .collect();
+        let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let best = |order: SortOrder| {
+            (0..5)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let page = tree.children(&plan, &rel("big"), &sel, 2000, order);
+                    let elapsed = t.elapsed();
+                    assert_eq!((page.nodes.len(), page.total), (2000, 200_000));
+                    elapsed
+                })
+                .min()
+                .unwrap()
+        };
+        let (name, size) = (best(SortOrder::Name), best(SortOrder::Size));
+        // A ratio, never an absolute time: CI machines differ.
+        assert!(size < name * 20, "name {name:?}, size {size:?}");
+        let page = tree.children(&plan, &rel("big"), &sel, 2000, SortOrder::Size);
+        assert!(
+            page.nodes
+                .windows(2)
+                .all(|w| w[0].bytes_to_copy >= w[1].bytes_to_copy)
         );
     }
 }

@@ -369,6 +369,8 @@ mod tests {
             path: rel(p),
             size: 1,
             mtime_ns: 0,
+            replica_size: 1,
+            replica_mtime_ns: 0,
             replica_newer: false,
         }
     }

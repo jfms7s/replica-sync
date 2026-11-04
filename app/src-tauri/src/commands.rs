@@ -6,7 +6,7 @@ use app_state::paths::AppPaths;
 use app_state::progress::{JobDone, ScanProgressView, Throttle, should_emit};
 use app_state::session::{ApplyJob, PairInput, PairView, PreviewSummary, Session};
 use app_state::settings::{self, Settings};
-use app_state::tree::ChildrenPage;
+use app_state::tree::{ChildrenPage, SortOrder};
 use replica_sync_core::execute::{Progress, RunReport};
 use replica_sync_core::model::{RelPath, SideKind};
 use replica_sync_core::pairs::Pair;
@@ -187,9 +187,13 @@ fn rel(path: &str) -> Res<RelPath> {
 }
 
 #[tauri::command]
-pub fn tree_children(state: State<'_, AppState>, path: String) -> Res<ChildrenPage> {
+pub fn tree_children(
+    state: State<'_, AppState>,
+    path: String,
+    order: SortOrder,
+) -> Res<ChildrenPage> {
     let folder = rel(&path)?;
-    with_session(&state, |s| s.children(&folder))
+    with_session(&state, |s| s.children(&folder, order))
 }
 
 #[tauri::command]

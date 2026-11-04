@@ -5,7 +5,7 @@
 use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::settings::Settings;
-use crate::tree::{ChildrenPage, PlanTree};
+use crate::tree::{ChildrenPage, PlanTree, SortOrder};
 use replica_sync_core::execute::{
     Control, DRIVE_CHECK_EVERY, DriveCheck, ExecContext, Progress, RunReport, execute,
 };
@@ -519,10 +519,15 @@ impl Session {
     }
 
     /// A folder's children for the Preview, at most [`CHILDREN_LIMIT`] of them.
-    pub fn children(&self, folder: &RelPath) -> Result<ChildrenPage, AppError> {
+    pub fn children(&self, folder: &RelPath, order: SortOrder) -> Result<ChildrenPage, AppError> {
         let c = self.current()?;
-        Ok(c.tree
-            .children(&c.prepared.plan, folder, &c.selection, CHILDREN_LIMIT))
+        Ok(c.tree.children(
+            &c.prepared.plan,
+            folder,
+            &c.selection,
+            CHILDREN_LIMIT,
+            order,
+        ))
     }
 
     pub fn toggle(&mut self, path: &RelPath) -> Result<PreviewSummary, AppError> {
@@ -856,7 +861,10 @@ mod tests {
             (s.totals.creates, s.actionable_count, s.selected_count),
             (2, 2, 2)
         );
-        let root = w.s.children(&RelPath::root()).unwrap().nodes;
+        let root =
+            w.s.children(&RelPath::root(), SortOrder::Name)
+                .unwrap()
+                .nodes;
         assert_eq!(
             root.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
             vec!["a.txt", "b"]
