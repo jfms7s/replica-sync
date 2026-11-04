@@ -86,6 +86,7 @@
   "detail.renamedFrom": "renomeado de {from}",
   "tree.label": "Alterações",
   "tree.sortBySize": "Maiores primeiro",
+  "tree.sortKeyHint": "Prima S na linha da pasta para alternar",
   "tree.sortBySizeIn": "Maiores primeiro em {name}",
   "find.label": "Procurar um ficheiro ou pasta pelo nome",
   "find.placeholder": "Procurar pelo nome…",

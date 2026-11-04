@@ -86,6 +86,7 @@
   "detail.renamedFrom": "renamed from {from}",
   "tree.label": "Changes",
   "tree.sortBySize": "Largest first",
+  "tree.sortKeyHint": "Press S on the folder row to switch",
   "tree.sortBySizeIn": "Largest first in {name}",
   "find.label": "Find a file or folder by name",
   "find.placeholder": "Find by name…",
