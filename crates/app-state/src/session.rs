@@ -5,7 +5,7 @@
 use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::settings::Settings;
-use crate::tree::{ChildrenPage, PlanTree, SortOrder};
+use crate::tree::{ChildrenPage, FindPage, PlanTree, SortOrder};
 use replica_sync_core::execute::{
     Control, DRIVE_CHECK_EVERY, DriveCheck, ExecContext, Progress, RunReport, execute,
 };
@@ -32,6 +32,9 @@ use std::time::{Duration, SystemTime};
 /// Rows one folder may send to the Preview; a folder with more says how many
 /// are not shown (its checkbox still includes or excludes them all).
 pub const CHILDREN_LIMIT: usize = 2000;
+
+/// The most results one find may send, whatever the caller asks for.
+pub const FIND_LIMIT_MAX: usize = 1000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -530,6 +533,18 @@ impl Session {
         ))
     }
 
+    /// Changes whose file or folder name contains `query`, at most `limit`
+    /// (capped at [`FIND_LIMIT_MAX`]). A lookup: it never touches the selection.
+    pub fn find(&self, query: &str, limit: usize) -> Result<FindPage, AppError> {
+        let c = self.current()?;
+        Ok(c.tree.find(
+            &c.prepared.plan,
+            query,
+            &c.selection,
+            limit.min(FIND_LIMIT_MAX),
+        ))
+    }
+
     pub fn toggle(&mut self, path: &RelPath) -> Result<PreviewSummary, AppError> {
         self.ensure_idle()?;
         let c = self.current_mut()?;
@@ -802,7 +817,12 @@ fn check_trash_days(days: u32) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::testutil::{FakeVolumes, write};
+    use crate::tree::Tick;
     use std::fs;
+
+    fn rel(s: &str) -> RelPath {
+        RelPath::new(s).unwrap()
+    }
 
     struct World {
         t: tempfile::TempDir,
@@ -849,6 +869,117 @@ mod tests {
         };
         let id = s.save_pair(input, &v).unwrap().id;
         World { t, v, s, id }
+    }
+
+    /// 2,500 files in one folder (past the 2,000-row cap); `IMG_2400.jpg` is 7 bytes, the rest 1.
+    fn world_with_a_huge_folder() -> (World, PreviewSummary) {
+        let mut w = world();
+        for i in 0..2500 {
+            let body: &[u8] = if i == 2400 { b"1234567" } else { b"x" };
+            write(&w.src(), &format!("shots/IMG_{i:04}.jpg"), body);
+        }
+        write(&w.src(), "other.txt", b"o");
+        let s = w.scan();
+        (w, s)
+    }
+
+    #[test]
+    fn find_reaches_a_file_past_the_cap_and_ticking_it_flips_exactly_that_file() {
+        let (mut w, scanned) = world_with_a_huge_folder();
+        assert_eq!(
+            (scanned.actionable_count, scanned.selected_count),
+            (2501, 2501)
+        );
+        let shown = w.s.children(&rel("shots"), SortOrder::Name).unwrap();
+        assert_eq!((shown.nodes.len(), shown.total), (CHILDREN_LIMIT, 2500));
+        assert!(
+            shown.nodes.iter().all(|n| n.name != "IMG_2400.jpg"),
+            "the file is past the 2,000-row cap"
+        );
+
+        let page = w.s.find("img_2400", 200).unwrap();
+        assert_eq!((page.nodes.len(), page.total_matches), (1, 1));
+        let hit = page.nodes[0].clone();
+        assert_eq!(hit.path.as_str(), "shots/IMG_2400.jpg");
+        assert_eq!(hit.tick, Tick::On);
+
+        let after = w.s.toggle(&hit.path).unwrap();
+        assert_eq!(after.selected_count, scanned.selected_count - 1);
+        assert_eq!(after.selected.creates, scanned.selected.creates - 1);
+        assert_eq!(
+            after.selected.bytes_to_copy,
+            scanned.selected.bytes_to_copy - 7,
+            "exactly that file's bytes"
+        );
+        // The whole-plan totals and the approvable count do not move.
+        assert_eq!(after.totals.creates, scanned.totals.creates);
+        assert_eq!(after.actionable_count, scanned.actionable_count);
+        assert_eq!(w.s.find("img_2400", 200).unwrap().nodes[0].tick, Tick::Off);
+        // Its neighbours are still ticked.
+        assert_eq!(w.s.find("img_2399", 200).unwrap().nodes[0].tick, Tick::On);
+
+        // Approve all still means the whole plan, found file included.
+        let all = w.s.select_all(true).unwrap();
+        assert_eq!(all.selected_count, scanned.actionable_count);
+        assert_eq!(w.s.find("img_2400", 200).unwrap().nodes[0].tick, Tick::On);
+    }
+
+    #[test]
+    fn find_a_folder_a_scan_made_and_toggling_it_flips_its_subtree_only() {
+        let mut w = world();
+        write(&w.src(), "Trips/a.jpg", b"aa");
+        write(&w.src(), "Trips/b.jpg", b"bb");
+        write(&w.src(), "Trips/Lisbon/c.jpg", b"cc");
+        write(&w.src(), "other.txt", b"o");
+        let scanned = w.scan();
+        assert_eq!(scanned.selected_count, 4);
+        let page = w.s.find("trips", 200).unwrap();
+        assert_eq!(page.total_matches, 1);
+        let folder = page.nodes[0].clone();
+        assert!(folder.is_folder);
+        assert_eq!((folder.path.as_str(), folder.counts.create), ("Trips", 3));
+        let after = w.s.toggle(&folder.path).unwrap();
+        assert_eq!(after.selected_count, 1, "only other.txt is left ticked");
+        assert_eq!(after.selected.bytes_to_copy, 1);
+        assert_eq!(after.totals.creates, scanned.totals.creates);
+        assert_eq!(after.actionable_count, 4);
+        assert_eq!(w.s.find("trips", 200).unwrap().nodes[0].tick, Tick::Off);
+        assert_eq!(w.s.select_all(true).unwrap().selected_count, 4);
+    }
+
+    #[test]
+    fn find_answers_from_the_current_plan_after_a_rescan() {
+        let mut w = world();
+        write(&w.src(), "Old/old-photo.jpg", b"1");
+        w.scan();
+        assert_eq!(w.s.find("old", 200).unwrap().total_matches, 2); // the folder and the file
+        fs::remove_dir_all(w.src().join("Old")).unwrap();
+        write(&w.src(), "New/new-photo.jpg", b"1");
+        w.scan();
+        assert_eq!(
+            w.s.find("old", 200).unwrap().total_matches,
+            0,
+            "no stale index"
+        );
+        assert_eq!(w.s.find("new", 200).unwrap().total_matches, 2);
+    }
+
+    #[test]
+    fn find_never_changes_the_selection_and_needs_a_plan() {
+        let (mut w, scanned) = world_with_a_huge_folder();
+        w.s.select_all(false).unwrap();
+        let page = w.s.find("img_", 5000).unwrap();
+        assert_eq!(page.nodes.len(), FIND_LIMIT_MAX, "the limit is capped");
+        assert_eq!(page.total_matches, 2500);
+        assert!(page.nodes.iter().all(|n| n.tick == Tick::Off));
+        assert_eq!(w.s.summary().unwrap().selected_count, 0);
+        assert_eq!(
+            w.s.summary().unwrap().actionable_count,
+            scanned.actionable_count
+        );
+
+        let fresh = Session::open(AppPaths::new(w.t.path().join("data2"))).unwrap();
+        assert!(fresh.find("x", 10).is_err());
     }
 
     #[test]
