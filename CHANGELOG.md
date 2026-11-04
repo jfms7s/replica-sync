@@ -4,6 +4,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+## 0.8.0 — 2026-11-04
+
+Supersedes the unpublished 0.7.0 draft (and through it 0.6.0 and earlier) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does. **Not checked on a real second backup disk either:** rotating replicas, find, size sort and the Update details were tested in the engine and the UI tests, not by hand.
+
 ### Added
 - A "Find a file or folder by name" box above the Preview's tree finds changes past the 2,000-row cap of a folder: a case-insensitive match on the name (not the folder path), up to 200 results with "N more matches", each with its folder, its counts if it is a folder, and its own checkbox. Find is a lookup, not a filter: ticking a file result ticks that file, ticking a folder result ticks everything inside it (as the folder's checkbox in the tree does), and "Approve all" and the totals still cover the whole plan. Folders that only hold changes (a new `Trips/` with photos) are found too.
 - Each folder in the Preview can be sorted "Largest first" (a button on the folder's row and one above the tree for the top level). A folder counts its whole subtree, ties go by name. The order is applied before the 2,000-row cap, so in this order the "N more not shown" are the smallest. Ticks and totals do not change. The choice lasts for the session. With the keyboard, press S on an open folder's row.
