@@ -1946,6 +1946,70 @@ mod tests {
     }
 
     #[test]
+    fn source_growing_during_an_update_keeps_the_old_replica_file_and_trashes_nothing() {
+        let f = fixture();
+        write_file(&f.src, "grow.log", b"start", T0 + 100);
+        write_file(&f.rep, "grow.log", b"old", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        assert!(
+            matches!(plan.changes[0].change, Change::Update { .. }),
+            "{plan:?}"
+        );
+        let grow = f.src.join("grow.log");
+        let mut appended = false;
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if !appended
+                    && p.bytes_done > 0
+                    && p.current.as_ref().is_some_and(|c| c.as_str() == "grow.log")
+                {
+                    use std::io::Write;
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&grow)
+                        .unwrap()
+                        .write_all(b" more")
+                        .unwrap();
+                    appended = true;
+                }
+            },
+        );
+        assert!(appended, "the source never grew: {report:?}");
+        assert_eq!(report.results.len(), 1, "{report:?}");
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Failed(FailReason::ChangedDuringCopy)
+        );
+        assert_eq!(read_tree(&f.rep)["grow.log"], b"old");
+        assert!(no_temp_files(&f.rep));
+        let trash = f.rep.join(crate::trash::TRASH_DIR);
+        assert!(
+            !trash.exists() || read_tree_including(&trash).is_empty(),
+            "the failed update trashed the old file: {:?}",
+            read_tree_including(&trash)
+        );
+    }
+
+    /// Every file under `dir`, whatever its name (unlike `read_tree`, which
+    /// skips the trash folder).
+    fn read_tree_including(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(read_tree_including(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[test]
     fn unapproved_changes_are_left_alone() {
         let f = fixture();
         write_file(&f.src, "a.txt", b"1", T0);
