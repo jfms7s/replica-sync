@@ -206,6 +206,27 @@ mod tests {
         assert!(std::fs::read_dir(d.path()).unwrap().next().is_none());
     }
 
+    // Not Windows: there `case_mode` answers without probing, so nothing fails.
+    #[cfg(unix)]
+    #[test]
+    fn case_mode_fails_when_the_replica_folder_is_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let err = case_mode(&d.path().join("nope")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_probe_refuses_a_folder_at_the_probe_name_and_leaves_it() {
+        let d = tempfile::tempdir().unwrap();
+        let planted = d.path().join(CASE_PROBE_NAME);
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::write(planted.join("keep"), b"x").unwrap();
+        let err = case_mode(d.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(planted.join("keep").exists());
+    }
+
     #[test]
     fn free_space_is_reported() {
         let d = tempfile::tempdir().unwrap();
