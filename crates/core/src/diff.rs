@@ -411,9 +411,23 @@ mod tests {
             &snap(vec![file("a.jpg", 9, T0)]),
             CaseMode::Insensitive,
         );
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 1, "{out:?}");
         assert!(
             matches!(&out[0], Change::Skipped { reason, .. } if *reason == SkipReason::CaseCollision)
+        );
+        // The skipped path is one of the two colliding source names (the later
+        // one in sorted order); the replica's `a.jpg` is neither updated,
+        // deleted nor renamed.
+        assert!(
+            matches!(&out[0], Change::Skipped { path, .. } if path.as_str() == "a.jpg"),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter().any(|c| matches!(
+                c,
+                Change::Update { .. } | Change::Delete { .. } | Change::Move { .. }
+            )),
+            "{out:?}"
         );
     }
 
