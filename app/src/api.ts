@@ -40,7 +40,15 @@ export type MoveKind =
   | { kind: 'dirCaseOnly' };
 export type Change =
   | { type: 'create'; path: RelPath; size: number; mtime_ns: number }
-  | { type: 'update'; path: RelPath; size: number; mtime_ns: number; replica_newer: boolean }
+  | {
+      type: 'update';
+      path: RelPath;
+      size: number;
+      mtime_ns: number;
+      replica_size: number;
+      replica_mtime_ns: number;
+      replica_newer: boolean;
+    }
   | { type: 'delete'; path: RelPath; size: number; mtime_ns: number }
   | { type: 'move'; from: RelPath; to: RelPath; kind: MoveKind }
   | { type: 'mkDir'; path: RelPath }
@@ -66,8 +74,13 @@ export interface RowChange { id: number; change: Change }
 export interface NodeView {
   name: string; path: RelPath; isFolder: boolean; changes: RowChange[]; counts: Counts; bytesToCopy: number; tick: Tick;
 }
+/** How a folder's children are ordered before the cap: by name, or largest first. */
+export type SortOrder = 'name' | 'size';
 /** The first `nodes.length` children of a folder; `total` counts them all. */
 export interface ChildrenPage { nodes: NodeView[]; total: number }
+
+/** Changes whose file or folder name matched; `totalMatches` counts them all. */
+export interface FindPage { nodes: NodeView[]; totalMatches: number }
 
 export interface SideProgress { files: number; bytes: number; current: string }
 export interface ScanProgress { source: SideProgress; replica: SideProgress; approxFiles: number | null }
@@ -103,7 +116,8 @@ export const api = {
   startScan: (id: string) => invoke<void>('start_scan', { id }),
   cancelScan: () => invoke<void>('cancel_scan'),
   previewSummary: () => invoke<PreviewSummary>('preview_summary'),
-  treeChildren: (path: RelPath) => invoke<ChildrenPage>('tree_children', { path }),
+  treeFind: (query: string, limit: number) => invoke<FindPage>('tree_find', { query, limit }),
+  treeChildren: (path: RelPath, order: SortOrder) => invoke<ChildrenPage>('tree_children', { path, order }),
   deleteFolders: (limit: number) => invoke<RelPath[]>('delete_folders', { limit }),
   toggle: (path: RelPath) => invoke<PreviewSummary>('toggle', { path }),
   selectAll: (on: boolean) => invoke<PreviewSummary>('select_all', { on }),

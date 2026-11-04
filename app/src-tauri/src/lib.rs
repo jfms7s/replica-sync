@@ -142,6 +142,7 @@ pub fn run() {
             commands::cancel_scan,
             commands::preview_summary,
             commands::tree_children,
+            commands::tree_find,
             commands::delete_folders,
             commands::toggle,
             commands::select_all,

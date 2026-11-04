@@ -232,6 +232,8 @@ pub fn diff(source: &Snapshot, replica: &Snapshot, case: CaseMode) -> Vec<Change
                         path: s.rel.clone(),
                         size: s.size,
                         mtime_ns: s.mtime_ns,
+                        replica_size: r.size,
+                        replica_mtime_ns: r.mtime_ns,
                         replica_newer: newer_beyond_tolerance(r.mtime_ns, s.mtime_ns),
                     });
                 }
@@ -275,6 +277,8 @@ mod tests {
                     path: rel("changed.txt"),
                     size: 3,
                     mtime_ns: ns(T0 + 60),
+                    replica_size: 3,
+                    replica_mtime_ns: ns(T0),
                     replica_newer: false
                 },
                 Change::Delete {
@@ -304,6 +308,25 @@ mod tests {
         };
         assert!(!unchanged(&src, &file("a", 1, T0)));
         assert!(!unchanged(&file("a", 2, T0), &file("a", 1, T0)));
+    }
+
+    #[test]
+    fn an_update_carries_both_sides_sizes_and_times() {
+        let out = d(
+            vec![file("a.bin", 91_000, T0 + 500)],
+            vec![file("a.bin", 88_000, T0)],
+        );
+        assert_eq!(
+            out,
+            vec![Change::Update {
+                path: rel("a.bin"),
+                size: 91_000,
+                mtime_ns: ns(T0 + 500),
+                replica_size: 88_000,
+                replica_mtime_ns: ns(T0),
+                replica_newer: false,
+            }]
+        );
     }
 
     #[test]

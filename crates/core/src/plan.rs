@@ -238,6 +238,8 @@ mod tests {
                     path: rel("a0"),
                     size: 1,
                     mtime_ns: 0,
+                    replica_size: 0,
+                    replica_mtime_ns: 0,
                     replica_newer: false,
                 },
                 Change::MkDir { path: rel("m") },
@@ -367,6 +369,8 @@ mod tests {
             path: rel(p),
             size: 1,
             mtime_ns: 0,
+            replica_size: 1,
+            replica_mtime_ns: 0,
             replica_newer: false,
         }
     }
