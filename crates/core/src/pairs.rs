@@ -33,17 +33,112 @@ pub struct LastSync {
     pub stopped: bool,
 }
 
+/// Most backup disks one pair may rotate between ("one at home, one at a
+/// relative's"). The store keeps a list, so raising this needs no migration.
+pub const MAX_REPLICAS: usize = 2;
+
+/// One backup disk of a pair, with its own sync history: each disk is a mirror
+/// that is only as current as the last run that reached it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaSide {
+    pub side: Side,
+    pub last_sync: Option<LastSync>,
+    /// Files seen in the last source scan for this disk, for an approximate
+    /// progress bar.
+    pub last_scan_files: Option<u64>,
+}
+
+impl ReplicaSide {
+    fn new(side: Side) -> ReplicaSide {
+        ReplicaSide {
+            side,
+            last_sync: None,
+            last_scan_files: None,
+        }
+    }
+
+    /// Never synced to this disk: the mass-change guard then suspects the
+    /// replica folder rather than the source. Another disk having synced does
+    /// not count.
+    pub fn is_first_sync(&self) -> bool {
+        self.last_sync.is_none()
+    }
+}
+
+/// `replicas` holds 1 to [`MAX_REPLICAS`] disks, always: creation, the editing
+/// functions and loading all enforce it, so it is not a public field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PairWire")]
 pub struct Pair {
     pub id: String,
     pub name: String,
     pub source: Side,
-    pub replica: Side,
+    replicas: Vec<ReplicaSide>,
     pub user_rules: Vec<String>,
     pub trash_days: u32,
-    pub last_sync: Option<LastSync>,
-    /// Files seen in the last source scan, for an approximate progress bar.
-    pub last_scan_files: Option<u64>,
+}
+
+/// A pair as `pairs.json` may hold it. Format 1 (every release up to 0.7) has
+/// one `replica` and the pair's own `last_sync` / `last_scan_files`; format 2
+/// has `replicas`. Both are read, forever; only format 2 is written.
+#[derive(Deserialize)]
+struct PairWire {
+    id: String,
+    name: String,
+    source: Side,
+    #[serde(default)]
+    replicas: Option<Vec<ReplicaSide>>,
+    #[serde(default)]
+    replica: Option<Side>,
+    user_rules: Vec<String>,
+    trash_days: u32,
+    #[serde(default)]
+    last_sync: Option<LastSync>,
+    #[serde(default)]
+    last_scan_files: Option<u64>,
+}
+
+impl TryFrom<PairWire> for Pair {
+    type Error = String;
+
+    fn try_from(w: PairWire) -> Result<Pair, String> {
+        let replicas = match (w.replicas, w.replica) {
+            (Some(_), Some(_)) => {
+                return Err(format!("pair {}: has both `replica` and `replicas`", w.id));
+            }
+            (Some(list), None) => {
+                if w.last_sync.is_some() || w.last_scan_files.is_some() {
+                    return Err(format!(
+                        "pair {}: `replicas` with a pair-level last_sync or last_scan_files",
+                        w.id
+                    ));
+                }
+                if !(1..=MAX_REPLICAS).contains(&list.len()) {
+                    return Err(format!(
+                        "pair {}: {} replicas, expected 1 to {MAX_REPLICAS}",
+                        w.id,
+                        list.len()
+                    ));
+                }
+                list
+            }
+            // The single disk takes over the pair's own history.
+            (None, Some(side)) => vec![ReplicaSide {
+                side,
+                last_sync: w.last_sync,
+                last_scan_files: w.last_scan_files,
+            }],
+            (None, None) => return Err(format!("pair {}: has no replica", w.id)),
+        };
+        Ok(Pair {
+            id: w.id,
+            name: w.name,
+            source: w.source,
+            replicas,
+            user_rules: w.user_rules,
+            trash_days: w.trash_days,
+        })
+    }
 }
 
 impl Pair {
@@ -51,10 +146,17 @@ impl Pair {
         SkipRules::new(&self.user_rules)
     }
 
-    /// Never synced: the mass-change guard then suspects the replica folder
-    /// rather than the source.
-    pub fn is_first_sync(&self) -> bool {
-        self.last_sync.is_none()
+    /// The backup disks, 1 to [`MAX_REPLICAS`], in the order they were added.
+    pub fn replicas(&self) -> &[ReplicaSide] {
+        &self.replicas
+    }
+
+    pub fn replica(&self, index: usize) -> Option<&ReplicaSide> {
+        self.replicas.get(index)
+    }
+
+    pub fn replica_mut(&mut self, index: usize) -> Option<&mut ReplicaSide> {
+        self.replicas.get_mut(index)
     }
 }
 
@@ -68,6 +170,12 @@ pub enum PairError {
     Nested,
     #[error("the source and the replica are on the same drive; confirm to continue")]
     SameVolume,
+    #[error("a pair has at most {MAX_REPLICAS} backup disks")]
+    TooManyReplicas,
+    #[error("a pair needs at least one backup disk")]
+    LastReplica,
+    #[error("the pair has no backup disk number {0}")]
+    NoSuchReplica(usize),
     #[error(transparent)]
     Rule(#[from] RuleError),
     #[error(transparent)]
@@ -150,11 +258,9 @@ pub fn create_pair(req: NewPair, volumes: &dyn Volumes) -> Result<Pair, PairErro
         id: new_id(),
         name: req.name.trim().to_owned(),
         source,
-        replica,
+        replicas: vec![ReplicaSide::new(replica)],
         user_rules: req.user_rules,
         trash_days: req.trash_days,
-        last_sync: None,
-        last_scan_files: None,
     })
 }
 
@@ -172,6 +278,8 @@ pub enum ResolveError {
     FolderMissing(PathBuf),
     #[error("the drive at {} is not the one saved for this pair", .0.display())]
     WrongVolume(PathBuf),
+    #[error("the pair has no backup disk number {0}")]
+    NoSuchReplica(usize),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -194,10 +302,22 @@ fn resolve_side(
     Ok(root)
 }
 
-pub fn resolve(pair: &Pair, volumes: &dyn Volumes) -> Result<Resolved, ResolveError> {
+fn replica_side(pair: &Pair, replica: usize) -> Result<&Side, ResolveError> {
+    pair.replica(replica)
+        .map(|r| &r.side)
+        .ok_or(ResolveError::NoSuchReplica(replica))
+}
+
+/// The source and backup disk number `replica` of `pair`.
+pub fn resolve(
+    pair: &Pair,
+    replica: usize,
+    volumes: &dyn Volumes,
+) -> Result<Resolved, ResolveError> {
+    let replica = replica_side(pair, replica)?;
     Ok(Resolved {
         source_root: resolve_side(&pair.source, SideKind::Source, volumes)?,
-        replica_root: resolve_side(&pair.replica, SideKind::Replica, volumes)?,
+        replica_root: resolve_side(replica, SideKind::Replica, volumes)?,
     })
 }
 
@@ -225,11 +345,12 @@ fn verify_side(
 /// Re-checked right before Apply: a different disk on the same letter is refused.
 pub fn verify_replica(
     pair: &Pair,
+    replica: usize,
     resolved: &Resolved,
     volumes: &dyn Volumes,
 ) -> Result<(), ResolveError> {
     verify_side(
-        &pair.replica,
+        replica_side(pair, replica)?,
         SideKind::Replica,
         &resolved.replica_root,
         volumes,
@@ -251,49 +372,140 @@ pub fn verify_source(
     )
 }
 
-/// The replica folder alone, for screens (Trash) that don't need the source.
-pub fn resolve_replica(pair: &Pair, volumes: &dyn Volumes) -> Result<PathBuf, ResolveError> {
-    resolve_side(&pair.replica, SideKind::Replica, volumes)
+/// Backup disk number `replica`'s folder alone, for screens (Trash) that don't
+/// need the source.
+pub fn resolve_replica(
+    pair: &Pair,
+    replica: usize,
+    volumes: &dyn Volumes,
+) -> Result<PathBuf, ResolveError> {
+    resolve_side(replica_side(pair, replica)?, SideKind::Replica, volumes)
 }
 
-/// Points one side of `pair` at `folder`. Like [`create_pair`], a folder on the
-/// other side's drive is refused unless `allow_same_volume`.
-pub fn relink(
+/// Refuses `new_path` when it is the same folder as `other`, or nested with it.
+/// While `other` is away it can't be checked; resolve checks again.
+fn check_against(
+    new_path: &Path,
+    other: &Side,
+    kind: SideKind,
+    volumes: &dyn Volumes,
+) -> Result<(), PairError> {
+    match resolve_side(other, kind, volumes) {
+        Ok(other_path) => check_folders(new_path, &canonical(&other_path)?),
+        Err(ResolveError::NotConnected { .. } | ResolveError::FolderMissing(_)) => Ok(()),
+        Err(ResolveError::Io(e)) => Err(PairError::Io(e)),
+        Err(e @ (ResolveError::WrongVolume(_) | ResolveError::NoSuchReplica(_))) => {
+            unreachable!("resolve_side neither checks the drive nor picks a disk: {e}")
+        }
+    }
+}
+
+/// Checks a new backup folder against the source and the other backup disks.
+/// `skip` is the disk being replaced, if any.
+fn check_replica(
+    pair: &Pair,
+    skip: Option<usize>,
+    new_side: &Side,
+    new_path: &Path,
+    allow_same_volume: bool,
+    volumes: &dyn Volumes,
+) -> Result<(), PairError> {
+    check_against(new_path, &pair.source, SideKind::Source, volumes)?;
+    let others = (0..pair.replicas.len()).filter(|i| Some(*i) != skip);
+    for other in others.map(|i| &pair.replicas[i]) {
+        check_against(new_path, &other.side, SideKind::Replica, volumes)?;
+    }
+    if pair.source.volume_id == new_side.volume_id && !allow_same_volume {
+        return Err(PairError::SameVolume);
+    }
+    Ok(())
+}
+
+/// Points the source at `folder`. A folder on a backup disk's drive is refused
+/// unless `allow_same_volume`. Every disk's history is dropped: with another
+/// source, the next sync to each is a first sync.
+pub fn relink_source(
     pair: &mut Pair,
-    side: SideKind,
     folder: &Path,
     allow_same_volume: bool,
     volumes: &dyn Volumes,
 ) -> Result<(), PairError> {
     let (new_side, new_path) = side_for(folder, volumes)?;
-    let other = match side {
-        SideKind::Source => (&pair.replica, SideKind::Replica),
-        SideKind::Replica => (&pair.source, SideKind::Source),
-    };
-    let same_volume = other.0.volume_id == new_side.volume_id;
-    match resolve_side(other.0, other.1, volumes) {
-        Ok(other_path) => check_folders(&new_path, &canonical(&other_path)?)?,
-        // The other side can't be checked while it is away; resolve checks again.
-        Err(ResolveError::NotConnected { .. } | ResolveError::FolderMissing(_)) => {}
-        Err(ResolveError::Io(e)) => return Err(PairError::Io(e)),
-        Err(e @ ResolveError::WrongVolume(_)) => {
-            unreachable!("resolve_side never checks the drive: {e}")
-        }
+    for r in &pair.replicas {
+        check_against(&new_path, &r.side, SideKind::Replica, volumes)?;
     }
+    let same_volume = pair
+        .replicas
+        .iter()
+        .any(|r| r.side.volume_id == new_side.volume_id);
     if same_volume && !allow_same_volume {
         return Err(PairError::SameVolume);
     }
-    match side {
-        SideKind::Source => pair.source = new_side,
-        SideKind::Replica => pair.replica = new_side,
+    pair.source = new_side;
+    for r in &mut pair.replicas {
+        *r = ReplicaSide::new(r.side.clone());
     }
-    pair.last_sync = None;
-    pair.last_scan_files = None;
+    Ok(())
+}
+
+/// Points backup disk number `replica` at `folder`, like [`create_pair`]: a
+/// folder on the source's drive is refused unless `allow_same_volume`. That
+/// disk's history is dropped (its next sync is a first sync); the other disk's
+/// is kept.
+pub fn relink_replica(
+    pair: &mut Pair,
+    replica: usize,
+    folder: &Path,
+    allow_same_volume: bool,
+    volumes: &dyn Volumes,
+) -> Result<(), PairError> {
+    if pair.replica(replica).is_none() {
+        return Err(PairError::NoSuchReplica(replica));
+    }
+    let (new_side, new_path) = side_for(folder, volumes)?;
+    check_replica(
+        pair,
+        Some(replica),
+        &new_side,
+        &new_path,
+        allow_same_volume,
+        volumes,
+    )?;
+    pair.replicas[replica] = ReplicaSide::new(new_side);
+    Ok(())
+}
+
+/// Adds a second backup disk, which starts with no history.
+pub fn add_replica(
+    pair: &mut Pair,
+    folder: &Path,
+    allow_same_volume: bool,
+    volumes: &dyn Volumes,
+) -> Result<(), PairError> {
+    if pair.replicas.len() >= MAX_REPLICAS {
+        return Err(PairError::TooManyReplicas);
+    }
+    let (new_side, new_path) = side_for(folder, volumes)?;
+    check_replica(pair, None, &new_side, &new_path, allow_same_volume, volumes)?;
+    pair.replicas.push(ReplicaSide::new(new_side));
+    Ok(())
+}
+
+/// Drops backup disk number `replica` and its history. The last disk can't be
+/// removed.
+pub fn remove_replica(pair: &mut Pair, replica: usize) -> Result<(), PairError> {
+    if pair.replica(replica).is_none() {
+        return Err(PairError::NoSuchReplica(replica));
+    }
+    if pair.replicas.len() == 1 {
+        return Err(PairError::LastReplica);
+    }
+    pair.replicas.remove(replica);
     Ok(())
 }
 
 /// The `pairs.json` format this build reads and writes.
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 struct StoreOut<'a> {
@@ -303,7 +515,8 @@ struct StoreOut<'a> {
 
 #[derive(Deserialize)]
 struct StoreIn {
-    /// A store without it is read as format 1.
+    /// A store without it is read as format 1. Format 1 (one `replica` per
+    /// pair) and 2 (`replicas`) are both read; only 2 is written.
     #[serde(default = "first_store_version")]
     version: u32,
     pairs: Vec<Pair>,
@@ -455,7 +668,7 @@ mod tests {
             &v,
         )
         .unwrap();
-        let r = resolve(&p, &v).unwrap();
+        let r = resolve(&p, 0, &v).unwrap();
         // The same drive now reports the fallback serial with its own prefix.
         v.0.borrow_mut().retain(|x| x.id != "win:0000000089abcdef");
         v.mount("win32:89abcdef", &t.path().join("diskA"));
@@ -478,7 +691,7 @@ mod tests {
             &v,
         )
         .unwrap();
-        let r = resolve(&p, &v).unwrap();
+        let r = resolve(&p, 0, &v).unwrap();
         verify_source(&p, &r, &v).unwrap();
         v.mount("Z", &t.path().join("diskA")); // another disk now answers for that path
         v.0.borrow_mut().retain(|x| x.id != "A");
@@ -500,7 +713,7 @@ mod tests {
         )
         .unwrap();
         v.0.borrow_mut().retain(|x| x.id != "A");
-        let root = resolve_replica(&p, &v).unwrap();
+        let root = resolve_replica(&p, 0, &v).unwrap();
         assert!(root.ends_with("Photos"));
     }
 
@@ -524,8 +737,8 @@ mod tests {
                 label: "Disk A".into()
             }
         );
-        assert_eq!(p.replica.rel_path.as_str(), "Backup/Photos");
-        assert!(p.is_first_sync());
+        assert_eq!(p.replicas()[0].side.rel_path.as_str(), "Backup/Photos");
+        assert!(p.replicas()[0].is_first_sync());
     }
 
     #[test]
@@ -577,12 +790,12 @@ mod tests {
         .unwrap();
         fs::rename(t.path().join("diskB"), t.path().join("diskB-now-F")).unwrap();
         v.mount("B", &t.path().join("diskB-now-F"));
-        let r = resolve(&p, &v).unwrap();
+        let r = resolve(&p, 0, &v).unwrap();
         assert_eq!(
             canonical(&r.replica_root).unwrap(),
             canonical(&t.path().join("diskB-now-F/Backup/Photos")).unwrap()
         );
-        verify_replica(&p, &r, &v).unwrap();
+        verify_replica(&p, 0, &r, &v).unwrap();
     }
 
     #[test]
@@ -598,7 +811,7 @@ mod tests {
         .unwrap();
         v.0.borrow_mut().retain(|x| x.id != "B");
         assert!(matches!(
-            resolve(&p, &v),
+            resolve(&p, 0, &v),
             Err(ResolveError::NotConnected {
                 side: SideKind::Replica,
                 ..
@@ -607,7 +820,7 @@ mod tests {
         v.mount("B", &t.path().join("diskB"));
         fs::remove_dir_all(t.path().join("diskB/Backup")).unwrap();
         assert!(matches!(
-            resolve(&p, &v),
+            resolve(&p, 0, &v),
             Err(ResolveError::FolderMissing(_))
         ));
     }
@@ -623,11 +836,11 @@ mod tests {
             &v,
         )
         .unwrap();
-        let r = resolve(&p, &v).unwrap();
+        let r = resolve(&p, 0, &v).unwrap();
         v.mount("C", &t.path().join("diskB")); // same place, different disk
         v.0.borrow_mut().retain(|x| x.id != "B");
         assert!(matches!(
-            verify_replica(&p, &r, &v),
+            verify_replica(&p, 0, &r, &v),
             Err(ResolveError::WrongVolume(_))
         ));
     }
@@ -643,7 +856,7 @@ mod tests {
             &v,
         )
         .unwrap();
-        p.last_sync = Some(LastSync {
+        p.replica_mut(0).unwrap().last_sync = Some(LastSync {
             at: "2026-10-01T10:00:00Z".into(),
             applied: 3,
             failed: 0,
@@ -651,16 +864,9 @@ mod tests {
         });
         fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
         v.mount("C", &t.path().join("diskC"));
-        relink(
-            &mut p,
-            SideKind::Replica,
-            &t.path().join("diskC/Photos"),
-            false,
-            &v,
-        )
-        .unwrap();
-        assert_eq!(p.replica.volume_id, "C");
-        assert!(p.is_first_sync());
+        relink_replica(&mut p, 0, &t.path().join("diskC/Photos"), false, &v).unwrap();
+        assert_eq!(p.replicas()[0].side.volume_id, "C");
+        assert!(p.replicas()[0].is_first_sync());
     }
 
     /// Fails `find` for one drive id, as a drive that can't be queried does.
@@ -692,9 +898,9 @@ mod tests {
         fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
         v.mount("C", &t.path().join("diskC"));
         let before = p.clone();
-        let r = relink(
+        let r = relink_replica(
             &mut p,
-            SideKind::Replica,
+            0,
             &t.path().join("diskC/Photos"),
             false,
             &FindFails(&v, "A"),
@@ -717,15 +923,8 @@ mod tests {
         v.0.borrow_mut().retain(|x| x.id != "A");
         fs::create_dir_all(t.path().join("diskC/Photos")).unwrap();
         v.mount("C", &t.path().join("diskC"));
-        relink(
-            &mut p,
-            SideKind::Replica,
-            &t.path().join("diskC/Photos"),
-            false,
-            &v,
-        )
-        .unwrap();
-        assert_eq!(p.replica.volume_id, "C");
+        relink_replica(&mut p, 0, &t.path().join("diskC/Photos"), false, &v).unwrap();
+        assert_eq!(p.replicas()[0].side.volume_id, "C");
     }
 
     #[test]
@@ -741,11 +940,11 @@ mod tests {
         .unwrap();
         fs::create_dir_all(t.path().join("diskA/Backup")).unwrap();
         let onto_a = t.path().join("diskA/Backup");
-        let r = relink(&mut p, SideKind::Replica, &onto_a, false, &v);
+        let r = relink_replica(&mut p, 0, &onto_a, false, &v);
         assert!(matches!(r, Err(PairError::SameVolume)), "{r:?}");
-        assert_eq!(p.replica.volume_id, "B");
-        relink(&mut p, SideKind::Replica, &onto_a, true, &v).unwrap();
-        assert_eq!(p.replica.volume_id, "A");
+        assert_eq!(p.replicas()[0].side.volume_id, "B");
+        relink_replica(&mut p, 0, &onto_a, true, &v).unwrap();
+        assert_eq!(p.replicas()[0].side.volume_id, "A");
     }
 
     #[test]
@@ -759,12 +958,12 @@ mod tests {
             &v,
         )
         .unwrap();
-        let resolved = resolve(&p, &v).unwrap();
+        let resolved = resolve(&p, 0, &v).unwrap();
         fs::remove_dir(t.path().join("diskB/Backup/Photos")).unwrap();
-        let r = verify_replica(&p, &resolved, &v);
+        let r = verify_replica(&p, 0, &resolved, &v);
         assert!(matches!(r, Err(ResolveError::FolderMissing(_))), "{r:?}");
         v.0.borrow_mut().retain(|x| x.id != "B");
-        let r = verify_replica(&p, &resolved, &v);
+        let r = verify_replica(&p, 0, &resolved, &v);
         assert!(matches!(r, Err(ResolveError::NotConnected { .. })), "{r:?}");
     }
 
@@ -823,7 +1022,7 @@ mod tests {
         assert!(again.get(&p.id).is_none());
     }
 
-    /// A store as 0.4 wrote it: loads, and saves back byte for byte.
+    /// A store as 0.4 wrote it (format 1: one `replica`, history on the pair).
     const STORE_0_4: &str = r#"{
   "version": 1,
   "pairs": [
@@ -855,16 +1054,65 @@ mod tests {
   ]
 }"#;
 
+    /// The same store as this build writes it: format 2, the disk's history
+    /// moved into its `replicas` entry.
+    const STORE_0_4_AS_V2: &str = r#"{
+  "version": 2,
+  "pairs": [
+    {
+      "id": "18a2b3c4d5e6f708",
+      "name": "Photos",
+      "source": {
+        "volume_id": "uuid:1111-AAAA",
+        "rel_path": "Users/me/Photos",
+        "label": "Disk A"
+      },
+      "replicas": [
+        {
+          "side": {
+            "volume_id": "win32:0a1b2c3d",
+            "rel_path": "",
+            "label": "STICK"
+          },
+          "last_sync": {
+            "at": "2026-10-17T15:53:45Z",
+            "applied": 3,
+            "failed": 0,
+            "stopped": false
+          },
+          "last_scan_files": 120
+        }
+      ],
+      "user_rules": [
+        "*.tmp"
+      ],
+      "trash_days": 30
+    }
+  ]
+}"#;
+
     #[test]
-    fn a_0_4_store_round_trips_byte_for_byte() {
+    fn a_0_4_store_loads_untouched_and_saves_as_format_2() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("pairs.json");
         fs::write(&path, STORE_0_4).unwrap();
         let store = PairStore::load(&path).unwrap();
-        assert_eq!(store.pairs[0].source.rel_path, rel("Users/me/Photos"));
-        assert!(store.pairs[0].replica.rel_path.is_root());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            STORE_0_4,
+            "loading never writes"
+        );
+        assert!(!path.with_extension("json.tmp").exists());
+        let p = &store.pairs[0];
+        assert_eq!(p.source.rel_path, rel("Users/me/Photos"));
+        assert_eq!(p.replicas().len(), 1);
+        assert!(p.replicas()[0].side.rel_path.is_root());
+        // The pair's own history lands on its one disk.
+        assert_eq!(p.replicas()[0].last_sync.as_ref().unwrap().applied, 3);
+        assert_eq!(p.replicas()[0].last_scan_files, Some(120));
         store.save().unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), STORE_0_4);
+        assert_eq!(fs::read_to_string(&path).unwrap(), STORE_0_4_AS_V2);
+        assert_eq!(PairStore::load(&path).unwrap().pairs, store.pairs);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -879,12 +1127,14 @@ mod tests {
         let path = d.path().join("pairs.json");
         fs::write(
             &path,
-            STORE_0_4.replace(r#""version": 1"#, r#""version": 2"#),
+            STORE_0_4_AS_V2.replace(r#""version": 2"#, r#""version": 3"#),
         )
         .unwrap();
         let e = PairStore::load(&path).unwrap_err();
         assert!(e.to_string().contains("newer replica-sync"), "{e}");
         fs::write(&path, STORE_0_4.replace("  \"version\": 1,\n", "")).unwrap();
+        assert_eq!(PairStore::load(&path).unwrap().pairs.len(), 1);
+        fs::write(&path, STORE_0_4_AS_V2).unwrap();
         assert_eq!(PairStore::load(&path).unwrap().pairs.len(), 1);
     }
 
@@ -902,5 +1152,254 @@ mod tests {
                 "{bad}: {e}"
             );
         }
+    }
+
+    fn synced(at: &str) -> Option<LastSync> {
+        Some(LastSync {
+            at: at.into(),
+            applied: 1,
+            failed: 0,
+            stopped: false,
+        })
+    }
+
+    /// Source on A; disk B and a third disk C each hold a backup folder.
+    fn two_replicas() -> (tempfile::TempDir, FakeVolumes, Pair) {
+        let (t, v) = setup();
+        fs::create_dir_all(t.path().join("diskC/Backup/Photos")).unwrap();
+        v.mount("C", &t.path().join("diskC"));
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        add_replica(&mut p, &t.path().join("diskC/Backup/Photos"), false, &v).unwrap();
+        (t, v, p)
+    }
+
+    #[test]
+    fn a_pair_takes_a_second_backup_disk_and_no_third() {
+        let (t, v, mut p) = two_replicas();
+        assert_eq!(p.replicas().len(), 2);
+        assert_eq!(p.replicas()[1].side.volume_id, "C");
+        assert!(p.replicas()[1].is_first_sync());
+        fs::create_dir_all(t.path().join("diskD/Backup")).unwrap();
+        v.mount("D", &t.path().join("diskD"));
+        let r = add_replica(&mut p, &t.path().join("diskD/Backup"), false, &v);
+        assert!(matches!(r, Err(PairError::TooManyReplicas)), "{r:?}");
+        assert_eq!(p.replicas().len(), MAX_REPLICAS);
+    }
+
+    #[test]
+    fn a_backup_disk_is_checked_like_the_first_one() {
+        let (t, v) = setup();
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let before = p.clone();
+        // The first backup folder again, nested inside it, and on the source's drive.
+        fs::create_dir_all(t.path().join("diskB/Backup/Photos/Deep")).unwrap();
+        fs::create_dir_all(t.path().join("diskA/Backup")).unwrap();
+        for (folder, want) in [
+            ("diskB/Backup/Photos", "SameFolder"),
+            ("diskB/Backup/Photos/Deep", "Nested"),
+            ("diskB/Backup", "Nested"),
+            ("diskA/Backup", "SameVolume"),
+        ] {
+            let r = add_replica(&mut p, &t.path().join(folder), false, &v);
+            assert!(format!("{r:?}").contains(want), "{folder}: {r:?}");
+            assert_eq!(p, before, "{folder} changed the pair");
+        }
+        add_replica(&mut p, &t.path().join("diskA/Backup"), true, &v).unwrap();
+        assert_eq!(p.replicas().len(), 2);
+    }
+
+    #[test]
+    fn a_replica_can_only_be_removed_while_another_remains() {
+        let (_t, _v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-01T10:00:00Z");
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-02T10:00:00Z");
+        assert!(matches!(
+            remove_replica(&mut p, 2),
+            Err(PairError::NoSuchReplica(2))
+        ));
+        remove_replica(&mut p, 0).unwrap();
+        assert_eq!(p.replicas().len(), 1);
+        assert_eq!(p.replicas()[0].side.volume_id, "C");
+        assert_eq!(
+            p.replicas()[0].last_sync.as_ref().unwrap().at,
+            "2026-10-02T10:00:00Z",
+            "the remaining disk keeps its own history"
+        );
+        let before = p.clone();
+        assert!(matches!(
+            remove_replica(&mut p, 0),
+            Err(PairError::LastReplica)
+        ));
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn the_first_sync_guard_is_per_disk() {
+        let (_t, _v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-01T10:00:00Z");
+        assert!(!p.replicas()[0].is_first_sync());
+        assert!(
+            p.replicas()[1].is_first_sync(),
+            "disk B has never been synced to, whatever disk A has"
+        );
+    }
+
+    #[test]
+    fn relinking_one_disk_drops_only_its_history() {
+        let (t, v, mut p) = two_replicas();
+        for (i, at) in ["2026-10-01T10:00:00Z", "2026-10-02T10:00:00Z"]
+            .iter()
+            .enumerate()
+        {
+            let r = p.replica_mut(i).unwrap();
+            r.last_sync = synced(at);
+            r.last_scan_files = Some(10);
+        }
+        fs::create_dir_all(t.path().join("diskD/Backup")).unwrap();
+        v.mount("D", &t.path().join("diskD"));
+        relink_replica(&mut p, 1, &t.path().join("diskD/Backup"), false, &v).unwrap();
+        assert_eq!(p.replicas()[1].side.volume_id, "D");
+        assert!(p.replicas()[1].is_first_sync());
+        assert_eq!(p.replicas()[1].last_scan_files, None);
+        assert!(!p.replicas()[0].is_first_sync(), "disk A's history stays");
+        assert_eq!(p.replicas()[0].last_scan_files, Some(10));
+        let r = relink_replica(&mut p, 5, &t.path().join("diskD/Backup"), false, &v);
+        assert!(matches!(r, Err(PairError::NoSuchReplica(5))), "{r:?}");
+    }
+
+    #[test]
+    fn relinking_the_source_makes_every_disk_a_first_sync_again() {
+        let (t, v, mut p) = two_replicas();
+        for i in 0..2 {
+            let r = p.replica_mut(i).unwrap();
+            r.last_sync = synced("2026-10-01T10:00:00Z");
+            r.last_scan_files = Some(10);
+        }
+        fs::create_dir_all(t.path().join("diskD/Photos")).unwrap();
+        v.mount("D", &t.path().join("diskD"));
+        relink_source(&mut p, &t.path().join("diskD/Photos"), false, &v).unwrap();
+        assert_eq!(p.source.volume_id, "D");
+        assert!(p.replicas().iter().all(|r| r.is_first_sync()));
+        assert!(p.replicas().iter().all(|r| r.last_scan_files.is_none()));
+        // And a source on a backup disk's drive asks first.
+        fs::create_dir_all(t.path().join("diskB/Other")).unwrap();
+        let r = relink_source(&mut p, &t.path().join("diskB/Other"), false, &v);
+        assert!(matches!(r, Err(PairError::SameVolume)), "{r:?}");
+        assert_eq!(p.source.volume_id, "D");
+    }
+
+    #[test]
+    fn resolve_picks_the_backup_disk_asked_for() {
+        let (t, v, p) = two_replicas();
+        let b = resolve(&p, 0, &v).unwrap();
+        let c = resolve(&p, 1, &v).unwrap();
+        assert_eq!(b.source_root, c.source_root);
+        assert!(
+            b.replica_root
+                .starts_with(canonical(&t.path().join("diskB")).unwrap())
+        );
+        assert!(
+            c.replica_root
+                .starts_with(canonical(&t.path().join("diskC")).unwrap())
+        );
+        verify_replica(&p, 1, &c, &v).unwrap();
+        // Disk B's folder is not disk C's.
+        assert!(matches!(
+            verify_replica(&p, 1, &b, &v),
+            Err(ResolveError::WrongVolume(_))
+        ));
+        assert!(matches!(
+            resolve(&p, 2, &v),
+            Err(ResolveError::NoSuchReplica(2))
+        ));
+        assert!(matches!(
+            resolve_replica(&p, 2, &v),
+            Err(ResolveError::NoSuchReplica(2))
+        ));
+        v.0.borrow_mut().retain(|x| x.id != "B");
+        assert!(resolve(&p, 0, &v).is_err(), "disk B is away");
+        assert!(resolve(&p, 1, &v).is_ok(), "disk C is not");
+    }
+
+    #[test]
+    fn two_replicas_round_trip_byte_for_byte() {
+        let (t, _v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-01T10:00:00Z");
+        let path = t.path().join("pairs.json");
+        let mut store = PairStore::load(&path).unwrap();
+        store.upsert(p.clone());
+        store.save().unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let again = PairStore::load(&path).unwrap();
+        assert_eq!(again.pairs, vec![p]);
+        again.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        assert!(written.contains(r#""version": 2"#));
+    }
+
+    /// The first pair of `STORE_0_4_AS_V2` with its `replicas` value replaced.
+    fn v2_with_replicas(replicas: &str) -> String {
+        let a = STORE_0_4_AS_V2.find("\"replicas\"").unwrap();
+        let b = STORE_0_4_AS_V2.find("\"user_rules\"").unwrap();
+        format!(
+            "{}\"replicas\": {replicas},\n      {}",
+            &STORE_0_4_AS_V2[..a],
+            &STORE_0_4_AS_V2[b..]
+        )
+    }
+
+    fn load_text(text: &str) -> io::Result<PairStore> {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pairs.json");
+        fs::write(&path, text).unwrap();
+        PairStore::load(&path)
+    }
+
+    #[test]
+    fn a_store_must_hold_one_or_two_replicas_per_pair() {
+        let one = r#"{"side":{"volume_id":"X","rel_path":"","label":"X"},"last_sync":null,"last_scan_files":null}"#;
+        let list = |n: usize| format!("[{}]", vec![one; n].join(","));
+        assert!(load_text(&v2_with_replicas(&list(1))).is_ok());
+        assert!(load_text(&v2_with_replicas(&list(2))).is_ok());
+        for n in [0, 3] {
+            let e = load_text(&v2_with_replicas(&list(n))).unwrap_err();
+            assert!(e.to_string().contains("expected 1 to 2"), "{n}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_pair_with_both_shapes_or_neither_is_refused_not_guessed_at() {
+        // Both the old `replica` and `replicas`.
+        let both = STORE_0_4_AS_V2.replace(
+            r#""user_rules""#,
+            r#""replica": {"volume_id": "Z", "rel_path": "", "label": "Z"}, "user_rules""#,
+        );
+        let e = load_text(&both).unwrap_err();
+        assert!(
+            e.to_string().contains("both `replica` and `replicas`"),
+            "{e}"
+        );
+        // Neither.
+        let e = load_text(&v2_with_replicas("null")).unwrap_err();
+        assert!(e.to_string().contains("has no replica"), "{e}");
+        // `replicas` next to a pair-level history, which would be lost silently.
+        let mixed =
+            STORE_0_4_AS_V2.replace(r#""user_rules""#, r#""last_scan_files": 9, "user_rules""#);
+        let e = load_text(&mixed).unwrap_err();
+        assert!(e.to_string().contains("pair-level"), "{e}");
     }
 }
