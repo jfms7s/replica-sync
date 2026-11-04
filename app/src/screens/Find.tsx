@@ -11,7 +11,8 @@ const DEBOUNCE_MS = 150;
 
 /**
  * A lookup by file or folder name over the whole plan, past the Tree's row cap. It is not a filter: it never
- * changes what "Approve all" or the totals cover, and ticking a match toggles only that item.
+ * changes what "Approve all" or the totals cover. Ticking a file match toggles that file; ticking a folder match
+ * toggles everything inside it, exactly as that folder's checkbox in the tree does.
  * `summary` is the current preview summary; a new one (any tick, anywhere) re-runs the search so ticks stay true.
  */
 export default function Find({ summary, onToggled }: {
@@ -58,7 +59,11 @@ export default function Find({ summary, onToggled }: {
         }}
       />
       {error && <p className="error" role="alert">{error}</p>}
-      {page && page.nodes.length === 0 && <p className="muted">{t('find.none')}</p>}
+      <p className="muted" role="status" aria-live="polite">
+        {page && (page.nodes.length > 0
+          ? t('find.count', { count: formatCount(lang, page.totalMatches) })
+          : query.includes('/') ? t('find.slash') : t('find.none'))}
+      </p>
       {page && page.nodes.length > 0 && (
         <>
           <p className="muted">{t('find.hint')}</p>

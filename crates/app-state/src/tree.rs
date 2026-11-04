@@ -76,6 +76,17 @@ pub struct FindPage {
     pub total_matches: usize,
 }
 
+/// One thing find can hit: a change's own file or folder, or a folder that
+/// only appears as the parent of changes (a new `Trips/` holding photos).
+struct FindEntry {
+    /// The lowercased name.
+    name: Box<str>,
+    /// The row the entry was found at.
+    row: usize,
+    /// 0 for the row's own path, else the length of the row's path that is this folder.
+    folder_len: usize,
+}
+
 struct Row {
     idx: usize,
 }
@@ -84,9 +95,9 @@ struct Row {
 /// contiguous range.
 pub struct PlanTree {
     rows: Vec<Row>,
-    /// Each row's lowercased file or folder name, in row order. Built on the
-    /// first find and dropped with the tree.
-    names: OnceLock<Vec<Box<str>>>,
+    /// Everything find can hit, in tree order. Built on the first find and
+    /// dropped with the tree.
+    index: OnceLock<Vec<FindEntry>>,
 }
 
 /// Paths in tree order: byte order with `/` sorting before every other byte,
@@ -106,7 +117,7 @@ impl PlanTree {
         rows.sort_by(|a, b| tree_order(path_of(plan, a), path_of(plan, b)));
         PlanTree {
             rows,
-            names: OnceLock::new(),
+            index: OnceLock::new(),
         }
     }
 
@@ -246,6 +257,49 @@ impl PlanTree {
         }
     }
 
+    /// Every change's own name, plus every folder above a change once (rows
+    /// are in tree order, so a folder's rows are contiguous and it is met first
+    /// at its first row).
+    fn build_index(&self, plan: &Plan) -> Vec<FindEntry> {
+        let entry = |name: &str, row: usize, folder_len: usize| FindEntry {
+            name: name.to_lowercase().into_boxed_str(),
+            row,
+            folder_len,
+        };
+        let mut out = Vec::new();
+        let mut prev: Option<&RelPath> = None;
+        let mut prev_slashes: Vec<usize> = Vec::new();
+        for (row, r) in self.rows.iter().enumerate() {
+            let path = path_of(plan, r);
+            let s = path.as_str();
+            let slashes: Vec<usize> = s.match_indices('/').map(|(at, _)| at).collect();
+            // The folders above this row that the previous row was not already inside.
+            let prev_s = prev.map_or("", RelPath::as_str);
+            let shared = slashes
+                .iter()
+                .zip(&prev_slashes)
+                .take_while(|(a, b)| a == b && s[..**a] == prev_s[..**a])
+                .count();
+            for &at in &slashes[shared..] {
+                // A folder that is itself the previous row's change is already an entry.
+                if prev_s != &s[..at] {
+                    out.push(entry(
+                        s[..at].rsplit('/').next().unwrap_or_default(),
+                        row,
+                        at,
+                    ));
+                }
+            }
+            // A file with two changes (a rename and an update) is one entry.
+            if prev != Some(path) {
+                out.push(entry(path.name(), row, 0));
+            }
+            prev = Some(path);
+            prev_slashes = slashes;
+        }
+        out
+    }
+
     /// A lookup, never a filter: the changes whose own file or folder name
     /// contains `query` (case-insensitive, the name only, not the folder path),
     /// in tree order, at most `limit` of them. Each result is the same node the
@@ -266,26 +320,23 @@ impl PlanTree {
                 total_matches: 0,
             };
         }
-        let names = self.names.get_or_init(|| {
-            self.rows
-                .iter()
-                .map(|r| path_of(plan, r).name().to_lowercase().into_boxed_str())
-                .collect()
-        });
+        let index = self.index.get_or_init(|| self.build_index(plan));
         let mut nodes = Vec::new();
         let mut total_matches = 0;
-        let mut last: Option<&RelPath> = None;
-        for (i, name) in names.iter().enumerate() {
-            let path = path_of(plan, &self.rows[i]);
-            // A file with two changes (a rename and an update) is one result.
-            if last == Some(path) || !name.contains(&needle) {
-                continue;
-            }
-            last = Some(path);
+        for e in index.iter().filter(|e| e.name.contains(&needle)) {
             total_matches += 1;
             if nodes.len() < limit {
-                let (lo, hi) = self.range(plan, path);
-                nodes.push(self.node(plan, path, path.name().to_owned(), lo, hi, sel));
+                let row_path = path_of(plan, &self.rows[e.row]);
+                let path = if e.folder_len == 0 {
+                    row_path.clone()
+                } else {
+                    match RelPath::new(&row_path.as_str()[..e.folder_len]) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    }
+                };
+                let (lo, hi) = self.range(plan, &path);
+                nodes.push(self.node(plan, &path, path.name().to_owned(), lo, hi, sel));
             }
         }
         FindPage {
@@ -767,8 +818,11 @@ mod tests {
             ]
         );
         assert_eq!(page.total_matches, 5);
-        // "photos" is in two folders' names, but only changes named that match.
-        assert!(tree.find(&plan, "PHOTOS", &sel, 200).nodes.is_empty());
+        // "photos" matches the two folders by their own names; it never matches a
+        // file just because of the folder it sits in.
+        let photos = tree.find(&plan, "PHOTOS", &sel, 200);
+        assert_eq!(find_names(&photos), vec!["Photos", "photos-old"]);
+        assert!(photos.nodes.iter().all(|n| n.is_folder));
         assert_eq!(
             find_names(&tree.find(&plan, "  Notes ", &sel, 200)),
             vec!["Photos/notes.txt"]
@@ -923,5 +977,78 @@ mod tests {
         // Ratios to the walk, never an absolute time: CI machines differ.
         assert!(first < walk * 20, "walk {walk:?}, first find {first:?}");
         assert!(again < walk * 20, "walk {walk:?}, later find {again:?}");
+    }
+
+    #[test]
+    fn find_reaches_folders_that_only_hold_changes() {
+        // What a real scan produces: no MkDir for a folder with files in it.
+        let plan = build_plan(
+            vec![
+                create("Trips/Lisbon/a.jpg", 1),
+                create("Trips/Lisbon/b.jpg", 2),
+                create("Trips/c.jpg", 4),
+                create("Trips2/d.jpg", 8),
+                create("zeta/trips-notes.txt", 16),
+                create("other.txt", 32),
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        let mut sel = plan.actionable_ids();
+        let page = tree.find(&plan, "trips", &sel, 200);
+        assert_eq!(
+            find_names(&page),
+            vec!["Trips", "Trips2", "zeta/trips-notes.txt"]
+        );
+        assert_eq!(page.total_matches, 3);
+        let trips = &page.nodes[0];
+        assert!(trips.is_folder);
+        assert_eq!((trips.counts.create, trips.bytes_to_copy), (3, 7));
+        assert_eq!(trips.tick, Tick::On);
+        // A nested folder is found too, once, with its own subtree.
+        let lisbon = tree.find(&plan, "lisb", &sel, 200).nodes.remove(0);
+        assert_eq!(
+            (lisbon.path.as_str(), lisbon.counts.create),
+            ("Trips/Lisbon", 2)
+        );
+        // Ticking the folder hit flips exactly its subtree (3 of 6 changes) and nothing else.
+        let total = plan.actionable_ids();
+        tree.toggle(&plan, &trips.path, &mut sel);
+        assert_eq!(sel.len(), 3);
+        for id in &total {
+            let inside = plan.changes[id.0 as usize]
+                .change
+                .path()
+                .is_within(&rel("Trips"));
+            assert_eq!(sel.contains(id), !inside);
+        }
+        assert_eq!(
+            tree.find(&plan, "trips", &sel, 200).nodes[0].tick,
+            Tick::Off
+        );
+        assert_eq!(tree.find(&plan, "lisb", &sel, 200).nodes[0].tick, Tick::Off);
+        // The tree shows the same tick for the same folder.
+        let in_tree = tree.children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name);
+        assert_eq!(in_tree.nodes[0].tick, Tick::Off);
+        // Find itself never touched the selection, so Approve all is still the whole plan.
+        assert_eq!(sel.len(), 3);
+        assert_eq!(plan.actionable_ids().len(), 6);
+    }
+
+    #[test]
+    fn a_folder_is_one_result_whatever_number_of_changes_it_holds() {
+        let changes: Vec<Change> = (0..50)
+            .map(|i| create(&format!("hits/sub{}/f{i}.txt", i % 5), 1))
+            .collect();
+        let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let page = tree.find(&plan, "sub", &sel, 200);
+        assert_eq!(page.total_matches, 5);
+        assert_eq!(tree.find(&plan, "hits", &sel, 200).total_matches, 1);
+        // The cap and the total still apply to folder hits.
+        let capped = tree.find(&plan, "sub", &sel, 2);
+        assert_eq!((capped.nodes.len(), capped.total_matches), (2, 5));
     }
 }

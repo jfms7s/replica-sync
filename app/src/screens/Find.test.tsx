@@ -88,4 +88,32 @@ describe('Find', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: 'a/x.txt' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/boom/);
   });
+
+  it('announces the count in a polite live region and says names only for a query with a slash', async () => {
+    vi.mocked(api.treeFind).mockResolvedValue(found([file('a/x1.txt'), file('a/x2.txt')]));
+    setup();
+    const status = screen.getByRole('status');
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    await userEvent.type(screen.getByRole('searchbox'), 'x');
+    await waitFor(() => expect(status).toHaveTextContent('2 found'));
+    vi.mocked(api.treeFind).mockResolvedValue(found([]));
+    await userEvent.clear(screen.getByRole('searchbox'));
+    await userEvent.type(screen.getByRole('searchbox'), 'a/x');
+    await waitFor(() => expect(status).toHaveTextContent(/names only, not paths/));
+  });
+
+  it('says that ticking a folder match ticks everything inside it, and shows its counts', async () => {
+    const dir: NodeView = {
+      name: 'Trips', path: 'Trips', isFolder: true, tick: 'on', bytesToCopy: 7, changes: [],
+      counts: { create: 3, update: 0, delete: 0, moves: 0, folders: 0, skipped: 0 },
+    };
+    vi.mocked(api.treeFind).mockResolvedValue(found([dir]));
+    vi.mocked(api.toggle).mockResolvedValue(summary);
+    setup();
+    await userEvent.type(screen.getByRole('searchbox'), 'trips');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Trips' }));
+    expect(api.toggle).toHaveBeenCalledWith('Trips');
+    expect(screen.getByText(/Ticking a folder match ticks everything inside it/)).toBeInTheDocument();
+    expect(screen.getByText('+3')).toBeInTheDocument();
+  });
 });

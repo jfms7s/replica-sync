@@ -925,6 +925,46 @@ mod tests {
     }
 
     #[test]
+    fn find_a_folder_a_scan_made_and_toggling_it_flips_its_subtree_only() {
+        let mut w = world();
+        write(&w.src(), "Trips/a.jpg", b"aa");
+        write(&w.src(), "Trips/b.jpg", b"bb");
+        write(&w.src(), "Trips/Lisbon/c.jpg", b"cc");
+        write(&w.src(), "other.txt", b"o");
+        let scanned = w.scan();
+        assert_eq!(scanned.selected_count, 4);
+        let page = w.s.find("trips", 200).unwrap();
+        assert_eq!(page.total_matches, 1);
+        let folder = page.nodes[0].clone();
+        assert!(folder.is_folder);
+        assert_eq!((folder.path.as_str(), folder.counts.create), ("Trips", 3));
+        let after = w.s.toggle(&folder.path).unwrap();
+        assert_eq!(after.selected_count, 1, "only other.txt is left ticked");
+        assert_eq!(after.selected.bytes_to_copy, 1);
+        assert_eq!(after.totals.creates, scanned.totals.creates);
+        assert_eq!(after.actionable_count, 4);
+        assert_eq!(w.s.find("trips", 200).unwrap().nodes[0].tick, Tick::Off);
+        assert_eq!(w.s.select_all(true).unwrap().selected_count, 4);
+    }
+
+    #[test]
+    fn find_answers_from_the_current_plan_after_a_rescan() {
+        let mut w = world();
+        write(&w.src(), "Old/old-photo.jpg", b"1");
+        w.scan();
+        assert_eq!(w.s.find("old", 200).unwrap().total_matches, 2); // the folder and the file
+        fs::remove_dir_all(w.src().join("Old")).unwrap();
+        write(&w.src(), "New/new-photo.jpg", b"1");
+        w.scan();
+        assert_eq!(
+            w.s.find("old", 200).unwrap().total_matches,
+            0,
+            "no stale index"
+        );
+        assert_eq!(w.s.find("new", 200).unwrap().total_matches, 2);
+    }
+
+    #[test]
     fn find_never_changes_the_selection_and_needs_a_plan() {
         let (mut w, scanned) = world_with_a_huge_folder();
         w.s.select_all(false).unwrap();
