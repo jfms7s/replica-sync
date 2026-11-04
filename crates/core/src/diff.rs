@@ -849,4 +849,68 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn problem_reason_maps_each_kind_and_keeps_side_and_detail() {
+        let p = |kind, detail: &str| Problem {
+            rel: rel("x"),
+            kind,
+            detail: detail.into(),
+        };
+        for side in [SideKind::Source, SideKind::Replica] {
+            assert_eq!(
+                problem_reason(&p(ProblemKind::NotRegularFile, "ignored"), side),
+                SkipReason::NotRegularFile
+            );
+            assert_eq!(
+                problem_reason(&p(ProblemKind::ReservedName, "ignored"), side),
+                SkipReason::ReservedName
+            );
+            assert_eq!(
+                problem_reason(&p(ProblemKind::Unreadable, "Permission denied"), side),
+                SkipReason::Unreadable {
+                    side,
+                    detail: "Permission denied".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn diff_reports_a_non_regular_file_and_the_side_of_an_unreadable_one() {
+        let mut src = snap(vec![]);
+        src.problems.push(Problem {
+            rel: rel("pipe"),
+            kind: ProblemKind::NotRegularFile,
+            detail: String::new(),
+        });
+        src.problems.push(problem("locked", "src detail"));
+        let mut rep = snap(vec![]);
+        rep.problems.push(problem("other", "rep detail"));
+        let mut out = diff(&src, &rep, CaseMode::Sensitive);
+        out.sort_by(|a, b| a.path().cmp(b.path()));
+        assert_eq!(
+            out,
+            vec![
+                Change::Skipped {
+                    path: rel("locked"),
+                    reason: SkipReason::Unreadable {
+                        side: SideKind::Source,
+                        detail: "src detail".into(),
+                    },
+                },
+                Change::Skipped {
+                    path: rel("other"),
+                    reason: SkipReason::Unreadable {
+                        side: SideKind::Replica,
+                        detail: "rep detail".into(),
+                    },
+                },
+                Change::Skipped {
+                    path: rel("pipe"),
+                    reason: SkipReason::NotRegularFile,
+                },
+            ]
+        );
+    }
 }
