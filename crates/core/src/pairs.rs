@@ -1519,4 +1519,63 @@ mod tests {
             "none usable: the due one, for its error"
         );
     }
+
+    #[test]
+    fn relink_refuses_the_same_folder_or_a_nested_one_and_changes_nothing() {
+        let (t, v) = setup();
+        let mut p = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let before = p.clone();
+        let source = t.path().join("diskA/Photos");
+        fs::create_dir_all(source.join("inner")).unwrap();
+
+        let r = relink_replica(&mut p, 0, &source, true, &v);
+        assert!(matches!(r, Err(PairError::SameFolder)), "{r:?}");
+        // Inside the source, and (relinking the source) around the replica.
+        let r = relink_replica(&mut p, 0, &source.join("inner"), true, &v);
+        assert!(matches!(r, Err(PairError::Nested)), "{r:?}");
+        let r = relink_source(&mut p, &t.path().join("diskB/Backup"), true, &v);
+        assert!(matches!(r, Err(PairError::Nested)), "{r:?}");
+        let r = relink_source(&mut p, &t.path().join("diskB/Backup/Photos"), true, &v);
+        assert!(matches!(r, Err(PairError::SameFolder)), "{r:?}");
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn upsert_replaces_a_pair_with_the_same_id_and_appends_a_new_one() {
+        let (t, v) = setup();
+        let first = create_pair(
+            req(
+                &t.path().join("diskA/Photos"),
+                &t.path().join("diskB/Backup/Photos"),
+            ),
+            &v,
+        )
+        .unwrap();
+        let mut store = PairStore::load(&t.path().join("pairs.json")).unwrap();
+        store.upsert(first.clone());
+        let second = Pair {
+            id: "other".into(),
+            ..first.clone()
+        };
+        store.upsert(second.clone());
+        assert_eq!(store.pairs.len(), 2);
+
+        let renamed = Pair {
+            name: "Renamed".into(),
+            trash_days: 7,
+            ..first.clone()
+        };
+        store.upsert(renamed.clone());
+        assert_eq!(store.pairs.len(), 2);
+        assert_eq!(store.pairs[0], renamed, "replaced in place");
+        assert_eq!(store.get(&first.id), Some(&renamed));
+        assert_eq!(store.pairs[1], second);
+    }
 }

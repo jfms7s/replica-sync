@@ -162,4 +162,50 @@ mod tests {
         let err = SkipRules::new(&["[".to_string()]).unwrap_err();
         assert_eq!(err.pattern, "[");
     }
+
+    #[test]
+    fn user_patterns_match_case_insensitively() {
+        let r = rules(&["*.TMP", "Docs/Old/*", "Cache/"]);
+        assert!(r.is_skipped(&rel("a/b.tmp"), false));
+        assert!(r.is_skipped(&rel("docs/OLD/a.txt"), false));
+        assert!(r.is_skipped(&rel("x/CACHE"), true));
+    }
+
+    #[test]
+    fn folder_only_path_pattern_skips_the_folder_but_not_a_file() {
+        let r = rules(&["Docs/old/"]);
+        assert!(r.is_skipped(&rel("Docs/old"), true));
+        assert!(!r.is_skipped(&rel("Docs/old"), false));
+        // A path pattern is anchored at the root, unlike a name pattern.
+        assert!(!r.is_skipped(&rel("x/Docs/old"), true));
+    }
+
+    #[test]
+    fn leading_slash_is_stripped_not_anchored() {
+        let r = rules(&["/build", "/Docs/old/"]);
+        // `/build` is a plain name pattern: it matches at any depth.
+        assert!(r.is_skipped(&rel("build"), false));
+        assert!(r.is_skipped(&rel("a/b/build"), false));
+        assert!(r.is_skipped(&rel("Docs/old"), true));
+    }
+
+    #[test]
+    fn a_pattern_that_is_only_slashes_is_an_empty_pattern_error() {
+        for bad in ["/", "//"] {
+            let err = SkipRules::new(&[bad.to_string()]).unwrap_err();
+            assert_eq!(err.pattern, bad);
+            assert_eq!(err.message, "pattern is empty");
+        }
+    }
+
+    #[test]
+    fn builtins_skip_desktop_ini_ds_store_and_lost_found_folder() {
+        let r = rules(&[]);
+        assert!(r.is_skipped(&rel("desktop.ini"), false));
+        assert!(r.is_skipped(&rel("a/Desktop.INI"), false));
+        assert!(r.is_skipped(&rel(".DS_Store"), false));
+        assert!(r.is_skipped(&rel("a/.ds_store"), false));
+        assert!(r.is_skipped(&rel("lost+found"), true));
+        assert!(r.is_skipped(&rel("a/lost+found"), true));
+    }
 }

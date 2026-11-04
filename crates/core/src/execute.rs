@@ -1946,6 +1946,111 @@ mod tests {
     }
 
     #[test]
+    fn source_growing_during_an_update_keeps_the_old_replica_file_and_trashes_nothing() {
+        let f = fixture();
+        write_file(&f.src, "grow.log", b"start", T0 + 100);
+        write_file(&f.rep, "grow.log", b"old", T0);
+        let plan = plan_for(&f.src, &f.rep);
+        assert!(
+            matches!(plan.changes[0].change, Change::Update { .. }),
+            "{plan:?}"
+        );
+        let grow = f.src.join("grow.log");
+        let mut appended = false;
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |p: &Progress| {
+                if !appended
+                    && p.bytes_done > 0
+                    && p.current.as_ref().is_some_and(|c| c.as_str() == "grow.log")
+                {
+                    use std::io::Write;
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&grow)
+                        .unwrap()
+                        .write_all(b" more")
+                        .unwrap();
+                    appended = true;
+                }
+            },
+        );
+        assert!(appended, "the source never grew: {report:?}");
+        assert_eq!(report.results.len(), 1, "{report:?}");
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Failed(FailReason::ChangedDuringCopy)
+        );
+        assert_eq!(read_tree(&f.rep)["grow.log"], b"old");
+        assert!(no_temp_files(&f.rep));
+        let trash = f.rep.join(crate::trash::TRASH_DIR);
+        assert!(
+            !trash.exists() || read_tree_including(&trash).is_empty(),
+            "the failed update trashed the old file: {:?}",
+            read_tree_including(&trash)
+        );
+    }
+
+    /// Every file under `dir`, whatever its name (unlike `read_tree`, which
+    /// skips the trash folder).
+    fn read_tree_including(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(read_tree_including(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn delete_and_rmdir_of_entries_gone_since_the_preview_are_skipped_as_already_gone() {
+        let f = fixture();
+        write_file(&f.rep, "gone.txt", b"x", T0);
+        write_file(&f.rep, "kept.txt", b"y", T0);
+        fs::create_dir_all(f.rep.join("gone-dir")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        assert_eq!(plan.totals.deletes, 2, "{plan:?}");
+        assert_eq!(plan.totals.folders, 1, "{plan:?}");
+        // After the preview, something else removes two of the three.
+        fs::remove_file(f.rep.join("gone.txt")).unwrap();
+        fs::remove_dir(f.rep.join("gone-dir")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(report.stopped, None);
+        let outcome = |name: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == name)
+                .unwrap_or_else(|| panic!("no result for {name}: {report:?}"))
+                .outcome
+                .clone()
+        };
+        assert_eq!(
+            outcome("gone.txt"),
+            Outcome::Skipped(SkipReason::AlreadyGone)
+        );
+        assert_eq!(
+            outcome("gone-dir"),
+            Outcome::Skipped(SkipReason::AlreadyGone)
+        );
+        assert_eq!(outcome("kept.txt"), Outcome::Applied);
+        assert!(!f.rep.join("kept.txt").exists());
+    }
+
+    #[test]
     fn unapproved_changes_are_left_alone() {
         let f = fixture();
         write_file(&f.src, "a.txt", b"1", T0);
@@ -2381,14 +2486,12 @@ mod apply_tests {
     #[cfg(unix)]
     #[test]
     fn delete_fails_on_unexpected_source_error() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "d/x.txt", b"1", T0);
         write_file(&f.rep, "d/x.txt", b"1", T0);
         let hidden = f.src.join("d");
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&hidden, 0o000);
         if fs::symlink_metadata(hidden.join("x.txt")).is_ok() {
-            fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let plan = crate::plan::build_plan(
@@ -2407,14 +2510,12 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(report.results[0].outcome, Outcome::Failed(_)));
         assert!(f.rep.join("d/x.txt").exists());
     }
     #[cfg(unix)]
     #[test]
     fn a_move_whose_source_is_unreadable_fails_and_can_be_retried() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "new/a.jpg", b"aaaa", T0);
         write_file(&f.src, "old/keep.txt", b"k", T0);
@@ -2427,9 +2528,8 @@ mod apply_tests {
                 .any(|p| matches!(p.change, Change::Move { .. }))
         );
         let locked = f.src.join("new");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o000);
         if fs::metadata(locked.join("a.jpg")).is_ok() {
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
@@ -2439,7 +2539,6 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let move_id = plan
             .changes
             .iter()
@@ -2817,7 +2916,6 @@ mod apply_tests {
     #[cfg(unix)]
     #[test]
     fn read_only_replica_folder_fails_with_permission_denied_and_continues() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "locked/a.txt", b"a", T0);
         write_file(&f.src, "open/b.txt", b"b", T0);
@@ -2825,10 +2923,9 @@ mod apply_tests {
         fs::create_dir_all(f.rep.join("open")).unwrap();
         let plan = plan_for(&f.src, &f.rep);
         let locked = f.rep.join("locked");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o555);
         if fs::write(locked.join("probe"), b"").is_ok() {
             fs::remove_file(locked.join("probe")).unwrap();
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
@@ -2838,7 +2935,6 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let outcome = |p: &str| {
             report
                 .results

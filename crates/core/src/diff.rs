@@ -411,9 +411,23 @@ mod tests {
             &snap(vec![file("a.jpg", 9, T0)]),
             CaseMode::Insensitive,
         );
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 1, "{out:?}");
         assert!(
             matches!(&out[0], Change::Skipped { reason, .. } if *reason == SkipReason::CaseCollision)
+        );
+        // The skipped path is one of the two colliding source names (the later
+        // one in sorted order); the replica's `a.jpg` is neither updated,
+        // deleted nor renamed.
+        assert!(
+            matches!(&out[0], Change::Skipped { path, .. } if path.as_str() == "a.jpg"),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter().any(|c| matches!(
+                c,
+                Change::Update { .. } | Change::Delete { .. } | Change::Move { .. }
+            )),
+            "{out:?}"
         );
     }
 
@@ -716,6 +730,187 @@ mod tests {
             !out.iter()
                 .any(|c| matches!(c, Change::RmDir { path } if path.as_str() == "O")),
             "{out:?}"
+        );
+    }
+
+    fn problem(path: &str, detail: &str) -> Problem {
+        Problem {
+            rel: rel(path),
+            kind: ProblemKind::Unreadable,
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn unreadable_replica_folder_blocks_deletes_and_creates_under_it() {
+        let src = snap(vec![dir("Docs"), file("Docs/new.txt", 1, T0)]);
+        let mut rep = snap(vec![dir("Docs"), file("Docs/old.txt", 1, T0)]);
+        rep.problems.push(problem("Docs", "Permission denied"));
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert_eq!(
+            out,
+            vec![Change::Skipped {
+                path: rel("Docs"),
+                reason: SkipReason::Unreadable {
+                    side: SideKind::Replica,
+                    detail: "Permission denied".into(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn source_problem_blocks_a_replica_folder_spelled_with_other_capitals() {
+        let mut src = snap(vec![dir("Docs")]);
+        src.problems.push(problem("Docs", "Permission denied"));
+        let rep = snap(vec![dir("docs"), file("docs/a.txt", 1, T0)]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(matches!(
+            &out[0],
+            Change::Skipped { path, reason: SkipReason::Unreadable { side: SideKind::Source, .. } }
+                if path.as_str() == "Docs"
+        ));
+        // Case-sensitive, `docs` is a different folder, so it is not protected.
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert!(deletes(&out).contains(&"docs/a.txt"), "{out:?}");
+    }
+
+    #[test]
+    fn nested_problems_report_only_the_outermost_and_block_everything_below() {
+        let mut src = snap(vec![dir("A")]);
+        src.problems.push(problem("A", "outer"));
+        src.problems.push(problem("A/B", "inner"));
+        let mut rep = snap(vec![dir("A"), dir("A/B"), file("A/B/c.txt", 1, T0)]);
+        rep.problems.push(problem("A/B/C", "deepest"));
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(matches!(
+            &out[0],
+            Change::Skipped { path, reason: SkipReason::Unreadable { side: SideKind::Source, detail } }
+                if path.as_str() == "A" && detail == "outer"
+        ));
+    }
+
+    #[test]
+    fn nested_problem_under_a_clean_folder_blocks_only_its_own_subtree() {
+        let mut src = snap(vec![dir("A")]);
+        src.problems.push(problem("A/B", "locked"));
+        let rep = snap(vec![
+            dir("A"),
+            dir("A/B"),
+            file("A/B/c.txt", 1, T0),
+            file("A/other.txt", 1, T0),
+        ]);
+        let out = diff(&src, &rep, CaseMode::Sensitive);
+        assert_eq!(deletes(&out), vec!["A/other.txt"]);
+        assert!(out.iter().any(|c| matches!(
+            c,
+            Change::Skipped { path, .. } if path.as_str() == "A/B"
+        )));
+        assert!(!out.iter().any(|c| matches!(c, Change::RmDir { .. })));
+    }
+
+    #[test]
+    fn file_vs_folder_under_insensitive_is_skipped_and_nothing_below_changes() {
+        let src = snap(vec![file("X", 1, T0)]);
+        let rep = snap(vec![dir("x"), file("x/y", 1, T0)]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert_eq!(
+            out,
+            vec![Change::Skipped {
+                path: rel("X"),
+                reason: SkipReason::FileVsFolder,
+            }]
+        );
+    }
+
+    #[test]
+    fn source_case_collision_on_a_folder_changes_nothing_under_it() {
+        let src = snap(vec![
+            dir("Photos"),
+            dir("photos"),
+            file("Photos/a.jpg", 1, T0),
+            file("photos/b.jpg", 1, T0),
+            file("photos/new.jpg", 1, T0),
+        ]);
+        let rep = snap(vec![
+            dir("photos"),
+            file("photos/b.jpg", 1, T0 + 100),
+            file("photos/old.jpg", 1, T0),
+        ]);
+        let out = diff(&src, &rep, CaseMode::Insensitive);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(matches!(
+            &out[0],
+            Change::Skipped {
+                reason: SkipReason::CaseCollision,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn problem_reason_maps_each_kind_and_keeps_side_and_detail() {
+        let p = |kind, detail: &str| Problem {
+            rel: rel("x"),
+            kind,
+            detail: detail.into(),
+        };
+        for side in [SideKind::Source, SideKind::Replica] {
+            assert_eq!(
+                problem_reason(&p(ProblemKind::NotRegularFile, "ignored"), side),
+                SkipReason::NotRegularFile
+            );
+            assert_eq!(
+                problem_reason(&p(ProblemKind::ReservedName, "ignored"), side),
+                SkipReason::ReservedName
+            );
+            assert_eq!(
+                problem_reason(&p(ProblemKind::Unreadable, "Permission denied"), side),
+                SkipReason::Unreadable {
+                    side,
+                    detail: "Permission denied".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn diff_reports_a_non_regular_file_and_the_side_of_an_unreadable_one() {
+        let mut src = snap(vec![]);
+        src.problems.push(Problem {
+            rel: rel("pipe"),
+            kind: ProblemKind::NotRegularFile,
+            detail: String::new(),
+        });
+        src.problems.push(problem("locked", "src detail"));
+        let mut rep = snap(vec![]);
+        rep.problems.push(problem("other", "rep detail"));
+        let mut out = diff(&src, &rep, CaseMode::Sensitive);
+        out.sort_by(|a, b| a.path().cmp(b.path()));
+        assert_eq!(
+            out,
+            vec![
+                Change::Skipped {
+                    path: rel("locked"),
+                    reason: SkipReason::Unreadable {
+                        side: SideKind::Source,
+                        detail: "src detail".into(),
+                    },
+                },
+                Change::Skipped {
+                    path: rel("other"),
+                    reason: SkipReason::Unreadable {
+                        side: SideKind::Replica,
+                        detail: "rep detail".into(),
+                    },
+                },
+                Change::Skipped {
+                    path: rel("pipe"),
+                    reason: SkipReason::NotRegularFile,
+                },
+            ]
         );
     }
 }
