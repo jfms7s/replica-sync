@@ -456,4 +456,218 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!((mode(&path), mode(&logs)), (0o600, 0o700));
     }
+
+    #[test]
+    fn describe_has_one_line_shape_per_change_kind() {
+        let p = rel("a/b.txt");
+        let lines = [
+            (
+                Change::Create {
+                    path: p.clone(),
+                    size: 1536,
+                    mtime_ns: 0,
+                },
+                "create   a/b.txt (1.5 KB)",
+            ),
+            (
+                Change::Update {
+                    path: p.clone(),
+                    size: 2,
+                    mtime_ns: 0,
+                    replica_newer: false,
+                },
+                "update   a/b.txt (2 B)",
+            ),
+            (
+                Change::Update {
+                    path: p.clone(),
+                    size: 2,
+                    mtime_ns: 0,
+                    replica_newer: true,
+                },
+                "update   a/b.txt (2 B) [replica is newer]",
+            ),
+            (
+                Change::Delete {
+                    path: p.clone(),
+                    size: 9,
+                    mtime_ns: 0,
+                },
+                "delete   a/b.txt",
+            ),
+            (
+                Change::Move {
+                    from: rel("x.txt"),
+                    to: p.clone(),
+                    kind: MoveKind::File {
+                        size: 1,
+                        mtime_ns: 0,
+                    },
+                },
+                "move     x.txt -> a/b.txt",
+            ),
+            (
+                Change::Move {
+                    from: rel("Old"),
+                    to: rel("New"),
+                    kind: MoveKind::Dir { files: 1, bytes: 5 },
+                },
+                "move     Old -> New (1 files)",
+            ),
+            (Change::MkDir { path: p.clone() }, "mkdir    a/b.txt"),
+            (Change::RmDir { path: p.clone() }, "rmdir    a/b.txt"),
+            (
+                Change::Skipped {
+                    path: p,
+                    reason: SkipReason::FolderNotEmpty,
+                },
+                "skipped  a/b.txt: folder not empty",
+            ),
+        ];
+        for (change, line) in lines {
+            assert_eq!(describe(&change), line);
+        }
+    }
+
+    fn prepared_with(changes: Vec<Change>) -> Prepared {
+        Prepared {
+            plan: build_plan(changes, CaseMode::Sensitive).unwrap(),
+            source: crate::session::ScanStats {
+                files: 3,
+                bytes: 2048,
+                elapsed_ms: 1,
+            },
+            replica: crate::session::ScanStats {
+                files: 1,
+                bytes: 10,
+                elapsed_ms: 2,
+            },
+            elapsed_ms: 7,
+        }
+    }
+
+    fn result(prepared: &Prepared, path: &str, outcome: Outcome) -> crate::execute::ChangeResult {
+        let id = prepared
+            .plan
+            .changes
+            .iter()
+            .find(|p| p.change.path().as_str() == path)
+            .unwrap()
+            .id;
+        crate::execute::ChangeResult {
+            id,
+            path: rel(path),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn render_run_lists_the_plan_each_result_and_the_totals() {
+        let prepared = prepared_with(vec![
+            Change::Create {
+                path: rel("ok.txt"),
+                size: 3,
+                mtime_ns: 0,
+            },
+            Change::Create {
+                path: rel("busy.txt"),
+                size: 3,
+                mtime_ns: 0,
+            },
+            Change::Delete {
+                path: rel("gone.txt"),
+                size: 1,
+                mtime_ns: 0,
+            },
+        ]);
+        let report = RunReport {
+            results: vec![
+                result(&prepared, "ok.txt", Outcome::Applied),
+                result(&prepared, "busy.txt", Outcome::Failed(FailReason::InUse)),
+                result(
+                    &prepared,
+                    "gone.txt",
+                    Outcome::Skipped(SkipReason::AlreadyGone),
+                ),
+            ],
+            stopped: None,
+            trash_run: Some("2026-11-02_120000".into()),
+            durability: Durability {
+                batched: false,
+                why: "test".into(),
+                synced_separately: 0,
+            },
+            spot_check: Some(SpotCheck {
+                checked: 5,
+                mismatched: 1,
+                cancelled: false,
+            }),
+        };
+        let approved = prepared.plan.actionable_ids();
+        let text = render_run("My Pair", &prepared, &approved, &report);
+        let want = "pair: My Pair\n\
+            scanned: source 3 files (2.0 KB), replica 1 files (10 B) in 7 ms\n\
+            \n\
+            plan as previewed:\n\
+            [x] create   busy.txt (3 B)\n\
+            [x] create   ok.txt (3 B)\n\
+            [x] delete   gone.txt\n\
+            selected: 2 create, 0 update, 0 move, 1 delete, 0 folders; 6 B to copy; 0 skipped\n\
+            \n\
+            results:\n\
+            applied  ok.txt\n\
+            FAILED   busy.txt: in use by another program\n\
+            skipped  gone.txt: already gone\n\
+            \n\
+            applied 1, skipped 1, failed 1\n\
+            trash run: 2026-11-02_120000\n\
+            durability: one flush per file (test)\n\
+            spot check: read back 5 copies, 1 differed from the source\n";
+        assert_eq!(text, want);
+    }
+
+    #[test]
+    fn render_run_of_a_stopped_run_says_why_and_omits_what_never_ran() {
+        let prepared = prepared_with(vec![Change::Move {
+            from: rel("Photos"),
+            to: rel("photos"),
+            kind: MoveKind::DirCaseOnly,
+        }]);
+        let report = RunReport {
+            results: vec![],
+            stopped: Some(StopReason::ReplicaDisconnected),
+            trash_run: None,
+            durability: Durability::default(),
+            spot_check: None,
+        };
+        let text = render_run("p", &prepared, &prepared.plan.actionable_ids(), &report);
+        assert!(text.contains("[x] move     Photos -> photos\n"), "{text}");
+        assert!(
+            text.contains(
+                "\nresults:\n\napplied 0, skipped 0, failed 0\nstopped: the backup drive was disconnected\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("trash run:") && !text.contains("spot check:"));
+        // An unapproved change is shown unticked and is not in the totals.
+        let text = render_run("p", &prepared, &HashSet::new(), &report);
+        assert!(text.contains("[ ] move     Photos -> photos\n"), "{text}");
+        assert!(
+            text.contains("selected: 0 create, 0 update, 0 move"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn spot_check_text_marks_a_cancelled_check() {
+        let c = SpotCheck {
+            checked: 2,
+            mismatched: 0,
+            cancelled: true,
+        };
+        assert_eq!(
+            spot_check_text(&c),
+            "spot check: read back 2 copies, 0 differed from the source (cancelled)"
+        );
+    }
 }
