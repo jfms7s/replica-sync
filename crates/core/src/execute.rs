@@ -2010,6 +2010,47 @@ mod tests {
     }
 
     #[test]
+    fn delete_and_rmdir_of_entries_gone_since_the_preview_are_skipped_as_already_gone() {
+        let f = fixture();
+        write_file(&f.rep, "gone.txt", b"x", T0);
+        write_file(&f.rep, "kept.txt", b"y", T0);
+        fs::create_dir_all(f.rep.join("gone-dir")).unwrap();
+        let plan = plan_for(&f.src, &f.rep);
+        assert_eq!(plan.totals.deletes, 2, "{plan:?}");
+        assert_eq!(plan.totals.folders, 1, "{plan:?}");
+        // After the preview, something else removes two of the three.
+        fs::remove_file(f.rep.join("gone.txt")).unwrap();
+        fs::remove_dir(f.rep.join("gone-dir")).unwrap();
+        let report = run_with(
+            &f,
+            &plan,
+            &plan.actionable_ids(),
+            &Control::default(),
+            &mut |_| {},
+        );
+        assert_eq!(report.stopped, None);
+        let outcome = |name: &str| {
+            report
+                .results
+                .iter()
+                .find(|r| r.path.as_str() == name)
+                .unwrap_or_else(|| panic!("no result for {name}: {report:?}"))
+                .outcome
+                .clone()
+        };
+        assert_eq!(
+            outcome("gone.txt"),
+            Outcome::Skipped(SkipReason::AlreadyGone)
+        );
+        assert_eq!(
+            outcome("gone-dir"),
+            Outcome::Skipped(SkipReason::AlreadyGone)
+        );
+        assert_eq!(outcome("kept.txt"), Outcome::Applied);
+        assert!(!f.rep.join("kept.txt").exists());
+    }
+
+    #[test]
     fn unapproved_changes_are_left_alone() {
         let f = fixture();
         write_file(&f.src, "a.txt", b"1", T0);
