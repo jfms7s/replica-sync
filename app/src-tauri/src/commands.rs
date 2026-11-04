@@ -6,7 +6,7 @@ use app_state::paths::AppPaths;
 use app_state::progress::{JobDone, ScanProgressView, Throttle, should_emit};
 use app_state::session::{ApplyJob, PairInput, PairView, PreviewSummary, Session};
 use app_state::settings::{self, Settings};
-use app_state::tree::{ChildrenPage, SortOrder};
+use app_state::tree::{ChildrenPage, FindPage, SortOrder};
 use replica_sync_core::execute::{Progress, RunReport};
 use replica_sync_core::model::{RelPath, SideKind};
 use replica_sync_core::pairs::Pair;
@@ -194,6 +194,12 @@ pub fn tree_children(
 ) -> Res<ChildrenPage> {
     let folder = rel(&path)?;
     with_session(&state, |s| s.children(&folder, order))
+}
+
+/// Looks a name up in the whole plan, off the main thread: it may scan every change.
+#[tauri::command]
+pub async fn tree_find(app: AppHandle, query: String, limit: usize) -> Res<FindPage> {
+    blocking(&app, move |st| with_session(st, |s| s.find(&query, limit))).await
 }
 
 #[tauri::command]

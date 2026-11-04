@@ -4,7 +4,7 @@ import { api, type ChildrenPage, type NodeView, type PreviewSummary, type SortOr
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
-import { changeDetail } from './changeText';
+import { ChangeLines, CountBadges } from './NodeParts';
 
 interface Row { node: NodeView; depth: number }
 /** What is drawn: a node, or the note under a folder that has more children than Rust sends. */
@@ -324,19 +324,7 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
   onToggle: (path: string) => void;
   onSort: (path: string, order: SortOrder) => void;
 }) {
-  const { t, tx, lang } = useT();
-  const counts = (n: NodeView) => {
-    const c = n.counts;
-    const parts: [number, string, string][] = [
-      [c.create, 'create', `+${c.create}`],
-      [c.update, 'update', `~${c.update}`],
-      [c.delete, 'delete', `−${c.delete}`],
-      [c.moves, 'move', `↷${c.moves}`],
-      [c.folders, 'mkDir', `▣${c.folders}`],
-      [c.skipped, 'skipped', `⊘${c.skipped}`],
-    ];
-    return parts.filter(([n]) => n > 0).map(([, cls, text]) => <span key={cls} className={`badge ${cls}`}>{text}</span>);
-  };
+  const { lang } = useT();
   return (
     <div
       ref={(el) => setItemRef(index, el)}
@@ -367,13 +355,8 @@ const TreeRow = memo(function TreeRow({ node, depth, index, top, expanded, tabba
         <span>{node.name}</span>
       )}
       {node.isFolder && expanded && <SortButton path={node.path} name={node.name} order={order} onSort={onSort} row />}
-      {node.changes.map(({ id, change }) => (
-        <span key={id} className="row">
-          <span className={`badge ${change.type}`}>{tx(`change.${change.type}`)}</span>
-          <span className="muted">{changeDetail(t, tx, lang, change)}</span>
-        </span>
-      ))}
-      {node.isFolder && counts(node)}
+      <ChangeLines node={node} />
+      {node.isFolder && <CountBadges node={node} />}
       {node.bytesToCopy > 0 && <span className="muted">{formatBytes(lang, node.bytesToCopy)}</span>}
     </div>
   );

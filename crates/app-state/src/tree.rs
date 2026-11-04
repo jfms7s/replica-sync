@@ -7,6 +7,7 @@ use replica_sync_core::plan::{ChangeId, Plan};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +68,14 @@ pub enum SortOrder {
     Size,
 }
 
+/// What a find returned: the first `limit` matches and how many there are in all.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindPage {
+    pub nodes: Vec<NodeView>,
+    pub total_matches: usize,
+}
+
 struct Row {
     idx: usize,
 }
@@ -75,6 +84,9 @@ struct Row {
 /// contiguous range.
 pub struct PlanTree {
     rows: Vec<Row>,
+    /// Each row's lowercased file or folder name, in row order. Built on the
+    /// first find and dropped with the tree.
+    names: OnceLock<Vec<Box<str>>>,
 }
 
 /// Paths in tree order: byte order with `/` sorting before every other byte,
@@ -92,7 +104,10 @@ impl PlanTree {
     pub fn new(plan: &Plan) -> PlanTree {
         let mut rows: Vec<Row> = (0..plan.changes.len()).map(|idx| Row { idx }).collect();
         rows.sort_by(|a, b| tree_order(path_of(plan, a), path_of(plan, b)));
-        PlanTree { rows }
+        PlanTree {
+            rows,
+            names: OnceLock::new(),
+        }
     }
 
     /// Rows at `folder` or inside it, as an index range (the whole tree for the root).
@@ -228,6 +243,54 @@ impl PlanTree {
             counts,
             bytes_to_copy: bytes,
             tick,
+        }
+    }
+
+    /// A lookup, never a filter: the changes whose own file or folder name
+    /// contains `query` (case-insensitive, the name only, not the folder path),
+    /// in tree order, at most `limit` of them. Each result is the same node the
+    /// tree draws for that path, so its tick shows what `toggle` on that path
+    /// flips. Nothing here reads or changes the selection; "Approve all" and the
+    /// totals still cover the whole plan. A blank query finds nothing.
+    pub fn find(
+        &self,
+        plan: &Plan,
+        query: &str,
+        sel: &HashSet<ChangeId>,
+        limit: usize,
+    ) -> FindPage {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return FindPage {
+                nodes: Vec::new(),
+                total_matches: 0,
+            };
+        }
+        let names = self.names.get_or_init(|| {
+            self.rows
+                .iter()
+                .map(|r| path_of(plan, r).name().to_lowercase().into_boxed_str())
+                .collect()
+        });
+        let mut nodes = Vec::new();
+        let mut total_matches = 0;
+        let mut last: Option<&RelPath> = None;
+        for (i, name) in names.iter().enumerate() {
+            let path = path_of(plan, &self.rows[i]);
+            // A file with two changes (a rename and an update) is one result.
+            if last == Some(path) || !name.contains(&needle) {
+                continue;
+            }
+            last = Some(path);
+            total_matches += 1;
+            if nodes.len() < limit {
+                let (lo, hi) = self.range(plan, path);
+                nodes.push(self.node(plan, path, path.name().to_owned(), lo, hi, sel));
+            }
+        }
+        FindPage {
+            nodes,
+            total_matches,
         }
     }
 
@@ -656,5 +719,209 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].bytes_to_copy >= w[1].bytes_to_copy)
         );
+    }
+
+    // ---- find ----
+
+    fn find_names(page: &FindPage) -> Vec<&str> {
+        page.nodes.iter().map(|n| n.path.as_str()).collect()
+    }
+
+    fn find_fixture() -> (Plan, PlanTree) {
+        let plan = build_plan(
+            vec![
+                create("Photos/IMG_0001.jpg", 1),
+                create("Photos/IMG_0002.JPG", 2),
+                create("Photos/notes.txt", 4),
+                create("photos-old/a.txt", 8),
+                create("docs/img.md", 16),
+                Change::MkDir {
+                    path: rel("Photos/img-sets"),
+                },
+                create("Photos/img-sets/x.txt", 32),
+                Change::Skipped {
+                    path: rel("Photos/img-link"),
+                    reason: SkipReason::Link,
+                },
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        (plan, tree)
+    }
+
+    #[test]
+    fn find_matches_the_name_case_insensitively_not_the_folder_path() {
+        let (plan, tree) = find_fixture();
+        let sel = plan.actionable_ids();
+        let page = tree.find(&plan, "img", &sel, 200);
+        assert_eq!(
+            find_names(&page),
+            vec![
+                "Photos/IMG_0001.jpg",
+                "Photos/IMG_0002.JPG",
+                "Photos/img-link",
+                "Photos/img-sets",
+                "docs/img.md",
+            ]
+        );
+        assert_eq!(page.total_matches, 5);
+        // "photos" is in two folders' names, but only changes named that match.
+        assert!(tree.find(&plan, "PHOTOS", &sel, 200).nodes.is_empty());
+        assert_eq!(
+            find_names(&tree.find(&plan, "  Notes ", &sel, 200)),
+            vec!["Photos/notes.txt"]
+        );
+        assert_eq!(
+            find_names(&tree.find(&plan, "0002", &sel, 200)),
+            vec!["Photos/IMG_0002.JPG"]
+        );
+    }
+
+    #[test]
+    fn a_blank_query_finds_nothing() {
+        let (plan, tree) = find_fixture();
+        let sel = plan.actionable_ids();
+        for q in ["", " ", "\t \n"] {
+            let page = tree.find(&plan, q, &sel, 200);
+            assert_eq!((page.nodes.len(), page.total_matches), (0, 0));
+        }
+    }
+
+    #[test]
+    fn find_caps_the_results_and_counts_every_match() {
+        let changes: Vec<Change> = (0..500)
+            .map(|i| create(&format!("d{}/f{i:03}.txt", i % 7), 1))
+            .collect();
+        let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+        let tree = PlanTree::new(&plan);
+        let sel = plan.actionable_ids();
+        let page = tree.find(&plan, "f", &sel, 200);
+        assert_eq!((page.nodes.len(), page.total_matches), (200, 500));
+        let none = tree.find(&plan, "f", &sel, 0);
+        assert_eq!((none.nodes.len(), none.total_matches), (0, 500));
+    }
+
+    #[test]
+    fn find_results_carry_the_same_tick_the_tree_shows_and_never_change_it() {
+        let (plan, tree) = find_fixture();
+        let mut sel = plan.actionable_ids();
+        tree.toggle(&plan, &rel("Photos/IMG_0002.JPG"), &mut sel);
+        let before = sel.clone();
+        let page = tree.find(&plan, "img_000", &sel, 200);
+        let ticks: Vec<(&str, Tick)> = page
+            .nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.tick))
+            .collect();
+        assert_eq!(
+            ticks,
+            vec![("IMG_0001.jpg", Tick::On), ("IMG_0002.JPG", Tick::Off)]
+        );
+        assert_eq!(sel, before, "find is a lookup: the selection is untouched");
+        // A skipped change is found, but cannot be ticked.
+        let link = tree.find(&plan, "img-link", &sel, 200);
+        assert_eq!(link.nodes[0].tick, Tick::None);
+        // A folder that is itself a change reports (and toggles) its whole subtree.
+        let dir = tree.find(&plan, "img-sets", &sel, 200).nodes.remove(0);
+        assert!(dir.is_folder);
+        assert_eq!((dir.counts.folders, dir.counts.create), (1, 1));
+    }
+
+    #[test]
+    fn ticking_a_found_file_flips_exactly_that_files_changes() {
+        let (plan, tree) = find_fixture();
+        let mut sel = plan.actionable_ids();
+        let total = sel.len();
+        let hit = tree.find(&plan, "img_0001", &sel, 200).nodes.remove(0);
+        tree.toggle(&plan, &hit.path, &mut sel);
+        assert_eq!(sel.len(), total - 1);
+        let again = tree.find(&plan, "img_0001", &sel, 200).nodes.remove(0);
+        assert_eq!(again.tick, Tick::Off);
+        tree.toggle(&plan, &again.path, &mut sel);
+        assert_eq!(sel, plan.actionable_ids());
+    }
+
+    #[test]
+    fn a_file_with_a_rename_and_an_update_is_one_result() {
+        let plan = build_plan(
+            vec![
+                Change::Move {
+                    from: rel("Top.txt"),
+                    to: rel("top.txt"),
+                    kind: MoveKind::File {
+                        size: 5,
+                        mtime_ns: 0,
+                    },
+                },
+                Change::Update {
+                    path: rel("top.txt"),
+                    size: 5,
+                    mtime_ns: 0,
+                    replica_size: 0,
+                    replica_mtime_ns: 0,
+                    replica_newer: false,
+                },
+            ],
+            CaseMode::Insensitive,
+        )
+        .unwrap();
+        let tree = PlanTree::new(&plan);
+        let page = tree.find(&plan, "TOP", &plan.actionable_ids(), 200);
+        assert_eq!((page.nodes.len(), page.total_matches), (1, 1));
+        assert_eq!(page.nodes[0].changes.len(), 2);
+    }
+
+    #[test]
+    fn find_over_200k_changes_costs_the_same_order_as_a_children_walk() {
+        let build = || {
+            let changes: Vec<Change> = (0..200_000)
+                .map(|i| create(&format!("d{:03}/f{i:06}.txt", i % 500), 1))
+                .collect();
+            let plan = build_plan(changes, CaseMode::Sensitive).unwrap();
+            let tree = PlanTree::new(&plan);
+            (plan, tree)
+        };
+        let (plan, tree) = build();
+        let sel = plan.actionable_ids();
+        // Reference: one full pass over the same rows (the root's children).
+        let walk = (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let root = tree.children(&plan, &RelPath::root(), &sel, ALL, SortOrder::Name);
+                let e = t.elapsed();
+                assert_eq!(root.nodes.len(), 500);
+                e
+            })
+            .min()
+            .unwrap();
+        // The first find builds the name index, so time that one on a fresh tree each round.
+        let first = (0..3)
+            .map(|_| {
+                let fresh = PlanTree::new(&plan);
+                let t = std::time::Instant::now();
+                let page = fresh.find(&plan, "f1999", &sel, 200);
+                let e = t.elapsed();
+                assert_eq!(page.total_matches, 100);
+                e
+            })
+            .min()
+            .unwrap();
+        // Later finds reuse the index.
+        let again = (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let page = tree.find(&plan, "f19", &sel, 200);
+                let e = t.elapsed();
+                assert_eq!((page.nodes.len(), page.total_matches), (200, 10_000));
+                e
+            })
+            .min()
+            .unwrap();
+        let _ = tree.find(&plan, "f", &sel, 1);
+        // Ratios to the walk, never an absolute time: CI machines differ.
+        assert!(first < walk * 20, "walk {walk:?}, first find {first:?}");
+        assert!(again < walk * 20, "walk {walk:?}, later find {again:?}");
     }
 }

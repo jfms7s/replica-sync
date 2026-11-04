@@ -5,6 +5,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Added
+- A "Find a file or folder by name" box above the Preview's tree finds changes past the 2,000-row cap of a folder: a case-insensitive match on the name (not the folder path), up to 200 results with "N more matches", each with its folder and its own checkbox. Find is a lookup, not a filter: ticking a result toggles only that item, and "Approve all" and the totals still cover the whole plan.
 - Each folder in the Preview can be sorted "Largest first" (a button on the folder's row and one above the tree for the top level). A folder counts its whole subtree, ties go by name. The order is applied before the 2,000-row cap, so in this order the "N more not shown" are the smallest. Ticks and totals do not change. The choice lasts for the session.
 
 ### Changed
