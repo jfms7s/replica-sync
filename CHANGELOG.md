@@ -5,7 +5,7 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 ## Unreleased
 
 ### Changed
-- An Update row in the Preview and the CLI plan now shows both sides: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. `Change::Update` carries the backup's size and modified time.
+- An Update row in the Preview now shows both sides, translated: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. The CLI plan and run log lines (English only, as before) show both as `2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB`. `Change::Update` carries the backup's size and modified time.
 
 ## 0.7.0 — 2026-11-03
 
