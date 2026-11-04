@@ -9,6 +9,7 @@ use app_state::settings::{self, Settings};
 use app_state::tree::{ChildrenPage, FindPage, SortOrder};
 use replica_sync_core::execute::{Progress, RunReport};
 use replica_sync_core::model::{RelPath, SideKind};
+use replica_sync_core::pairs::Pair;
 use replica_sync_core::reason::StopReason;
 use replica_sync_core::trash::{TrashRunContents, TrashRunInfo};
 use serde::Serialize;
@@ -134,10 +135,52 @@ pub async fn relink(
     .await
 }
 
+/// Points backup disk `replica` at another folder (its history is dropped).
 #[tauri::command]
-pub async fn start_scan(app: AppHandle, id: String) -> Res<()> {
+pub async fn relink_replica(
+    app: AppHandle,
+    id: String,
+    replica: usize,
+    folder: PathBuf,
+    allow_same_volume: bool,
+) -> Res<Pair> {
+    blocking(&app, move |st| {
+        with_session(st, |s| {
+            s.relink_replica(&id, replica, &folder, allow_same_volume, &st.volumes)
+        })
+    })
+    .await
+}
+
+/// Adds the pair's second backup disk.
+#[tauri::command]
+pub async fn add_replica(
+    app: AppHandle,
+    id: String,
+    folder: PathBuf,
+    allow_same_volume: bool,
+) -> Res<Pair> {
+    blocking(&app, move |st| {
+        with_session(st, |s| {
+            s.add_replica(&id, &folder, allow_same_volume, &st.volumes)
+        })
+    })
+    .await
+}
+
+/// Removes backup disk `replica` and its history.
+#[tauri::command]
+pub async fn remove_replica(app: AppHandle, id: String, replica: usize) -> Res<Pair> {
+    blocking(&app, move |st| {
+        with_session(st, |s| s.remove_replica(&id, replica))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn start_scan(app: AppHandle, id: String, replica: Option<usize>) -> Res<()> {
     let job = blocking(&app, move |st| {
-        with_session(st, |s| s.begin_scan(&id, &st.volumes))
+        with_session(st, |s| s.begin_scan(&id, replica, &st.volumes))
     })
     .await?;
     let done = Arc::new(AtomicBool::new(false));
@@ -327,17 +370,26 @@ pub fn stop_and_close(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
 }
 
 #[tauri::command]
-pub async fn trash_runs(app: AppHandle, id: String) -> Res<Vec<TrashRunInfo>> {
+pub async fn trash_runs(
+    app: AppHandle,
+    id: String,
+    replica: Option<usize>,
+) -> Res<Vec<TrashRunInfo>> {
     blocking(&app, move |st| {
-        with_session(st, |s| s.trash_runs(&id, &st.volumes))
+        with_session(st, |s| s.trash_runs(&id, replica, &st.volumes))
     })
     .await
 }
 
 #[tauri::command]
-pub async fn trash_contents(app: AppHandle, id: String, run: String) -> Res<TrashRunContents> {
+pub async fn trash_contents(
+    app: AppHandle,
+    id: String,
+    replica: Option<usize>,
+    run: String,
+) -> Res<TrashRunContents> {
     blocking(&app, move |st| {
-        with_session(st, |s| s.trash_contents(&id, &run, &st.volumes))
+        with_session(st, |s| s.trash_contents(&id, replica, &run, &st.volumes))
     })
     .await
 }
@@ -345,9 +397,16 @@ pub async fn trash_contents(app: AppHandle, id: String, run: String) -> Res<Tras
 /// Shows a trash run's `files` folder in the file manager (for files its
 /// manifest does not list). Takes ids only; the folder itself is never run.
 #[tauri::command]
-pub async fn open_trash_run(app: AppHandle, id: String, run: String) -> Res<()> {
+pub async fn open_trash_run(
+    app: AppHandle,
+    id: String,
+    replica: Option<usize>,
+    run: String,
+) -> Res<()> {
     let folder = blocking(&app, move |st| {
-        with_session(st, |s| s.trash_files_folder(&id, &run, &st.volumes))
+        with_session(st, |s| {
+            s.trash_files_folder(&id, replica, &run, &st.volumes)
+        })
     })
     .await?;
     open_path_raw(&app, &folder)
@@ -357,20 +416,23 @@ pub async fn open_trash_run(app: AppHandle, id: String, run: String) -> Res<()> 
 pub async fn restore(
     app: AppHandle,
     id: String,
+    replica: Option<usize>,
     run: String,
     paths: Vec<RelPath>,
     replace: bool,
 ) -> Res<usize> {
     blocking(&app, move |st| {
-        with_session(st, |s| s.restore(&id, &run, &paths, replace, &st.volumes))
+        with_session(st, |s| {
+            s.restore(&id, replica, &run, &paths, replace, &st.volumes)
+        })
     })
     .await
 }
 
 #[tauri::command]
-pub async fn empty_run(app: AppHandle, id: String, run: String) -> Res<()> {
+pub async fn empty_run(app: AppHandle, id: String, replica: Option<usize>, run: String) -> Res<()> {
     blocking(&app, move |st| {
-        with_session(st, |s| s.empty_run(&id, &run, &st.volumes))
+        with_session(st, |s| s.empty_run(&id, replica, &run, &st.volumes))
     })
     .await
 }

@@ -507,6 +507,42 @@ pub fn remove_replica(pair: &mut Pair, replica: usize) -> Result<(), PairError> 
     Ok(())
 }
 
+/// Whether the drive a side was saved on is plugged in. A drive that can't be
+/// queried counts as away; resolving it reports the error.
+pub fn side_connected(side: &Side, volumes: &dyn Volumes) -> bool {
+    volumes.find(&side.volume_id).ok().flatten().is_some()
+}
+
+/// The backup disks, the one that most needs a sync first: never synced, then
+/// the oldest `last_sync`; ties keep the order they were added in. A time that
+/// can't be read, or that lies in the future (a clock that was wrong), proves
+/// nothing and counts as never, so it can't starve its disk.
+pub fn sync_order(pair: &Pair) -> Vec<usize> {
+    let now = chrono::Utc::now();
+    let when = |r: &ReplicaSide| {
+        r.last_sync
+            .as_ref()
+            .and_then(|l| chrono::DateTime::parse_from_rfc3339(&l.at).ok())
+            .filter(|t| *t <= now)
+    };
+    let mut order: Vec<usize> = (0..pair.replicas.len()).collect();
+    order.sort_by_key(|&i| when(&pair.replicas[i]));
+    order
+}
+
+/// The backup disk a sync should go to when none was asked for: the first of
+/// [`sync_order`] that can be used now (its drive is plugged in and its backup
+/// folder is there). With none usable, the one that is due, so the error names
+/// the disk to plug in or fix.
+pub fn due_replica(pair: &Pair, volumes: &dyn Volumes) -> usize {
+    let order = sync_order(pair);
+    order
+        .iter()
+        .copied()
+        .find(|&i| resolve_side(&pair.replicas[i].side, SideKind::Replica, volumes).is_ok())
+        .unwrap_or(order[0])
+}
+
 /// The `pairs.json` format this build reads and writes.
 const STORE_VERSION: u32 = 2;
 
@@ -1413,6 +1449,75 @@ mod tests {
             STORE_0_4_AS_V2.replace(r#""user_rules""#, r#""last_scan_files": 9, "user_rules""#);
         let e = load_text(&mixed).unwrap_err();
         assert!(e.to_string().contains("pair-level"), "{e}");
+    }
+
+    #[test]
+    fn the_disk_synced_longest_ago_is_due_and_never_synced_comes_first() {
+        let (_t, v, mut p) = two_replicas();
+        assert_eq!(sync_order(&p), [0, 1], "both never synced: added order");
+        assert_eq!(due_replica(&p, &v), 0);
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-02T10:00:00+00:00");
+        assert_eq!(sync_order(&p), [1, 0], "a never-synced disk is the oldest");
+        assert_eq!(due_replica(&p, &v), 1);
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-03T10:00:00+00:00");
+        assert_eq!(sync_order(&p), [0, 1]);
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-01T10:00:00+00:00");
+        assert_eq!(due_replica(&p, &v), 1);
+    }
+
+    #[test]
+    fn due_compares_instants_not_text() {
+        let (_t, v, mut p) = two_replicas();
+        // 11:00+02:00 is 09:00Z, earlier than 10:00Z, though "11" > "10" as text.
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-02T10:00:00+00:00");
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-02T11:00:00+02:00");
+        assert_eq!(due_replica(&p, &v), 1);
+        p.replica_mut(1).unwrap().last_sync = synced("not a time");
+        assert_eq!(due_replica(&p, &v), 1, "an unreadable time counts as never");
+    }
+
+    #[test]
+    fn due_skips_a_disk_that_is_away_and_names_the_due_one_when_all_are() {
+        let (_t, v, mut p) = two_replicas();
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-01T10:00:00+00:00");
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-05T10:00:00+00:00");
+        assert_eq!(due_replica(&p, &v), 1);
+        v.0.borrow_mut().retain(|x| x.id != "C");
+        assert_eq!(due_replica(&p, &v), 0, "only B is plugged in");
+        v.0.borrow_mut().retain(|x| x.id != "B");
+        assert_eq!(due_replica(&p, &v), 1, "none plugged in: the due one");
+    }
+
+    #[test]
+    fn a_future_or_garbage_time_counts_as_never_so_it_cannot_starve_a_disk() {
+        let (_t, v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("2999-01-01T00:00:00+00:00");
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-01T10:00:00+00:00");
+        assert_eq!(
+            sync_order(&p),
+            [0, 1],
+            "the future record is as good as never"
+        );
+        assert_eq!(due_replica(&p, &v), 0);
+        p.replica_mut(0).unwrap().last_sync = synced("garbage");
+        assert_eq!(due_replica(&p, &v), 0);
+        assert!(p.replicas()[0].is_first_sync(), "so its guard fires");
+    }
+
+    #[test]
+    fn due_skips_a_disk_whose_backup_folder_is_missing() {
+        let (t, v, mut p) = two_replicas();
+        p.replica_mut(0).unwrap().last_sync = synced("2026-10-01T10:00:00+00:00");
+        p.replica_mut(1).unwrap().last_sync = synced("2026-10-05T10:00:00+00:00");
+        assert_eq!(due_replica(&p, &v), 0);
+        fs::remove_dir_all(t.path().join("diskB/Backup/Photos")).unwrap();
+        assert_eq!(due_replica(&p, &v), 1, "B is plugged in but unusable");
+        fs::remove_dir_all(t.path().join("diskC/Backup/Photos")).unwrap();
+        assert_eq!(
+            due_replica(&p, &v),
+            0,
+            "none usable: the due one, for its error"
+        );
     }
 
     #[test]
