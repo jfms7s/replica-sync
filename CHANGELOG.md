@@ -4,6 +4,10 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Changed
+- Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk.
+- **One-way store change:** the next save writes `pairs.json` as format 2 (`version: 2`, a `replicas` list). An existing store is read as before and is not touched until something is saved, but a replica-sync older than this change shows its Broken screen on a format 2 file (without overwriting it). Keep the file from before the upgrade if you may go back.
+
 ## 0.7.0 — 2026-11-03
 
 Supersedes the unpublished 0.6.0 draft (and through it 0.5.1, 0.5.0, 0.4.1 and 0.4.0) and includes all of their changes (below). Like them, not yet checked on a real Windows PC with an exFAT/FAT32 stick; the release stays a draft until the owner does.
