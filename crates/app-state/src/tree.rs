@@ -270,6 +270,8 @@ mod tests {
                     path: rel("top.txt"),
                     size: 5,
                     mtime_ns: 0,
+                    replica_size: 0,
+                    replica_mtime_ns: 0,
                     replica_newer: false,
                 },
                 Change::Skipped {
@@ -437,6 +439,8 @@ mod tests {
                     path: rel("top.txt"),
                     size: 5,
                     mtime_ns: 0,
+                    replica_size: 0,
+                    replica_mtime_ns: 0,
                     replica_newer: false,
                 },
             ],

@@ -255,10 +255,14 @@ pub enum Change {
         size: u64,
         mtime_ns: i64,
     },
+    /// `size` and `mtime_ns` are the source's (what the replica becomes);
+    /// `replica_size` and `replica_mtime_ns` are what the replica holds now.
     Update {
         path: RelPath,
         size: u64,
         mtime_ns: i64,
+        replica_size: u64,
+        replica_mtime_ns: i64,
         replica_newer: bool,
     },
     /// Replica-only file: goes to the trash.
@@ -422,6 +426,8 @@ mod tests {
             path: p,
             size: 7,
             mtime_ns: 0,
+            replica_size: 5,
+            replica_mtime_ns: 0,
             replica_newer: false,
         };
         assert_eq!(up.bytes_to_copy(), 7);

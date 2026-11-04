@@ -449,6 +449,8 @@ mod tests {
             path: rel("u"),
             size: 1,
             mtime_ns: 0,
+            replica_size: 0,
+            replica_mtime_ns: 0,
             replica_newer: false,
         };
         let out = run(vec![up.clone(), Change::MkDir { path: rel("m") }]);

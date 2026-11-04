@@ -24,6 +24,13 @@ export function formatDate(lang: Lang, iso: string): string {
   return new Intl.DateTimeFormat(lang, { dateStyle: 'medium', timeStyle: 'short' }).format(d);
 }
 
+/** A file's modified time (nanoseconds since the epoch) as a date, e.g. "12 Mar 2026". */
+export function formatDay(lang: Lang, mtimeNs: number): string {
+  const ms = mtimeNs / 1e6;
+  if (!Number.isFinite(ms)) return '—';
+  return new Intl.DateTimeFormat(lang, { dateStyle: 'medium' }).format(new Date(ms));
+}
+
 /** Trash run ids look like 2026-10-07_143200[-2]. */
 export function formatRunId(lang: Lang, id: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})/.exec(id);
