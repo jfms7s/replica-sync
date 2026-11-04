@@ -361,4 +361,112 @@ mod tests {
         assert_eq!(space_shortfall(100, 40), Some(60));
         assert_eq!(space_shortfall(100, 100), None);
     }
+
+    fn update(p: &str) -> Change {
+        Change::Update {
+            path: rel(p),
+            size: 1,
+            mtime_ns: 0,
+            replica_newer: false,
+        }
+    }
+
+    #[test]
+    fn mass_change_guard_counts_updates_and_ignores_creates_and_moves() {
+        // 4 Updates of a 6-file replica: more than half.
+        let plan = build_plan(
+            (0..4).map(|i| update(&format!("u{i}"))).collect(),
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        assert_eq!(
+            mass_change_guard(&plan, &plan.actionable_ids(), 6, false),
+            Some(GuardWarning {
+                affected: 4,
+                replica_files: 6,
+                first_sync: false,
+            })
+        );
+        // Updates and Deletes add up: 2 + 2 of 8 is exactly half, not above.
+        let mixed = build_plan(
+            vec![update("a"), update("b"), delete("c"), delete("d")],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        let all = mixed.actionable_ids();
+        assert_eq!(mass_change_guard(&mixed, &all, 8, false), None);
+        assert!(mass_change_guard(&mixed, &all, 7, false).is_some());
+        // Creates and Moves replace nothing.
+        let benign = build_plan(
+            vec![
+                create("a", 1),
+                create("b", 1),
+                create("c", 1),
+                Change::Move {
+                    from: rel("x"),
+                    to: rel("y"),
+                    kind: MoveKind::File {
+                        size: 1,
+                        mtime_ns: 0,
+                    },
+                },
+            ],
+            CaseMode::Sensitive,
+        )
+        .unwrap();
+        assert_eq!(
+            mass_change_guard(&benign, &benign.actionable_ids(), 1, true),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_is_empty_only_when_every_change_is_skipped() {
+        let skipped = Change::Skipped {
+            path: rel("s"),
+            reason: crate::reason::SkipReason::Link,
+        };
+        let none = build_plan(vec![], CaseMode::Sensitive).unwrap();
+        assert!(none.is_empty());
+        let only_skipped = build_plan(vec![skipped.clone()], CaseMode::Sensitive).unwrap();
+        assert!(only_skipped.is_empty());
+        for actionable in [
+            create("a", 1),
+            delete("a"),
+            update("a"),
+            Change::MkDir { path: rel("a") },
+            Change::RmDir { path: rel("a") },
+        ] {
+            let plan = build_plan(vec![skipped.clone(), actionable], CaseMode::Sensitive).unwrap();
+            assert!(!plan.is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_targets_are_detected_for_moves_and_mkdirs_too() {
+        let mv = |from: &str, to: &str| Change::Move {
+            from: rel(from),
+            to: rel(to),
+            kind: MoveKind::File {
+                size: 1,
+                mtime_ns: 0,
+            },
+        };
+        let mkdir = |p: &str| Change::MkDir { path: rel(p) };
+        let dup = |changes: Vec<Change>, case, name: &str| match build_plan(changes, case) {
+            Err(PlanError::DuplicateTarget(p)) => assert_eq!(p.as_str(), name),
+            other => panic!("expected DuplicateTarget({name}), got {other:?}"),
+        };
+        dup(vec![mv("a", "t"), mv("b", "t")], CaseMode::Sensitive, "t");
+        dup(vec![mkdir("d"), mkdir("d")], CaseMode::Sensitive, "d");
+        // Across kinds: a Move onto a path a Create writes, a MkDir onto a Move.
+        dup(vec![mv("a", "t"), create("t", 1)], CaseMode::Sensitive, "t");
+        dup(vec![mv("a", "t"), mkdir("t")], CaseMode::Sensitive, "t");
+        // Case-insensitive: capitals do not make a second target.
+        dup(vec![mkdir("D"), mkdir("d")], CaseMode::Insensitive, "d");
+        dup(vec![mv("a", "T"), mv("b", "t")], CaseMode::Insensitive, "t");
+        assert!(build_plan(vec![mkdir("D"), mkdir("d")], CaseMode::Sensitive).is_ok());
+        // A Move's source is not a target.
+        assert!(build_plan(vec![mv("a", "b"), delete("a")], CaseMode::Sensitive).is_ok());
+    }
 }
