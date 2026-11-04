@@ -34,6 +34,10 @@ label { display: flex; flex-direction: column; gap: 4px; }
 .badge.move { background: var(--move-bg); color: var(--move); }
 .badge.delete, .badge.rmDir { background: var(--delete-bg); color: var(--delete); }
 .badge.skipped { background: var(--line); color: var(--muted); }
+.find { display: flex; flex-direction: column; gap: 6px; }
+.find-results { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow: auto; font-size: 13px; }
+.find-results li { padding: 2px 4px; }
+.tree-tools { display: flex; justify-content: flex-end; }
 .tree { flex: 1; overflow: auto; font-size: 13px; }
 /* A fixed height (ROW_HEIGHT in Tree.tsx): the tree draws only the rows in view. */
 .tree [role="treeitem"] { display: flex; gap: 6px; align-items: center; height: 24px; padding: 0 4px; border-radius: 4px; white-space: nowrap; overflow: hidden; }

@@ -88,17 +88,41 @@ pub fn stop_text(r: &StopReason) -> String {
     }
 }
 
+/// A date as `2026-03-12` in the given zone.
+fn day<Tz: chrono::TimeZone>(mtime_ns: i64, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    chrono::DateTime::from_timestamp_nanos(mtime_ns)
+        .with_timezone(tz)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// One line for a change, with dates in the machine's local time zone.
 pub fn describe(c: &Change) -> String {
+    describe_in(c, &chrono::Local)
+}
+
+fn describe_in<Tz: chrono::TimeZone>(c: &Change, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     match c {
         Change::Create { path, size, .. } => format!("create   {path} ({})", human_bytes(*size)),
         Change::Update {
             path,
             size,
+            mtime_ns,
+            replica_size,
+            replica_mtime_ns,
             replica_newer,
-            ..
         } => {
             format!(
-                "update   {path} ({}){}",
+                "update   {path} ({} -> {}, {} -> {}){}",
+                day(*replica_mtime_ns, tz),
+                day(*mtime_ns, tz),
+                human_bytes(*replica_size),
                 human_bytes(*size),
                 if *replica_newer {
                     " [replica is newer]"
@@ -351,6 +375,39 @@ mod tests {
     }
 
     #[test]
+    fn an_update_line_shows_the_replica_then_the_source_date_and_size() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let day_ns = |d: &str| {
+            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_nanos_opt()
+                .unwrap()
+        };
+        let mut c = Change::Update {
+            path: rel("a.bin"),
+            size: 93_184,
+            mtime_ns: day_ns("2026-10-04"),
+            replica_size: 90_112,
+            replica_mtime_ns: day_ns("2026-03-12"),
+            replica_newer: false,
+        };
+        assert_eq!(
+            describe_in(&c, &tz),
+            "update   a.bin (2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB)"
+        );
+        if let Change::Update { replica_newer, .. } = &mut c {
+            *replica_newer = true;
+        }
+        assert_eq!(
+            describe_in(&c, &tz),
+            "update   a.bin (2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB) [replica is newer]"
+        );
+    }
+
+    #[test]
     fn a_case_only_folder_rename_is_a_plain_move_line() {
         let c = Change::Move {
             from: rel("Photos"),
@@ -474,18 +531,22 @@ mod tests {
                     path: p.clone(),
                     size: 2,
                     mtime_ns: 0,
+                    replica_size: 2,
+                    replica_mtime_ns: 0,
                     replica_newer: false,
                 },
-                "update   a/b.txt (2 B)",
+                "update   a/b.txt (1970-01-01 -> 1970-01-01, 2 B -> 2 B)",
             ),
             (
                 Change::Update {
                     path: p.clone(),
                     size: 2,
                     mtime_ns: 0,
+                    replica_size: 2,
+                    replica_mtime_ns: 0,
                     replica_newer: true,
                 },
-                "update   a/b.txt (2 B) [replica is newer]",
+                "update   a/b.txt (1970-01-01 -> 1970-01-01, 2 B -> 2 B) [replica is newer]",
             ),
             (
                 Change::Delete {
@@ -525,7 +586,7 @@ mod tests {
             ),
         ];
         for (change, line) in lines {
-            assert_eq!(describe(&change), line);
+            assert_eq!(describe_in(&change, &chrono::Utc), line);
         }
     }
 

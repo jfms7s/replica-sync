@@ -4,8 +4,13 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ## Unreleased
 
+### Added
+- A "Find a file or folder by name" box above the Preview's tree finds changes past the 2,000-row cap of a folder: a case-insensitive match on the name (not the folder path), up to 200 results with "N more matches", each with its folder, its counts if it is a folder, and its own checkbox. Find is a lookup, not a filter: ticking a file result ticks that file, ticking a folder result ticks everything inside it (as the folder's checkbox in the tree does), and "Approve all" and the totals still cover the whole plan. Folders that only hold changes (a new `Trips/` with photos) are found too.
+- Each folder in the Preview can be sorted "Largest first" (a button on the folder's row and one above the tree for the top level). A folder counts its whole subtree, ties go by name. The order is applied before the 2,000-row cap, so in this order the "N more not shown" are the smallest. Ticks and totals do not change. The choice lasts for the session. With the keyboard, press S on an open folder's row.
+
 ### Changed
 - App state: a pair's backup disks are chosen per scan. Sync goes to the plugged-in disk, and with both plugged in to the one synced longest ago (a never-synced disk counts as the oldest); the Preview data names the target and both disks so the other can be picked. A sync records only its own disk's last sync and scan size, and the Trash follows the disk it was asked for. New commands add, remove and relink a disk; the screens for them come next. The one-way store change below applies.
+- An Update row in the Preview now shows both sides, translated: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. The CLI plan and run log lines (English only, as before) show both as `2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB`. `Change::Update` carries the backup's size and modified time.
 - Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Re-linking the source resets the history of every disk, so each takes the first-sync wrong-folder check again.
 - **One-way store change:** an existing `pairs.json` is read as before and loading never writes it. But any save writes it as format 2 (`version: 2`, a `replicas` list): editing a pair, finishing a sync, and also recording the scan size after a Preview. A replica-sync older than this change shows its Broken screen on a format 2 file (it does not overwrite it). Keep a copy of the file from before the upgrade if you may go back.
 
