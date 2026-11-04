@@ -4,12 +4,11 @@ use crate::AppState;
 use app_state::error::AppError;
 use app_state::paths::AppPaths;
 use app_state::progress::{JobDone, ScanProgressView, Throttle, should_emit};
-use app_state::session::{ApplyJob, PairInput, PairView, PreviewSummary, Session};
+use app_state::session::{ApplyJob, PairInput, PairJson, PairView, PreviewSummary, Session};
 use app_state::settings::{self, Settings};
 use app_state::tree::{ChildrenPage, FindPage, SortOrder};
 use replica_sync_core::execute::{Progress, RunReport};
 use replica_sync_core::model::{RelPath, SideKind};
-use replica_sync_core::pairs::Pair;
 use replica_sync_core::reason::StopReason;
 use replica_sync_core::trash::{TrashRunContents, TrashRunInfo};
 use serde::Serialize;
@@ -104,9 +103,11 @@ pub async fn list_pairs(app: AppHandle) -> Res<Vec<PairView>> {
 }
 
 #[tauri::command]
-pub async fn save_pair(app: AppHandle, input: PairInput) -> Res<Pair> {
+pub async fn save_pair(app: AppHandle, input: PairInput) -> Res<PairJson> {
     blocking(&app, |st| {
-        with_session(st, |s| s.save_pair(input, &st.volumes))
+        with_session(st, |s| {
+            s.save_pair(input, &st.volumes).map(|p| PairJson::from(&p))
+        })
     })
     .await
 }
@@ -123,10 +124,11 @@ pub async fn relink(
     side: SideKind,
     folder: PathBuf,
     allow_same_volume: bool,
-) -> Res<Pair> {
+) -> Res<PairJson> {
     blocking(&app, move |st| {
         with_session(st, |s| {
             s.relink(&id, side, &folder, allow_same_volume, &st.volumes)
+                .map(|p| PairJson::from(&p))
         })
     })
     .await

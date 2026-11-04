@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "pairs": [
+    {
+      "id": "17f3a9c2b1d04e55",
+      "name": "Photos",
+      "source": {
+        "volume_id": "uuid:5b8e2d1c-3f4a-4c6b-9d7e-1a2b3c4d5e6f",
+        "rel_path": "Users/me/Photos",
+        "label": "Data"
+      },
+      "replica": {
+        "volume_id": "win:00000000a1b2c3d4",
+        "rel_path": "Backup/Photos",
+        "label": "BACKUP A"
+      },
+      "user_rules": [
+        "*.tmp",
+        "Thumbs.db"
+      ],
+      "trash_days": 30,
+      "last_sync": {
+        "at": "2026-10-07T18:22:41Z",
+        "applied": 412,
+        "failed": 1,
+        "stopped": true
+      },
+      "last_scan_files": 18230
+    },
+    {
+      "id": "17f3a9c2b1d04e56",
+      "name": "Documents (never synced)",
+      "source": {
+        "volume_id": "uuid:5b8e2d1c-3f4a-4c6b-9d7e-1a2b3c4d5e6f",
+        "rel_path": "Users/me/Documents",
+        "label": "Data"
+      },
+      "replica": {
+        "volume_id": "win:00000000a1b2c3d4",
+        "rel_path": "",
+        "label": "BACKUP A"
+      },
+      "user_rules": [],
+      "trash_days": 7,
+      "last_sync": null,
+      "last_scan_files": null
+    }
+  ]
+}

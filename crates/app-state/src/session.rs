@@ -11,7 +11,9 @@ use replica_sync_core::execute::{
 };
 use replica_sync_core::model::CaseMode;
 use replica_sync_core::model::{RelPath, SideKind};
-use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, ResolveError, Resolved};
+use replica_sync_core::pairs::{
+    self, LastSync, NewPair, Pair, PairStore, ReplicaSide, ResolveError, Resolved,
+};
 use replica_sync_core::plan::{
     ChangeId, GuardWarning, Totals, mass_change_guard, selected_totals, space_shortfall,
 };
@@ -39,9 +41,48 @@ pub const FIND_LIMIT_MAX: usize = 1000;
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairView {
-    pub pair: Pair,
+    pub pair: PairJson,
     pub source_connected: bool,
     pub replica_connected: bool,
+}
+
+/// A pair as the UI reads it: one backup disk, its history on the pair. The
+/// store holds a list of disks (see [`Pair`]); until the UI shows more than
+/// the first, this is the shape it was written against.
+#[derive(Clone, Debug, Serialize)]
+pub struct PairJson {
+    pub id: String,
+    pub name: String,
+    pub source: pairs::Side,
+    pub replica: pairs::Side,
+    pub user_rules: Vec<String>,
+    pub trash_days: u32,
+    pub last_sync: Option<LastSync>,
+    pub last_scan_files: Option<u64>,
+}
+
+impl From<&Pair> for PairJson {
+    fn from(p: &Pair) -> PairJson {
+        let r = first_replica(p);
+        PairJson {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            source: p.source.clone(),
+            replica: r.side.clone(),
+            user_rules: p.user_rules.clone(),
+            trash_days: p.trash_days,
+            last_sync: r.last_sync.clone(),
+            last_scan_files: r.last_scan_files,
+        }
+    }
+}
+
+/// The backup disk every command works on until the connected one is chosen
+/// per scan.
+const FIRST_REPLICA: usize = 0;
+
+fn first_replica(pair: &Pair) -> &ReplicaSide {
+    &pair.replicas()[FIRST_REPLICA]
 }
 
 /// From the pair editor. `source`/`replica` are `None` when editing and the
@@ -94,6 +135,8 @@ pub struct RunView {
 
 struct Current {
     pair_id: String,
+    /// Index of the backup disk this preview is for.
+    replica: usize,
     resolved: Resolved,
     prepared: Arc<Prepared>,
     tree: PlanTree,
@@ -112,6 +155,7 @@ struct Current {
 
 pub struct ScanJob {
     pair_id: String,
+    replica: usize,
     resolved: Resolved,
     rules: SkipRules,
     case: CaseMode,
@@ -134,6 +178,8 @@ impl ScanJob {
 
 pub struct ApplyJob {
     pair_id: String,
+    /// Index of the backup disk this run writes to.
+    replica_index: usize,
     prepared: Arc<Prepared>,
     approved: HashSet<ChangeId>,
     source_root: PathBuf,
@@ -164,7 +210,7 @@ impl ApplyJob {
                     StopReason::SourceDisconnected,
                 ),
                 (
-                    pairs::verify_replica(&self.pair, &self.resolved, volumes),
+                    pairs::verify_replica(&self.pair, self.replica_index, &self.resolved, volumes),
                     StopReason::ReplicaDisconnected,
                 ),
             ];
@@ -285,9 +331,9 @@ impl Session {
             .pairs
             .iter()
             .map(|p| PairView {
-                pair: p.clone(),
+                pair: p.into(),
                 source_connected: connected(&p.source, volumes),
-                replica_connected: connected(&p.replica, volumes),
+                replica_connected: connected(&first_replica(p).side, volumes),
             })
             .collect()
     }
@@ -322,15 +368,15 @@ impl Session {
                 // new replica in the second step, not against the old one here.
                 if let Some(folder) = &input.source {
                     let allow = input.allow_same_volume || input.replica.is_some();
-                    pairs::relink(&mut pair, SideKind::Source, folder, allow, volumes)?;
+                    pairs::relink_source(&mut pair, folder, allow, volumes)?;
                 }
                 if let Some(folder) = &input.replica {
                     let allow = input.allow_same_volume;
-                    pairs::relink(&mut pair, SideKind::Replica, folder, allow, volumes)?;
+                    pairs::relink_replica(&mut pair, FIRST_REPLICA, folder, allow, volumes)?;
                 }
                 let moved = input.source.is_some() || input.replica.is_some();
                 if moved
-                    && pair.source.volume_id == pair.replica.volume_id
+                    && pair.source.volume_id == first_replica(&pair).side.volume_id
                     && !input.allow_same_volume
                 {
                     return Err(AppError::new("pair.sameVolume"));
@@ -371,7 +417,14 @@ impl Session {
     ) -> Result<Pair, AppError> {
         self.ensure_idle()?;
         let mut pair = self.pair(id)?.clone();
-        pairs::relink(&mut pair, side, folder, allow_same_volume, volumes)?;
+        match side {
+            SideKind::Source => {
+                pairs::relink_source(&mut pair, folder, allow_same_volume, volumes)?
+            }
+            SideKind::Replica => {
+                pairs::relink_replica(&mut pair, FIRST_REPLICA, folder, allow_same_volume, volumes)?
+            }
+        }
         self.store.upsert(pair.clone());
         self.store.save()?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
@@ -383,7 +436,8 @@ impl Session {
     pub fn begin_scan(&mut self, id: &str, volumes: &dyn Volumes) -> Result<ScanJob, AppError> {
         self.ensure_idle()?;
         let pair = self.pair(id)?.clone();
-        let resolved = pairs::resolve(&pair, volumes)?;
+        let replica = FIRST_REPLICA;
+        let resolved = pairs::resolve(&pair, replica, volumes)?;
         let rules = pair.rules()?;
         // Before the case probe, which writes into the replica.
         check_roots(&resolved.source_root, &resolved.replica_root)?;
@@ -392,13 +446,15 @@ impl Session {
         let counters = Arc::new(SessionCounters::default());
         self.scan_counters = Some(counters.clone());
         self.scanning = true;
+        let approx_files = pair.replica(replica).and_then(|r| r.last_scan_files);
         Ok(ScanJob {
             pair_id: pair.id,
+            replica,
             resolved,
             rules,
             case,
             counters,
-            approx_files: pair.last_scan_files,
+            approx_files,
         })
     }
 
@@ -435,8 +491,11 @@ impl Session {
             .iter_mut()
             .find(|p| p.id == job.pair_id)
             .ok_or_else(|| AppError::new("pair.notFound").with("id", &job.pair_id))?;
-        let first_sync = pair.is_first_sync();
-        pair.last_scan_files = Some(prepared.source.files);
+        let disk = pair
+            .replica_mut(job.replica)
+            .ok_or_else(|| AppError::new("pair.replicaNotFound").with("index", job.replica))?;
+        let first_sync = disk.is_first_sync();
+        disk.last_scan_files = Some(prepared.source.files);
         if let Err(e) = self.store.save() {
             warnings.push(e.into());
         }
@@ -445,6 +504,7 @@ impl Session {
         let selection = prepared.plan.actionable_ids();
         self.current = Some(Current {
             pair_id: job.pair_id,
+            replica: job.replica,
             resolved: job.resolved,
             prepared: Arc::new(prepared),
             tree,
@@ -616,7 +676,7 @@ impl Session {
     fn verify_drives(&self, volumes: &dyn Volumes) -> Result<(), AppError> {
         let c = self.current()?;
         let pair = self.pair(&c.pair_id)?;
-        let now = pairs::resolve(pair, volumes)?;
+        let now = pairs::resolve(pair, c.replica, volumes)?;
         // Name the side that moved; the replica when both did.
         let moved = if now.replica_root != c.resolved.replica_root {
             Some(&now.replica_root)
@@ -629,7 +689,7 @@ impl Session {
             return Err(AppError::new("drive.wrongVolume").with("path", root.display()));
         }
         pairs::verify_source(pair, &c.resolved, volumes)?;
-        pairs::verify_replica(pair, &c.resolved, volumes)?;
+        pairs::verify_replica(pair, c.replica, &c.resolved, volumes)?;
         Ok(())
     }
 
@@ -640,6 +700,7 @@ impl Session {
         let control = Arc::new(Control::default());
         let job = ApplyJob {
             pair_id: c.pair_id.clone(),
+            replica_index: c.replica,
             prepared: c.prepared.clone(),
             approved,
             source_root: c.resolved.source_root.clone(),
@@ -695,8 +756,14 @@ impl Session {
         if let Err(e) = runlog::prune(&logs, runlog::LOG_RETENTION, SystemTime::now()) {
             warnings.push(e.into());
         }
-        if let Some(p) = self.store.pairs.iter_mut().find(|p| p.id == pair_id) {
-            p.last_sync = Some(LastSync {
+        let disk = self
+            .store
+            .pairs
+            .iter_mut()
+            .find(|p| p.id == pair_id)
+            .and_then(|p| p.replica_mut(job.replica_index));
+        if let Some(disk) = disk {
+            disk.last_sync = Some(LastSync {
                 at: chrono::Local::now().to_rfc3339(),
                 applied: report.applied(),
                 failed: report.failed(),
@@ -741,7 +808,11 @@ impl Session {
     }
 
     fn replica_of(&self, id: &str, volumes: &dyn Volumes) -> Result<PathBuf, AppError> {
-        Ok(pairs::resolve_replica(self.pair(id)?, volumes)?)
+        Ok(pairs::resolve_replica(
+            self.pair(id)?,
+            FIRST_REPLICA,
+            volumes,
+        )?)
     }
 
     pub fn trash_runs(
@@ -1170,6 +1241,103 @@ mod tests {
         assert_eq!(fs::read(data.join("pairs.json")).unwrap(), b"{ damaged");
     }
 
+    /// A store as v0.2.0 wrote it (see the core crate's `pairs_store` tests).
+    const STORE_V0_2_0: &str = include_str!("../../core/tests/fixtures/pairs-v0.2.0.json");
+
+    #[test]
+    fn a_store_from_a_newer_format_is_unreadable_and_never_overwritten() {
+        // A format this build does not know: the same path an older build
+        // takes for the format-2 file this one writes.
+        let text = STORE_V0_2_0.replace(r#""version": 1"#, r#""version": 3"#);
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("pairs.json"), &text).unwrap();
+        let err = Session::open(AppPaths::new(data.clone())).err().unwrap();
+        assert_eq!(err.code, "store.unreadable");
+        assert_eq!(fs::read_to_string(data.join("pairs.json")).unwrap(), text);
+        let names: Vec<_> = fs::read_dir(&data).unwrap().collect();
+        assert_eq!(names.len(), 1, "nothing was written next to it");
+    }
+
+    #[test]
+    fn loading_never_writes_but_a_scan_saves_the_store_as_format_2() {
+        let w = world();
+        let data = w.t.path().join("data");
+        let file = data.join("pairs.json");
+        // The store as a format-1 build left it.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let pair = &mut json["pairs"][0];
+        let disk = pair["replicas"][0].clone();
+        pair["replica"] = disk["side"].clone();
+        pair["last_sync"] = disk["last_sync"].clone();
+        pair["last_scan_files"] = disk["last_scan_files"].clone();
+        pair.as_object_mut().unwrap().remove("replicas");
+        json["version"] = 1.into();
+        let old = serde_json::to_string_pretty(&json).unwrap();
+        fs::write(&file, &old).unwrap();
+
+        let mut s = Session::open(AppPaths::new(data)).unwrap();
+        let id = s.pair_views(&w.v)[0].pair.id.clone();
+        assert_eq!(fs::read_to_string(&file).unwrap(), old, "load alone");
+        // Recording the scan size after a Preview is a save.
+        write(&w.src(), "a.txt", b"a");
+        let job = s.begin_scan(&id, &w.v).unwrap();
+        let r = job.run();
+        s.finish_scan(job, r, &w.v).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(after["version"], 2);
+        assert_eq!(after["pairs"][0]["replicas"][0]["last_scan_files"], 1);
+    }
+
+    #[test]
+    fn a_v0_2_0_store_opens_untouched_and_the_first_save_makes_it_format_2() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let file = data.join("pairs.json");
+        fs::write(&file, STORE_V0_2_0).unwrap();
+        let v = FakeVolumes::default();
+        let mut s = Session::open(AppPaths::new(data)).unwrap();
+        let views = s.pair_views(&v);
+        assert_eq!(views.len(), 2);
+        let photos = &views[0].pair;
+        assert_eq!(photos.replica.label, "BACKUP A");
+        assert_eq!(photos.last_sync.as_ref().unwrap().applied, 412);
+        assert_eq!(photos.last_scan_files, Some(18230));
+        assert!(views[1].pair.last_sync.is_none());
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            STORE_V0_2_0,
+            "opening never writes"
+        );
+
+        let input = PairInput {
+            id: Some(photos.id.clone()),
+            name: "Photos renamed".into(),
+            source: None,
+            replica: None,
+            user_rules: photos.user_rules.clone(),
+            trash_days: photos.trash_days,
+            allow_same_volume: false,
+        };
+        s.save_pair(input, &v).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["pairs"][0]["name"], "Photos renamed");
+        assert_eq!(
+            saved["pairs"][0]["replicas"][0]["last_sync"]["applied"],
+            412
+        );
+        assert_eq!(
+            saved["pairs"][1]["replicas"][0]["last_sync"],
+            serde_json::Value::Null
+        );
+    }
+
     #[test]
     fn retry_needs_a_failed_change_and_apply_needs_a_plan() {
         let mut w = world();
@@ -1201,7 +1369,12 @@ mod tests {
             "pair.sameVolume"
         );
         input.allow_same_volume = true;
-        assert_eq!(w.s.save_pair(input, &w.v).unwrap().replica.volume_id, "A");
+        assert_eq!(
+            w.s.save_pair(input, &w.v).unwrap().replicas()[0]
+                .side
+                .volume_id,
+            "A"
+        );
     }
 
     #[test]
@@ -1220,7 +1393,10 @@ mod tests {
         };
         let p = w.s.save_pair(input, &w.v).unwrap();
         assert_eq!(
-            (p.source.volume_id.as_str(), p.replica.volume_id.as_str()),
+            (
+                p.source.volume_id.as_str(),
+                p.replicas()[0].side.volume_id.as_str()
+            ),
             ("B", "A")
         );
     }
@@ -1242,11 +1418,14 @@ mod tests {
         };
         let p = w.s.save_pair(input.clone(), &w.v).unwrap();
         assert_eq!(p.name, "Renamed");
-        assert!(p.last_sync.is_some());
+        assert!(p.replicas()[0].last_sync.is_some());
         fs::create_dir_all(w.t.path().join("diskB/Other")).unwrap();
         input.replica = Some(w.t.path().join("diskB/Other"));
         let p = w.s.save_pair(input, &w.v).unwrap();
-        assert!(p.last_sync.is_none(), "a new backup folder is a first sync");
+        assert!(
+            p.replicas()[0].last_sync.is_none(),
+            "a new backup folder is a first sync"
+        );
     }
 
     #[test]
@@ -1453,6 +1632,7 @@ mod tests {
     fn clone_job(j: &ScanJob) -> ScanJob {
         ScanJob {
             pair_id: j.pair_id.clone(),
+            replica: j.replica,
             resolved: j.resolved.clone(),
             rules: j.rules.clone(),
             case: j.case,

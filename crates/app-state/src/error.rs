@@ -43,6 +43,9 @@ pub const ERROR_CODES: &[&str] = &[
     "pair.sameFolder",
     "pair.nested",
     "pair.sameVolume",
+    "pair.tooManyReplicas",
+    "pair.lastReplica",
+    "pair.replicaNotFound",
     "pair.badRule",
     "pair.notFound",
     "pair.foldersRequired",
@@ -95,6 +98,9 @@ impl From<PairError> for AppError {
             PairError::SameFolder => AppError::new("pair.sameFolder"),
             PairError::Nested => AppError::new("pair.nested"),
             PairError::SameVolume => AppError::new("pair.sameVolume"),
+            PairError::TooManyReplicas => AppError::new("pair.tooManyReplicas"),
+            PairError::LastReplica => AppError::new("pair.lastReplica"),
+            PairError::NoSuchReplica(i) => AppError::new("pair.replicaNotFound").with("index", i),
             PairError::Rule(r) => r.into(),
             PairError::Io(e) => e.into(),
         }
@@ -112,6 +118,9 @@ impl From<ResolveError> for AppError {
             }
             ResolveError::WrongVolume(p) => {
                 AppError::new("drive.wrongVolume").with("path", p.display())
+            }
+            ResolveError::NoSuchReplica(i) => {
+                AppError::new("pair.replicaNotFound").with("index", i)
             }
             ResolveError::Io(e) => e.into(),
         }
@@ -169,6 +178,10 @@ mod tests {
             PairError::SameFolder.into(),
             PairError::Nested.into(),
             PairError::SameVolume.into(),
+            PairError::TooManyReplicas.into(),
+            PairError::LastReplica.into(),
+            PairError::NoSuchReplica(2).into(),
+            ResolveError::NoSuchReplica(2).into(),
             PairError::Rule(RuleError {
                 pattern: "[".into(),
                 message: "bad".into(),

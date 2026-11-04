@@ -10,6 +10,8 @@ Notable changes to replica-sync. Releases are built from `v*` tags into draft Gi
 
 ### Changed
 - An Update row in the Preview now shows both sides, translated: "source is newer: Mar 12, 2026 → Oct 4, 2026, 88.0 KB → 91.0 KB" (backup first, then source), as the design promised. The CLI plan and run log lines (English only, as before) show both as `2026-03-12 -> 2026-10-04, 88.0 KB -> 91.0 KB`. `Change::Update` carries the backup's size and modified time.
+- Core: a pair now keeps a list of backup disks (one or two) in `pairs.json`, each with its own last sync and scan size, so the first-sync guard is per disk. Nothing changes on screen yet: the app still works on a pair's first backup disk. Re-linking the source resets the history of every disk, so each takes the first-sync wrong-folder check again.
+- **One-way store change:** an existing `pairs.json` is read as before and loading never writes it. But any save writes it as format 2 (`version: 2`, a `replicas` list): editing a pair, finishing a sync, and also recording the scan size after a Preview. A replica-sync older than this change shows its Broken screen on a format 2 file (it does not overwrite it). Keep a copy of the file from before the upgrade if you may go back.
 
 ## 0.7.0 — 2026-11-03
 
