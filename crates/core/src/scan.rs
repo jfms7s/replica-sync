@@ -393,7 +393,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unreadable_folder_is_a_problem_and_scan_continues() {
-        use std::os::unix::fs::PermissionsExt;
         // SAFETY: geteuid has no preconditions.
         let euid = unsafe { libc::geteuid() };
         assert!(euid != 0, "permission tests must not run as root");
@@ -401,10 +400,8 @@ mod tests {
         write_file(d.path(), "locked/a.txt", b"1", T0);
         write_file(d.path(), "ok.txt", b"1", T0);
         let locked = d.path().join("locked");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let s = scan(d.path(), &no_rules(), &ScanCounters::default());
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let s = s.unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o000);
+        let s = scan(d.path(), &no_rules(), &ScanCounters::default()).unwrap();
         assert_eq!(s.problems.len(), 1);
         assert_eq!(s.problems[0].rel.as_str(), "locked");
         assert!(s.entries.iter().any(|e| e.rel.as_str() == "ok.txt"));

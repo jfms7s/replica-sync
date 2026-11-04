@@ -24,6 +24,11 @@ fn full_sync_mirrors_and_second_scan_is_empty() {
     assert_eq!(files(&r, true), files(&s, true));
     assert!(prepare_with(&s, &r, &[]).plan.changes.is_empty());
     let run = report.trash_run.unwrap();
+    // The replaced file went to the trash with its old bytes, not the new ones.
+    let kept = trash::files_dir(&r, &run).unwrap();
+    assert_eq!(fs::read(kept.join("Docs/budget.xlsx")).unwrap(), b"v1");
+    assert_eq!(fs::read(kept.join("Temp/old.txt")).unwrap(), b"bye");
+    assert_eq!(fs::read(r.join("Docs/budget.xlsx")).unwrap(), b"v2");
     let c = trash::run_contents(&r, &run).unwrap();
     let mut trashed: Vec<_> = c.items.iter().map(|i| i.path.to_string()).collect();
     trashed.sort();
@@ -153,30 +158,72 @@ fn long_paths_sync() {
 #[cfg(unix)]
 #[test]
 fn read_only_source_syncs_without_writing_to_it() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::MetadataExt;
     let (_d, s, r) = dirs();
     write_file(&s, "a/b.txt", b"1", T0);
+    write_file(&s, "c.txt", b"22", T0 + 5);
     write_file(&r, "gone.txt", b"1", T0);
-    let set = |mode| {
-        for p in [s.join("a/b.txt"), s.join("a"), s.clone()] {
-            fs::set_permissions(
-                &p,
-                fs::Permissions::from_mode(if p.is_dir() { mode | 0o111 } else { mode }),
-            )
-            .unwrap();
+    // Everything about the source that a write would change: names, bytes,
+    // modes, sizes, modified times and inodes (a replaced file gets a new one).
+    let fingerprint = || {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![s.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                let md = fs::symlink_metadata(&p).unwrap();
+                let bytes = if md.is_dir() {
+                    stack.push(p.clone());
+                    Vec::new()
+                } else {
+                    fs::read(&p).unwrap()
+                };
+                out.insert(
+                    p.strip_prefix(&s).unwrap().to_owned(),
+                    (
+                        md.mode(),
+                        md.len(),
+                        md.mtime(),
+                        md.mtime_nsec(),
+                        md.ino(),
+                        bytes,
+                    ),
+                );
+            }
         }
+        out
     };
-    set(0o444);
+    let guards: Vec<_> = [s.join("a/b.txt"), s.join("c.txt"), s.join("a"), s.clone()]
+        .iter()
+        .map(|p| ModeGuard::set(p, if p.is_dir() { 0o555 } else { 0o444 }))
+        .collect();
+    let before = fingerprint();
+    let root_before = fs::metadata(&s).unwrap();
+    assert_eq!(before.len(), 3);
     let (_, report) = sync_all(&s, &r);
-    set(0o644);
     assert_eq!(report.failed(), 0, "{:?}", report.results);
+    assert_eq!(fingerprint(), before, "the sync changed the source");
+    let root_after = fs::metadata(&s).unwrap();
+    assert_eq!(
+        (
+            root_after.mode(),
+            root_after.mtime(),
+            root_after.mtime_nsec()
+        ),
+        (
+            root_before.mode(),
+            root_before.mtime(),
+            root_before.mtime_nsec()
+        )
+    );
+    drop(guards);
     assert_eq!(files(&r, true), files(&s, true));
+    assert!(!s.join(trash::TRASH_DIR).exists());
 }
 
 #[cfg(unix)]
 #[test]
 fn unreadable_source_folder_keeps_replica() {
-    use std::os::unix::fs::PermissionsExt;
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
     assert!(euid != 0, "permission tests must not run as root");
@@ -184,9 +231,8 @@ fn unreadable_source_folder_keeps_replica() {
     write_file(&s, "Docs/a.txt", b"1", T0);
     write_file(&r, "Docs/a.txt", b"1", T0);
     write_file(&r, "Docs/only-on-replica.txt", b"precious", T0);
-    fs::set_permissions(s.join("Docs"), fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = ModeGuard::set(&s.join("Docs"), 0o000);
     let (p, report) = sync_all(&s, &r);
-    fs::set_permissions(s.join("Docs"), fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
         p.plan
             .changes

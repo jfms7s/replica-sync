@@ -2486,14 +2486,12 @@ mod apply_tests {
     #[cfg(unix)]
     #[test]
     fn delete_fails_on_unexpected_source_error() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "d/x.txt", b"1", T0);
         write_file(&f.rep, "d/x.txt", b"1", T0);
         let hidden = f.src.join("d");
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&hidden, 0o000);
         if fs::symlink_metadata(hidden.join("x.txt")).is_ok() {
-            fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let plan = crate::plan::build_plan(
@@ -2512,14 +2510,12 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(report.results[0].outcome, Outcome::Failed(_)));
         assert!(f.rep.join("d/x.txt").exists());
     }
     #[cfg(unix)]
     #[test]
     fn a_move_whose_source_is_unreadable_fails_and_can_be_retried() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "new/a.jpg", b"aaaa", T0);
         write_file(&f.src, "old/keep.txt", b"k", T0);
@@ -2532,9 +2528,8 @@ mod apply_tests {
                 .any(|p| matches!(p.change, Change::Move { .. }))
         );
         let locked = f.src.join("new");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o000);
         if fs::metadata(locked.join("a.jpg")).is_ok() {
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
@@ -2544,7 +2539,6 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let move_id = plan
             .changes
             .iter()
@@ -2922,7 +2916,6 @@ mod apply_tests {
     #[cfg(unix)]
     #[test]
     fn read_only_replica_folder_fails_with_permission_denied_and_continues() {
-        use std::os::unix::fs::PermissionsExt;
         let f = fixture();
         write_file(&f.src, "locked/a.txt", b"a", T0);
         write_file(&f.src, "open/b.txt", b"b", T0);
@@ -2930,10 +2923,9 @@ mod apply_tests {
         fs::create_dir_all(f.rep.join("open")).unwrap();
         let plan = plan_for(&f.src, &f.rep);
         let locked = f.rep.join("locked");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o555);
         if fs::write(locked.join("probe"), b"").is_ok() {
             fs::remove_file(locked.join("probe")).unwrap();
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             panic!("permission tests must not run as root (permissions are not enforced)");
         }
         let report = run_with(
@@ -2943,7 +2935,6 @@ mod apply_tests {
             &Control::default(),
             &mut |_| {},
         );
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let outcome = |p: &str| {
             report
                 .results

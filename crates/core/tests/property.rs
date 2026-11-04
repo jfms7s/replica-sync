@@ -6,7 +6,6 @@ use replica_sync_core::execute::{Control, Progress};
 use replica_sync_core::model::{CaseMode, Change};
 use replica_sync_core::plan::ChangeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs;
 use std::path::Path;
 
 const NAMES: &[&str] = &["a", "b", "c"];
@@ -296,7 +295,6 @@ proptest! {
         let again = prepare_with(&s, &r, &[]);
         prop_assert!(again.plan.changes.is_empty(), "{:?}", again.plan.changes);
         assert_nothing_lost(&r, before)?;
-        let _ = fs::remove_dir_all(&s);
     }
 
     /// Mixed-case names on a replica treated as case-insensitive (as on

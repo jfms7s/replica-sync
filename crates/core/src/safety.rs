@@ -173,15 +173,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unreadable_ancestor_is_an_io_error() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let locked = d.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = crate::testutil::ModeGuard::set(&locked, 0o000);
         let root_user = std::fs::read_dir(&locked).is_ok(); // root searches any folder
         let r = ReplicaRoot::new(d.path()).unwrap();
         let got = r.target(&rel("locked/sub/x.txt"));
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         if root_user {
             return;
         }
