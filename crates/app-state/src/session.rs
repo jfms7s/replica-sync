@@ -422,8 +422,9 @@ impl Session {
                 pair
             }
         };
+        let before = self.store.pairs.clone();
         self.store.upsert(pair.clone());
-        self.store.save()?;
+        self.save_or_roll_back(before)?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
             self.current = None; // the preview no longer matches the pair
         }
@@ -432,10 +433,11 @@ impl Session {
 
     pub fn delete_pair(&mut self, id: &str) -> Result<(), AppError> {
         self.ensure_idle()?;
+        let before = self.store.pairs.clone();
         if !self.store.remove(id) {
             return Err(AppError::new("pair.notFound").with("id", id));
         }
-        self.store.save()?;
+        self.save_or_roll_back(before)?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == id) {
             self.current = None;
         }
@@ -493,6 +495,16 @@ impl Session {
 
     /// Changes a copy of the pair, then stores it and drops a preview that no
     /// longer matches it.
+    /// Writes the store; if that fails, puts the pairs back as they were, so
+    /// the failed change isn't saved later by some other save.
+    fn save_or_roll_back(&mut self, before: Vec<Pair>) -> Result<(), AppError> {
+        if let Err(e) = self.store.save() {
+            self.store.pairs = before;
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     fn edit_pair(
         &mut self,
         id: &str,
@@ -501,8 +513,9 @@ impl Session {
         self.ensure_idle()?;
         let mut pair = self.pair(id)?.clone();
         edit(&mut pair)?;
+        let before = self.store.pairs.clone();
         self.store.upsert(pair.clone());
-        self.store.save()?;
+        self.save_or_roll_back(before)?;
         if self.current.as_ref().is_some_and(|c| c.pair_id == pair.id) {
             self.current = None; // the preview no longer matches the pair
         }
@@ -1256,6 +1269,46 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_leaves_the_store_as_it_was_for_a_later_save() {
+        let mut w = rotating_world();
+        let before = w.s.pair(&w.id).unwrap().clone();
+        // A directory where the temp file goes makes every save fail.
+        let blocker = w.t.path().join("data/pairs.json.tmp");
+        fs::create_dir_all(&blocker).unwrap();
+        assert_eq!(w.s.remove_replica(&w.id, 0).err().unwrap().code, "io");
+        let other = w.t.path().join("diskB/Other");
+        fs::create_dir_all(&other).unwrap();
+        assert_eq!(
+            w.s.relink_replica(&w.id, 1, &other, false, &w.v)
+                .err()
+                .unwrap()
+                .code,
+            "io"
+        );
+        let rename = PairInput {
+            id: Some(w.id.clone()),
+            name: "Renamed".into(),
+            source: None,
+            replica: None,
+            user_rules: vec![],
+            trash_days: 30,
+            allow_same_volume: false,
+        };
+        assert_eq!(w.s.save_pair(rename, &w.v).err().unwrap().code, "io");
+        assert_eq!(w.s.delete_pair(&w.id).err().unwrap().code, "io");
+        assert_eq!(w.s.pair(&w.id).unwrap(), &before, "memory matches the file");
+        // Once saving works, nothing of the failed edits is written.
+        fs::remove_dir_all(&blocker).unwrap();
+        write(&w.src(), "a.txt", b"a");
+        w.scan_disk(Some(0));
+        let again = Session::open(AppPaths::new(w.t.path().join("data"))).unwrap();
+        let stored = again.pair(&w.id).unwrap();
+        assert_eq!(stored.replicas().len(), 2);
+        assert_eq!(stored.name, "Photos");
+        assert_eq!(stored.replicas()[1].side.label, "Disk C");
+    }
+
+    #[test]
     fn editing_the_disks_waits_for_a_running_job() {
         let mut w = rotating_world();
         write(&w.src(), "a.txt", b"a");
@@ -1538,7 +1591,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), old, "load alone");
         // Recording the scan size after a Preview is a save.
         write(&w.src(), "a.txt", b"a");
-        let job = s.begin_scan(&id, &w.v).unwrap();
+        let job = s.begin_scan(&id, None, &w.v).unwrap();
         let r = job.run();
         s.finish_scan(job, r, &w.v).unwrap();
         let after: serde_json::Value =
