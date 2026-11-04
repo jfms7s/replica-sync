@@ -11,11 +11,21 @@ export interface AppError { code: string; params: Record<string, string> }
 
 export interface Side { volume_id: string; rel_path: string; label: string }
 export interface LastSync { at: string; applied: number; failed: number; stopped: boolean }
+/** One backup disk of a pair, with its own sync history (core type, snake_case). */
+export interface ReplicaSide { side: Side; last_sync: LastSync | null; last_scan_files: number | null }
+/** A pair has one or two backup disks, "Disk A" and "Disk B" in the order they were added. */
 export interface Pair {
-  id: string; name: string; source: Side; replica: Side; user_rules: string[];
-  trash_days: number; last_sync: LastSync | null; last_scan_files: number | null;
+  id: string; name: string; source: Side; replicas: ReplicaSide[]; user_rules: string[]; trash_days: number;
 }
-export interface PairView { pair: Pair; sourceConnected: boolean; replicaConnected: boolean }
+/** A backup disk as the cards and the Preview show it. `connected` is false for a disk that is away, which is normal. */
+export interface ReplicaView {
+  index: number; side: Side; connected: boolean; lastSync: LastSync | null; lastScanFiles: number | null;
+}
+export interface PairView {
+  pair: Pair; sourceConnected: boolean; replicas: ReplicaView[];
+  /** The disk a sync goes to unless the other is picked: the connected one synced longest ago. */
+  dueReplica: number;
+}
 export interface PairInput {
   id: string | null; name: string; source: string | null; replica: string | null;
   userRules: string[]; trashDays: number; allowSameVolume: boolean;
@@ -64,6 +74,10 @@ export interface PreviewSummary {
   pairId: string; pairName: string; totals: Totals; selected: Totals; selectedCount: number; actionableCount: number;
   isEmpty: boolean; guard: GuardWarning | null; guardConfirmed: boolean; shortfall: number | null;
   source: ScanStats; replica: ScanStats;
+  /** Which of `disks` this preview, and so Apply, is for. */
+  replicaIndex: number;
+  /** The pair's backup disks when the scan began. */
+  disks: ReplicaView[];
   /** Problems during the scan that did not stop it (store not saved, free space unknown). */
   warnings: AppError[];
 }
@@ -95,7 +109,7 @@ export interface ChangeResult { id: number; path: RelPath; outcome: Outcome }
 export interface SpotCheck { checked: number; mismatched: number; cancelled: boolean }
 export interface RunReport { results: ChangeResult[]; stopped: StopReason | null; trash_run: string | null; spot_check: SpotCheck | null }
 export interface RunView {
-  pairId: string; trashDays: number; report: RunReport; notDone: number; logPath: string | null; oldTrashRuns: string[]; warnings: AppError[];
+  pairId: string; replicaIndex: number; trashDays: number; report: RunReport; notDone: number; logPath: string | null; oldTrashRuns: string[]; warnings: AppError[];
 }
 export interface JobDone<T> { ok: T | null; error: AppError | null }
 
@@ -113,7 +127,13 @@ export const api = {
   deletePair: (id: string) => invoke<void>('delete_pair', { id }),
   relink: (id: string, side: SideKind, folder: string, allowSameVolume = false) =>
     invoke<Pair>('relink', { id, side, folder, allowSameVolume }),
-  startScan: (id: string) => invoke<void>('start_scan', { id }),
+  /** Backup disk number `replica`, or the due one when omitted. */
+  relinkReplica: (id: string, replica: number, folder: string, allowSameVolume = false) =>
+    invoke<Pair>('relink_replica', { id, replica, folder, allowSameVolume }),
+  addReplica: (id: string, folder: string, allowSameVolume = false) =>
+    invoke<Pair>('add_replica', { id, folder, allowSameVolume }),
+  removeReplica: (id: string, replica: number) => invoke<Pair>('remove_replica', { id, replica }),
+  startScan: (id: string, replica?: number) => invoke<void>('start_scan', { id, replica }),
   cancelScan: () => invoke<void>('cancel_scan'),
   previewSummary: () => invoke<PreviewSummary>('preview_summary'),
   treeFind: (query: string, limit: number) => invoke<FindPage>('tree_find', { query, limit }),
@@ -129,13 +149,16 @@ export const api = {
   resume: () => invoke<void>('resume'),
   cancel: () => invoke<void>('cancel'),
   stopAndClose: () => invoke<void>('stop_and_close'),
-  trashRuns: (id: string) => invoke<TrashRunInfo[]>('trash_runs', { id }),
-  trashContents: (id: string, run: string) => invoke<TrashRunContents>('trash_contents', { id, run }),
+  // The trash is kept on each backup disk: `replica` names the one (the first plugged-in one when omitted).
+  trashRuns: (id: string, replica?: number) => invoke<TrashRunInfo[]>('trash_runs', { id, replica }),
+  trashContents: (id: string, replica: number | undefined, run: string) =>
+    invoke<TrashRunContents>('trash_contents', { id, replica, run }),
   /** Shows the run's `files` folder in the file manager. */
-  openTrashRun: (id: string, run: string) => invoke<void>('open_trash_run', { id, run }),
-  restore: (id: string, run: string, paths: RelPath[], replace: boolean) =>
-    invoke<number>('restore', { id, run, paths, replace }),
-  emptyRun: (id: string, run: string) => invoke<void>('empty_run', { id, run }),
+  openTrashRun: (id: string, replica: number | undefined, run: string) =>
+    invoke<void>('open_trash_run', { id, replica, run }),
+  restore: (id: string, replica: number | undefined, run: string, paths: RelPath[], replace: boolean) =>
+    invoke<number>('restore', { id, replica, run, paths, replace }),
+  emptyRun: (id: string, replica: number | undefined, run: string) => invoke<void>('empty_run', { id, replica, run }),
   openLogsFolder: () => invoke<void>('open_logs_folder'),
   openDataFolder: () => invoke<void>('open_data_folder'),
   openPath: (path: string) => invoke<void>('open_path', { path }),

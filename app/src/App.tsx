@@ -15,11 +15,13 @@ import Trash from './screens/Trash';
 export type Screen =
   | { name: 'pairs' }
   | { name: 'editor'; pair: PairView | null }
-  | { name: 'scanning'; pairId: string; pairName: string }
+  /** `replica`: the backup disk to scan against; omitted, the due one. */
+  | { name: 'scanning'; pairId: string; pairName: string; replica?: number }
   | { name: 'preview'; summary: PreviewSummary }
   | { name: 'applying'; mode: 'apply' | 'retry'; pairName: string }
   | { name: 'result'; run: RunView; pairName: string }
-  | { name: 'trash'; pairId: string; pairName: string; back?: Screen }
+  /** `replica`: whose trash; `diskName` is shown in the title when the pair has two disks. */
+  | { name: 'trash'; pairId: string; pairName: string; replica?: number; diskName?: string; back?: Screen }
   | { name: 'settings' };
 export type Navigate = (s: Screen) => void;
 
@@ -61,7 +63,7 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
     case 'settings':
       return <Settings navigate={navigate} onLanguage={onLanguage} />;
     case 'scanning':
-      return <Scanning pairId={screen.pairId} pairName={screen.pairName} navigate={navigate} />;
+      return <Scanning pairId={screen.pairId} pairName={screen.pairName} replica={screen.replica} navigate={navigate} />;
     case 'preview':
       return <Preview summary={screen.summary} navigate={navigate} />;
     case 'applying':
@@ -69,6 +71,6 @@ function Current({ screen, navigate, onLanguage }: { screen: Screen; navigate: N
     case 'result':
       return <Result run={screen.run} pairName={screen.pairName} navigate={navigate} />;
     case 'trash':
-      return <Trash pairId={screen.pairId} pairName={screen.pairName} back={screen.back} navigate={navigate} />;
+      return <Trash pairId={screen.pairId} pairName={screen.pairName} replica={screen.replica} diskName={screen.diskName} back={screen.back} navigate={navigate} />;
   }
 }

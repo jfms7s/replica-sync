@@ -22,7 +22,7 @@ describe('Scanning', () => {
   it('listens before starting, shows progress, then goes to the preview', async () => {
     const navigate = vi.fn();
     render(<I18nProvider lang="en"><Scanning pairId="p1" pairName="Photos" navigate={navigate} /></I18nProvider>);
-    await vi.waitFor(() => expect(api.startScan).toHaveBeenCalledWith('p1'));
+    await vi.waitFor(() => expect(api.startScan).toHaveBeenCalledWith('p1', undefined));
     expect(handlers['scan-done']).toBeDefined(); // registered before startScan resolved
     act(() => handlers['scan-progress']({
       source: { files: 1200, bytes: 2048, current: 'Photos/2026' },
@@ -32,6 +32,11 @@ describe('Scanning', () => {
     const summary = { pairId: 'p1' };
     act(() => handlers['scan-done']({ ok: summary, error: null }));
     expect(navigate).toHaveBeenCalledWith({ name: 'preview', summary });
+  });
+
+  it('scans against the backup disk it was given', async () => {
+    render(<I18nProvider lang="en"><Scanning pairId="p1" pairName="Photos" replica={1} navigate={vi.fn()} /></I18nProvider>);
+    await vi.waitFor(() => expect(api.startScan).toHaveBeenCalledWith('p1', 1));
   });
 
   it('shows a translated error with Edit pair for nested folders', async () => {

@@ -11,9 +11,7 @@ use replica_sync_core::execute::{
 };
 use replica_sync_core::model::CaseMode;
 use replica_sync_core::model::{RelPath, SideKind};
-use replica_sync_core::pairs::{
-    self, LastSync, NewPair, Pair, PairStore, ReplicaSide, ResolveError, Resolved,
-};
+use replica_sync_core::pairs::{self, LastSync, NewPair, Pair, PairStore, ResolveError, Resolved};
 use replica_sync_core::plan::{
     ChangeId, GuardWarning, Totals, mass_change_guard, selected_totals, space_shortfall,
 };
@@ -41,9 +39,8 @@ pub const FIND_LIMIT_MAX: usize = 1000;
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairView {
-    pub pair: PairJson,
+    pub pair: Pair,
     pub source_connected: bool,
-    pub replica_connected: bool,
     /// Every backup disk with its own state, in the pair's order.
     pub replicas: Vec<ReplicaView>,
     /// The disk a sync goes to unless the user picks the other: the connected
@@ -78,44 +75,9 @@ fn replica_views(pair: &Pair, volumes: &dyn Volumes) -> Vec<ReplicaView> {
         .collect()
 }
 
-/// A pair as the UI reads it: one backup disk, its history on the pair. The
-/// store holds a list of disks (see [`Pair`]); until the UI shows more than
-/// the first, this is the shape it was written against.
-#[derive(Clone, Debug, Serialize)]
-pub struct PairJson {
-    pub id: String,
-    pub name: String,
-    pub source: pairs::Side,
-    pub replica: pairs::Side,
-    pub user_rules: Vec<String>,
-    pub trash_days: u32,
-    pub last_sync: Option<LastSync>,
-    pub last_scan_files: Option<u64>,
-}
-
-impl From<&Pair> for PairJson {
-    fn from(p: &Pair) -> PairJson {
-        let r = first_replica(p);
-        PairJson {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            source: p.source.clone(),
-            replica: r.side.clone(),
-            user_rules: p.user_rules.clone(),
-            trash_days: p.trash_days,
-            last_sync: r.last_sync.clone(),
-            last_scan_files: r.last_scan_files,
-        }
-    }
-}
-
-/// The backup disk the editor's single "backup folder" field and the old
-/// `relink` command mean.
+/// The backup disk the editor's first "backup folder" field and the plain
+/// `relink` command mean; the others have their own commands.
 const FIRST_REPLICA: usize = 0;
-
-fn first_replica(pair: &Pair) -> &ReplicaSide {
-    &pair.replicas()[FIRST_REPLICA]
-}
 
 /// From the pair editor. `source`/`replica` are `None` when editing and the
 /// folder is unchanged.
@@ -161,6 +123,8 @@ pub struct PreviewSummary {
 #[serde(rename_all = "camelCase")]
 pub struct RunView {
     pub pair_id: String,
+    /// The backup disk the run wrote to, for "Sync again" and its trash.
+    pub replica_index: usize,
     pub trash_days: u32,
     pub report: RunReport,
     /// Approved changes the run never reached (it stopped first).
@@ -367,9 +331,8 @@ impl Session {
             .pairs
             .iter()
             .map(|p| PairView {
-                pair: p.into(),
+                pair: p.clone(),
                 source_connected: pairs::side_connected(&p.source, volumes),
-                replica_connected: pairs::side_connected(&first_replica(p).side, volumes),
                 replicas: replica_views(p, volumes),
                 due_replica: pairs::due_replica(p, volumes),
             })
@@ -903,6 +866,7 @@ impl Session {
         let not_done = job.approved.len().saturating_sub(report.results.len());
         Ok(RunView {
             pair_id,
+            replica_index: job.replica_index,
             trash_days,
             not_done,
             report,
@@ -1089,7 +1053,7 @@ mod tests {
             let r = job.run();
             self.s.finish_scan(job, r, &self.v).unwrap()
         }
-        fn disk(&self, i: usize) -> ReplicaSide {
+        fn disk(&self, i: usize) -> pairs::ReplicaSide {
             self.s.pair(&self.id).unwrap().replicas()[i].clone()
         }
         fn set_last_sync(&mut self, i: usize, at: &str) {
@@ -1113,7 +1077,7 @@ mod tests {
         let s = w.scan_disk(None);
         assert_eq!(s.replica_index, 1, "the only disk that is plugged in");
         w.s.confirm_guard().ok();
-        w.apply();
+        assert_eq!(w.apply().replica_index, 1);
         assert!(w.rep_c().join("a.txt").exists());
         assert!(!w.rep().join("a.txt").exists());
         assert!(w.disk(1).last_sync.is_some());
@@ -1522,7 +1486,7 @@ mod tests {
         assert_eq!(run.report.applied(), 2);
         assert!(w.rep().join("b/c.txt").exists());
         assert!(run.log_path.as_ref().is_some_and(|p| p.exists()));
-        assert!(w.s.pair_views(&w.v)[0].pair.last_sync.is_some());
+        assert!(w.s.pair_views(&w.v)[0].replicas[0].last_sync.is_some());
         assert!(w.scan().is_empty);
     }
 
@@ -1751,10 +1715,11 @@ mod tests {
         let views = s.pair_views(&v);
         assert_eq!(views.len(), 2);
         let photos = &views[0].pair;
-        assert_eq!(photos.replica.label, "BACKUP A");
-        assert_eq!(photos.last_sync.as_ref().unwrap().applied, 412);
-        assert_eq!(photos.last_scan_files, Some(18230));
-        assert!(views[1].pair.last_sync.is_none());
+        let disk = &views[0].replicas[0];
+        assert_eq!(disk.side.label, "BACKUP A");
+        assert_eq!(disk.last_sync.as_ref().unwrap().applied, 412);
+        assert_eq!(disk.last_scan_files, Some(18230));
+        assert!(views[1].replicas[0].last_sync.is_none());
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             STORE_V0_2_0,
@@ -2214,7 +2179,10 @@ mod tests {
         let run = w.s.finish_apply(job, report).unwrap();
         assert!(run.report.stopped.is_some());
         assert_eq!(run.not_done, 2);
-        let last = w.s.pair_views(&w.v)[0].pair.last_sync.clone().unwrap();
+        let last = w.s.pair_views(&w.v)[0].replicas[0]
+            .last_sync
+            .clone()
+            .unwrap();
         assert!(last.stopped);
         let v = serde_json::to_value(&run).unwrap();
         assert_eq!(v["notDone"], 2);
@@ -2228,8 +2196,7 @@ mod tests {
         let run = w.apply();
         assert_eq!(run.not_done, 0);
         assert!(
-            !w.s.pair_views(&w.v)[0]
-                .pair
+            !w.s.pair_views(&w.v)[0].replicas[0]
                 .last_sync
                 .as_ref()
                 .unwrap()

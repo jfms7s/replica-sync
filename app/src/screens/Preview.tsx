@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Navigate } from '../App';
 import { api, pickSaveFile, type PreviewSummary } from '../api';
 import Modal from '../components/Modal';
+import { diskName } from '../disks';
 import { formatBytes, formatCount } from '../format';
 import { useT } from '../i18n';
 import { errorText } from '../reasons';
@@ -33,6 +34,9 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
     return () => { alive = false; };
   }, []);
 
+  // With two backup disks the header says which one Apply writes to, and offers the other.
+  const target = s.disks.length > 1 ? s.disks[s.replicaIndex] : undefined;
+  const otherDisk = target && s.disks.find((d) => d.index !== target.index);
   const guardOpen = s.guard !== null && !s.guardConfirmed;
   const canApply = !guardOpen && s.shortfall === null && s.selectedCount > 0;
   const run = (f: () => Promise<PreviewSummary>) => f().then((next) => { update(next); setRefreshToken((n) => n + 1); }).catch((e) => setMessage(errorText(tx, lang, e)));
@@ -59,6 +63,16 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
           })}
         </span>
       </header>
+      {target && otherDisk && (
+        <p className="panel row spread">
+          <strong>{t('preview.target', { disk: diskName(t, target.index), label: target.side.label })}</strong>
+          {otherDisk.connected ? (
+            <button onClick={() => navigate({ name: 'scanning', pairId: s.pairId, pairName: s.pairName, replica: otherDisk.index })}>
+              {t('preview.switchDisk', { disk: diskName(t, otherDisk.index) })}
+            </button>
+          ) : <span className="muted">{t('preview.otherAway', { disk: diskName(t, otherDisk.index) })}</span>}
+        </p>
+      )}
       {s.warnings.map((w, i) => <p key={i} className="warn">{t('result.warning', { text: errorText(tx, lang, w) })}</p>)}
       {s.isEmpty ? (
         <>
@@ -78,7 +92,11 @@ export default function Preview({ summary: initial, navigate }: { summary: Previ
             <p className="warn">
               {t('preview.shortfall', { bytes: formatBytes(lang, s.shortfall) })}{' '}
               <button className="link"
-                onClick={() => navigate({ name: 'trash', pairId: s.pairId, pairName: s.pairName, back: { name: 'preview', summary: s } })}>
+                onClick={() => navigate({
+                  name: 'trash', pairId: s.pairId, pairName: s.pairName, replica: s.replicaIndex,
+                  diskName: target && t('trash.disk', { disk: diskName(t, target.index), label: target.side.label }),
+                  back: { name: 'preview', summary: s },
+                })}>
                 {t('preview.openTrash')}
               </button>
             </p>
