@@ -126,3 +126,32 @@ pub fn junction(link: &Path, target: &Path) {
         target.display()
     );
 }
+
+/// Sets `path` to `mode` and puts its previous mode back on drop, so a failed
+/// assertion in a permission test can't leave an unreadable temp dir behind
+/// (`tempfile` could not clean it up).
+#[cfg(unix)]
+pub struct ModeGuard {
+    path: std::path::PathBuf,
+    previous: std::fs::Permissions,
+}
+
+#[cfg(unix)]
+impl ModeGuard {
+    pub fn set(path: &Path, mode: u32) -> ModeGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let previous = fs::metadata(path).unwrap().permissions();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        ModeGuard {
+            path: path.to_path_buf(),
+            previous,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.previous.clone());
+    }
+}

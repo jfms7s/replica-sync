@@ -270,4 +270,79 @@ mod tests {
             f.disk
         );
     }
+
+    /// A second device mounted on the same point as the USB disk (an
+    /// over-mount): `<tmp>/dev/sdc1`, uuid `2222-BBBB`.
+    fn second_device(f: &Fake) -> String {
+        let t = f._dir.path();
+        fs::write(t.join("dev/sdc1"), "").unwrap();
+        symlink(t.join("dev/sdc1"), t.join("by-uuid/2222-BBBB")).unwrap();
+        format!(
+            "92 22 8:33 / {}/media/My\\040Disk rw - ext4 {}/sdc1 rw",
+            t.display(),
+            t.join("dev").display()
+        )
+    }
+
+    #[test]
+    fn the_later_of_two_mounts_on_one_point_wins() {
+        let f = fake("");
+        let over = second_device(&f);
+        let original = fs::read_to_string(&f.vols.mountinfo).unwrap();
+        let photos = f.disk.join("Photos");
+
+        fs::write(&f.vols.mountinfo, format!("{original}{over}\n")).unwrap();
+        assert_eq!(f.vols.volume_of(&photos).unwrap().id, "uuid:2222-BBBB");
+        assert_eq!(
+            f.vols.find("uuid:2222-BBBB").unwrap().unwrap().mount_root,
+            f.disk
+        );
+
+        // The order in the file decides, not the device or the id.
+        let lines: Vec<&str> = original.lines().collect();
+        fs::write(
+            &f.vols.mountinfo,
+            format!("{}\n{over}\n{}\n", lines[0], lines[1]),
+        )
+        .unwrap();
+        assert_eq!(f.vols.volume_of(&photos).unwrap().id, "uuid:1111-AAAA");
+    }
+
+    #[test]
+    fn without_a_label_link_the_label_is_the_mount_point_name() {
+        let f = fake("");
+        fs::remove_file(f._dir.path().join("by-label/My\\x20Disk")).unwrap();
+        let v = f.vols.volume_of(&f.disk).unwrap();
+        assert_eq!(v.id, "uuid:1111-AAAA");
+        assert_eq!(v.label, "My Disk");
+        // The root mount has no name to fall back on.
+        let v = f.vols.volume_of(f._dir.path()).unwrap();
+        assert_eq!(v.id, "uuid:aaaa-root");
+        assert_eq!(v.label, "/");
+    }
+
+    #[test]
+    fn a_mount_without_a_uuid_link_cannot_be_identified() {
+        let f = fake("");
+        fs::remove_file(f._dir.path().join("by-uuid/1111-AAAA")).unwrap();
+        let err = f.vols.volume_of(&f.disk).unwrap_err();
+        assert!(err.to_string().contains("cannot identify"), "{err}");
+        assert!(f.vols.find("uuid:1111-AAAA").unwrap().is_none());
+    }
+
+    #[test]
+    fn unescape_udev_decodes_hex_escapes_and_leaves_bad_ones_alone() {
+        assert_eq!(unescape_udev("My\\x20Disk"), "My Disk");
+        assert_eq!(unescape_udev("\\x41\\x42c"), "ABc");
+        assert_eq!(unescape_udev("caf\\xc3\\xa9"), "caf\u{e9}");
+        assert_eq!(unescape_udev("plain"), "plain");
+        assert_eq!(unescape_udev(""), "");
+        // Not valid hex, too short, a lone backslash, octal instead of hex.
+        assert_eq!(unescape_udev("a\\xZZb"), "a\\xZZb");
+        assert_eq!(unescape_udev("a\\x2"), "a\\x2");
+        assert_eq!(unescape_udev("a\\"), "a\\");
+        assert_eq!(unescape_udev("a\\040b"), "a\\040b");
+        // Bytes that are not UTF-8 become the replacement character.
+        assert_eq!(unescape_udev("\\xff"), "\u{fffd}");
+    }
 }
